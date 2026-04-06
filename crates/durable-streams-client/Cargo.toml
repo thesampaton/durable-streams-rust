@@ -1,0 +1,11 @@
+[package]
+name = "durable-streams-client"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+publish = false
+description = "Rust Durable Streams client crate scaffold."
+readme = "../../README.md"
+
+[lints]
+workspace = true

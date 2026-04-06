@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/durable-streams-client",
+    "crates/durable-streams-server",
+]
+default-members = [
+    "crates/durable-streams-client",
+    "crates/durable-streams-server",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[workspace.metadata.durable-streams]
+protocol_document = "https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md"
+protocol_revision = "f091f315e4c3ca6769b45135ab8b5f53d70b1751"
+protocol_version = "1.0-draft"
+client_conformance_package = "@durable-streams/client-conformance-tests"
+client_conformance_version = "0.2.3"
+server_conformance_package = "@durable-streams/server-conformance-tests"
+server_conformance_version = "0.2.3"

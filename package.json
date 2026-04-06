@@ -1,0 +1,16 @@
+{
+  "name": "durable-streams-rust-conformance-harness",
+  "private": true,
+  "description": "Pinned upstream Durable Streams conformance tooling for the Rust workspace.",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "conformance:client": "./scripts/conformance/run-client-suite.sh",
+    "conformance:server": "./scripts/conformance/run-server-suite.sh"
+  },
+  "devDependencies": {
+    "@durable-streams/client-conformance-tests": "0.2.3",
+    "@durable-streams/server-conformance-tests": "0.2.3"
+  }
+}
