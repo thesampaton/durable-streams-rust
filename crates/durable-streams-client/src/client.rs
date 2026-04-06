@@ -353,25 +353,26 @@ impl Client {
             let response = self
                 .read_http(path, &current_request, Some("long-poll"))
                 .await?;
+            let next_offset_for_cursor = response.next_offset.clone();
             match &mut aggregate {
                 Some(collected) => {
                     collected.status = response.status;
-                    collected.next_offset = response.next_offset.clone();
+                    collected.next_offset = response.next_offset;
                     collected.up_to_date = response.up_to_date;
                     collected.stream_closed = response.stream_closed;
-                    collected.cursor = response.cursor.clone();
+                    collected.cursor = response.cursor;
                     if response.content_type.is_some() {
-                        collected.content_type = response.content_type.clone();
+                        collected.content_type = response.content_type;
                     }
                     if response.etag.is_some() {
-                        collected.etag = response.etag.clone();
+                        collected.etag = response.etag;
                     }
-                    collected.chunks.extend(response.chunks.clone());
+                    collected.chunks.extend(response.chunks);
                     if collected.payload.is_none() {
-                        collected.payload = response.payload.clone();
+                        collected.payload = response.payload;
                     }
                 }
-                None => aggregate = Some(response.clone()),
+                None => aggregate = Some(response),
             }
 
             let done = aggregate.as_ref().is_some_and(|collected| {
@@ -383,7 +384,7 @@ impl Client {
                 return Ok(aggregate.expect("aggregate exists"));
             }
 
-            current_request.offset = Some(response.next_offset);
+            current_request.offset = Some(next_offset_for_cursor);
         }
     }
 

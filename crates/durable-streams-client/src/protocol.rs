@@ -31,10 +31,7 @@ pub(crate) fn header_value(response: &Response, name: &str) -> Option<String> {
 }
 
 pub(crate) fn parse_bool_header(response: &Response, name: &str) -> bool {
-    response
-        .headers()
-        .get(name)
-        .and_then(|value| value.to_str().ok())
+    header_value(response, name)
         .is_some_and(|value| value.eq_ignore_ascii_case("true") || value.is_empty())
 }
 
@@ -108,10 +105,16 @@ pub(crate) fn build_http_error_from_parts(
 
 pub(crate) async fn response_error(response: Response) -> HttpError {
     let status = response.status();
-    let headers = response
-        .headers()
+    let relevant_headers = [
+        STREAM_CLOSED, STREAM_NEXT_OFFSET, STREAM_CURSOR,
+        PRODUCER_EPOCH, PRODUCER_SEQ, PRODUCER_EXPECTED_SEQ, PRODUCER_RECEIVED_SEQ,
+    ];
+    let headers = relevant_headers
         .iter()
-        .filter_map(|(name, value)| Some((name.as_str().to_string(), value.to_str().ok()?.to_string())))
+        .filter_map(|&name| {
+            let value = response.headers().get(name)?.to_str().ok()?;
+            Some((name.to_string(), value.to_string()))
+        })
         .collect::<HashMap<_, _>>();
     let body = response.text().await.unwrap_or_else(|_| status.to_string());
     build_http_error_from_parts(status, headers, body)
@@ -245,7 +248,7 @@ pub(crate) async fn collect_catch_up(response: Response) -> Result<ReadResponse,
             Vec::new()
         } else {
             vec![ReadChunk {
-                data: Bytes::from(serde_json::to_vec(&values)?),
+                data: bytes,
                 next_offset: next_offset.clone(),
             }]
         };

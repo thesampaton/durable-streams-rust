@@ -160,7 +160,6 @@ impl IdempotentProducer {
         state: &mut ProducerState,
         body: Vec<u8>,
     ) -> Result<crate::model::AppendResponse, Error> {
-        let body = body;
         let mut retried = false;
 
         loop {
@@ -197,7 +196,6 @@ impl IdempotentProducer {
         state: &mut ProducerState,
         body: Option<Vec<u8>>,
     ) -> Result<crate::model::CloseStreamResponse, Error> {
-        let body = body;
         let mut retried = false;
 
         loop {
