@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cat >&2 <<'EOF'
-Client conformance adapter is not implemented yet.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
-Implement this script once the Rust client exists so it can satisfy the
-contract expected by @durable-streams/client-conformance-tests.
-EOF
-
-exit 1
+cd "$repo_root"
+exec cargo run --quiet -p durable-streams-client --bin client-conformance-adapter -- "$@"
