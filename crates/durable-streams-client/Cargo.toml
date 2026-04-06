@@ -19,6 +19,7 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["macros", "rt", "sync", "time"] }
 toml = "0.9.7"
+tracing = "0.1.41"
 url = { version = "2.5.7", features = ["serde"] }
 
 [dev-dependencies]

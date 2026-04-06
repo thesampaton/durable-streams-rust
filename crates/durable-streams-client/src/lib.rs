@@ -71,6 +71,7 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod idempotent;
+mod instrumentation;
 pub mod model;
 mod protocol;
 pub mod retry;

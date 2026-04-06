@@ -1,12 +1,12 @@
 use crate::error::{Error, ErrorKind, HttpError};
 use crate::model::{ReadChunk, ReadPayload, ReadResponse, SubscriptionEvent};
+use base64::Engine;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, ETAG};
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
 use std::collections::HashMap;
-use base64::Engine;
 
 pub(crate) const STREAM_TTL: &str = "stream-ttl";
 pub(crate) const STREAM_EXPIRES_AT: &str = "stream-expires-at";
@@ -106,8 +106,13 @@ pub(crate) fn build_http_error_from_parts(
 pub(crate) async fn response_error(response: Response) -> HttpError {
     let status = response.status();
     let relevant_headers = [
-        STREAM_CLOSED, STREAM_NEXT_OFFSET, STREAM_CURSOR,
-        PRODUCER_EPOCH, PRODUCER_SEQ, PRODUCER_EXPECTED_SEQ, PRODUCER_RECEIVED_SEQ,
+        STREAM_CLOSED,
+        STREAM_NEXT_OFFSET,
+        STREAM_CURSOR,
+        PRODUCER_EPOCH,
+        PRODUCER_SEQ,
+        PRODUCER_EXPECTED_SEQ,
+        PRODUCER_RECEIVED_SEQ,
     ];
     let headers = relevant_headers
         .iter()
@@ -190,8 +195,10 @@ pub(crate) async fn collect_sse(
                     }
                 }
                 "control" => {
-                    let control: ControlEvent = serde_json::from_str(&event.data)
-                        .map_err(|error| Error::parse(format!("invalid SSE control event JSON: {error}")))?;
+                    let control: ControlEvent =
+                        serde_json::from_str(&event.data).map_err(|error| {
+                            Error::parse(format!("invalid SSE control event JSON: {error}"))
+                        })?;
                     next_offset = Some(control.stream_next_offset);
                     cursor = control.stream_cursor;
                     up_to_date = control.up_to_date || control.stream_closed;
@@ -204,13 +211,16 @@ pub(crate) async fn collect_sse(
             }
         }
 
-        if stream_closed || (wait_for_up_to_date && up_to_date) || max_chunks.is_some_and(|limit| chunks.len() >= limit) {
+        if stream_closed
+            || (wait_for_up_to_date && up_to_date)
+            || max_chunks.is_some_and(|limit| chunks.len() >= limit)
+        {
             break;
         }
     }
 
-    let next_offset =
-        next_offset.ok_or_else(|| Error::parse("missing SSE control event with streamNextOffset"))?;
+    let next_offset = next_offset
+        .ok_or_else(|| Error::parse("missing SSE control event with streamNextOffset"))?;
     Ok(ReadResponse {
         status: 200,
         next_offset,
@@ -232,7 +242,8 @@ pub(crate) async fn collect_catch_up(response: Response) -> Result<ReadResponse,
     let status = response.status().as_u16();
     let next_offset = header_value(&response, STREAM_NEXT_OFFSET)
         .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?;
-    let up_to_date = parse_bool_header(&response, STREAM_UP_TO_DATE) || status == 200 || status == 204;
+    let up_to_date =
+        parse_bool_header(&response, STREAM_UP_TO_DATE) || status == 200 || status == 204;
     let stream_closed = parse_bool_header(&response, STREAM_CLOSED);
     let cursor = header_value(&response, STREAM_CURSOR);
     let etag = header_value(&response, ETAG.as_str());

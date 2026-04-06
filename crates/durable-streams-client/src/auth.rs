@@ -29,20 +29,18 @@ impl AuthConfig {
     pub(crate) fn validate(&self) -> Result<(), crate::Error> {
         match self {
             Self::None => Ok(()),
-            Self::Bearer { token } if token.trim().is_empty() => Err(crate::Error::invalid_argument(
-                "auth bearer token must not be empty",
-            )),
-            Self::Basic { username, .. } if username.trim().is_empty() => {
-                Err(crate::Error::invalid_argument(
-                    "auth basic username must not be empty",
-                ))
-            }
-            Self::Header { name, .. } if name.trim().is_empty() => Err(crate::Error::invalid_argument(
-                "auth header name must not be empty",
-            )),
-            Self::Header { value, .. } if value.trim().is_empty() => Err(crate::Error::invalid_argument(
-                "auth header value must not be empty",
-            )),
+            Self::Bearer { token } if token.trim().is_empty() => Err(
+                crate::Error::invalid_argument("auth bearer token must not be empty"),
+            ),
+            Self::Basic { username, .. } if username.trim().is_empty() => Err(
+                crate::Error::invalid_argument("auth basic username must not be empty"),
+            ),
+            Self::Header { name, .. } if name.trim().is_empty() => Err(
+                crate::Error::invalid_argument("auth header name must not be empty"),
+            ),
+            Self::Header { value, .. } if value.trim().is_empty() => Err(
+                crate::Error::invalid_argument("auth header value must not be empty"),
+            ),
             _ => Ok(()),
         }
     }

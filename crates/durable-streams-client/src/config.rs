@@ -130,7 +130,9 @@ impl ClientConfigLoader {
         let mut file_config = FileConfig::default();
 
         self.merge_if_exists(self.config_dir.join("default.toml"), &mut file_config)?;
-        let profile_path = self.config_dir.join(format!("{}.toml", self.profile.trim()));
+        let profile_path = self
+            .config_dir
+            .join(format!("{}.toml", self.profile.trim()));
         self.merge_if_exists(profile_path, &mut file_config)?;
         self.merge_if_exists(self.config_dir.join("local.toml"), &mut file_config)?;
 
@@ -235,7 +237,9 @@ impl FileConfig {
         let mut config = ClientConfig::default();
 
         if let Some(base_url) = self.client.base_url {
-            config.base_url = Url::parse(&base_url).map_err(Error::from).map_err(ClientConfigLoaderError::Error)?;
+            config.base_url = Url::parse(&base_url)
+                .map_err(Error::from)
+                .map_err(ClientConfigLoaderError::Error)?;
         }
 
         config.auth = self.auth.into_auth()?;
@@ -298,30 +302,30 @@ impl AuthFileConfig {
         let auth = match self.r#type.as_deref().unwrap_or("none") {
             "none" => AuthConfig::None,
             "bearer" => AuthConfig::Bearer {
-                token: self
-                    .bearer_token
-                    .ok_or_else(|| ClientConfigLoaderError::Config("auth bearer_token is required".to_string()))?,
+                token: self.bearer_token.ok_or_else(|| {
+                    ClientConfigLoaderError::Config("auth bearer_token is required".to_string())
+                })?,
             },
             "basic" => AuthConfig::Basic {
-                username: self
-                    .username
-                    .ok_or_else(|| ClientConfigLoaderError::Config("auth username is required".to_string()))?,
-                password: self
-                    .password
-                    .ok_or_else(|| ClientConfigLoaderError::Config("auth password is required".to_string()))?,
+                username: self.username.ok_or_else(|| {
+                    ClientConfigLoaderError::Config("auth username is required".to_string())
+                })?,
+                password: self.password.ok_or_else(|| {
+                    ClientConfigLoaderError::Config("auth password is required".to_string())
+                })?,
             },
             "header" => AuthConfig::Header {
-                name: self
-                    .header_name
-                    .ok_or_else(|| ClientConfigLoaderError::Config("auth header_name is required".to_string()))?,
-                value: self
-                    .header_value
-                    .ok_or_else(|| ClientConfigLoaderError::Config("auth header_value is required".to_string()))?,
+                name: self.header_name.ok_or_else(|| {
+                    ClientConfigLoaderError::Config("auth header_name is required".to_string())
+                })?,
+                value: self.header_value.ok_or_else(|| {
+                    ClientConfigLoaderError::Config("auth header_value is required".to_string())
+                })?,
             },
             other => {
                 return Err(ClientConfigLoaderError::Config(format!(
                     "unsupported auth.type value: '{other}'"
-                )))
+                )));
             }
         };
 
@@ -396,7 +400,10 @@ impl RetryFileConfig {
         }
     }
 
-    fn into_retry(self, mut current: RetryOptions) -> Result<RetryOptions, ClientConfigLoaderError> {
+    fn into_retry(
+        self,
+        mut current: RetryOptions,
+    ) -> Result<RetryOptions, ClientConfigLoaderError> {
         if let Some(max_retries) = self.max_retries {
             current.max_retries = max_retries;
         }
@@ -441,10 +448,12 @@ fn apply_env_overrides(
         config.auth.header_value = Some(value);
     }
     if let Some(ms) = get_env(&format!("{prefix}TRANSPORT__CONNECT_TIMEOUT_MS")) {
-        config.transport.connect_timeout_ms = Some(parse_u64("TRANSPORT__CONNECT_TIMEOUT_MS", &ms)?);
+        config.transport.connect_timeout_ms =
+            Some(parse_u64("TRANSPORT__CONNECT_TIMEOUT_MS", &ms)?);
     }
     if let Some(ms) = get_env(&format!("{prefix}TRANSPORT__REQUEST_TIMEOUT_MS")) {
-        config.transport.request_timeout_ms = Some(parse_u64("TRANSPORT__REQUEST_TIMEOUT_MS", &ms)?);
+        config.transport.request_timeout_ms =
+            Some(parse_u64("TRANSPORT__REQUEST_TIMEOUT_MS", &ms)?);
     }
     if let Some(user_agent) = get_env(&format!("{prefix}TRANSPORT__USER_AGENT")) {
         config.transport.user_agent = Some(user_agent);
@@ -509,7 +518,9 @@ mod tests {
         let loader = ClientConfigLoader::default();
         let config = loader
             .load_with_lookup(&|key| match key {
-                "DURABLE_STREAMS_CLIENT__CLIENT__BASE_URL" => Some("http://example.test".to_string()),
+                "DURABLE_STREAMS_CLIENT__CLIENT__BASE_URL" => {
+                    Some("http://example.test".to_string())
+                }
                 "DURABLE_STREAMS_CLIENT__AUTH__TYPE" => Some("bearer".to_string()),
                 "DURABLE_STREAMS_CLIENT__AUTH__BEARER_TOKEN" => Some("secret".to_string()),
                 _ => None,

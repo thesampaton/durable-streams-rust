@@ -1,8 +1,10 @@
 use crate::client::Client;
 use crate::error::{Error, ErrorKind};
+use crate::instrumentation as trace;
 use crate::model::{AppendRequest, CloseStreamRequest, ProducerRequest, RequestOptions};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracing::{Instrument, Span, debug};
 
 #[derive(Debug)]
 struct ProducerState {
@@ -42,11 +44,15 @@ impl IdempotentProducerConfig {
             return Err(Error::invalid_argument("epoch must not be negative"));
         }
         if self.max_batch_bytes == 0 {
-            return Err(Error::invalid_argument("maxBatchBytes must be greater than zero"));
+            return Err(Error::invalid_argument(
+                "maxBatchBytes must be greater than zero",
+            ));
         }
         if let Some(max_batch_items) = self.max_batch_items {
             if max_batch_items == 0 {
-                return Err(Error::invalid_argument("maxBatchItems must be greater than zero"));
+                return Err(Error::invalid_argument(
+                    "maxBatchItems must be greater than zero",
+                ));
             }
         }
         Ok(())
@@ -71,11 +77,22 @@ impl IdempotentProducer {
         options: RequestOptions,
         config: IdempotentProducerConfig,
     ) -> Result<Self, Error> {
+        let path = path.into();
+        let content_type = content_type.into();
+        let span = trace::producer_span("producer_init", &path);
+        let _guard = span.enter();
         config.validate()?;
+        debug!(
+            event = "producer.constructed",
+            "producer.auto_claim" = config.auto_claim,
+            "producer.epoch" = config.epoch,
+            "producer.max_batch_bytes" = config.max_batch_bytes,
+            "producer.max_batch_items" = config.max_batch_items.unwrap_or(0) as u64
+        );
         Ok(Self {
             client,
-            path: path.into(),
-            content_type: content_type.into(),
+            path,
+            content_type,
             options,
             state: Mutex::new(ProducerState {
                 epoch: config.epoch,
@@ -87,10 +104,22 @@ impl IdempotentProducer {
     }
 
     pub async fn append(&self, body: Vec<u8>) -> Result<crate::model::AppendResponse, Error> {
-        let mut state = self.state.lock().await;
-        let response = self.append_with_state(&mut state, body).await?;
-        state.next_seq += 1;
-        Ok(response)
+        let span = trace::producer_span("producer_append", &self.path);
+        async {
+            let mut state = self.state.lock().await;
+            Span::current().record("producer.epoch", state.epoch);
+            Span::current().record("producer.seq", state.next_seq);
+            let response = self.append_with_state(&mut state, body).await?;
+            state.next_seq += 1;
+            debug!(
+                event = "producer.append_completed",
+                "producer.epoch" = state.epoch,
+                "producer.seq" = state.next_seq
+            );
+            Ok(response)
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn append_batch(
@@ -115,40 +144,60 @@ impl IdempotentProducer {
         self.append(combined).await
     }
 
-    pub async fn close(&self, body: Option<Vec<u8>>) -> Result<crate::model::CloseStreamResponse, Error> {
-        let mut state = self.state.lock().await;
-        if state.closed {
-            return self
-                .client
-                .close(
-                    &self.path,
-                    &CloseStreamRequest {
-                        body,
-                        content_type: Some(self.content_type.clone()),
-                        producer: Some(ProducerRequest {
-                            producer_id: self.config.producer_id.clone(),
-                            producer_epoch: state.epoch,
-                            producer_seq: state.next_seq,
-                        }),
-                        options: self.options.clone(),
-                    },
-                )
-                .await
-                .or_else(|error| match error {
-                    Error::Http(http) if matches!(http.kind, ErrorKind::Conflict | ErrorKind::StreamClosed) => {
-                        Ok(crate::model::CloseStreamResponse {
-                            status: 200,
-                            final_offset: http.next_offset.unwrap_or_default(),
-                            stream_closed: true,
-                        })
-                    }
-                    other => Err(other),
-                });
-        }
+    pub async fn close(
+        &self,
+        body: Option<Vec<u8>>,
+    ) -> Result<crate::model::CloseStreamResponse, Error> {
+        let span = trace::producer_span("producer_close", &self.path);
+        async {
+            let mut state = self.state.lock().await;
+            Span::current().record("producer.epoch", state.epoch);
+            Span::current().record("producer.seq", state.next_seq);
+            if state.closed {
+                return self
+                    .client
+                    .close(
+                        &self.path,
+                        &CloseStreamRequest {
+                            body,
+                            content_type: Some(self.content_type.clone()),
+                            producer: Some(ProducerRequest {
+                                producer_id: self.config.producer_id.clone(),
+                                producer_epoch: state.epoch,
+                                producer_seq: state.next_seq,
+                            }),
+                            options: self.options.clone(),
+                        },
+                    )
+                    .await
+                    .or_else(|error| match error {
+                        Error::Http(http)
+                            if matches!(
+                                http.kind,
+                                ErrorKind::Conflict | ErrorKind::StreamClosed
+                            ) =>
+                        {
+                            Ok(crate::model::CloseStreamResponse {
+                                status: 200,
+                                final_offset: http.next_offset.unwrap_or_default(),
+                                stream_closed: true,
+                            })
+                        }
+                        other => Err(other),
+                    });
+            }
 
-        let response = self.close_with_state(&mut state, body.clone()).await?;
-        state.closed = true;
-        Ok(response)
+            let response = self.close_with_state(&mut state, body.clone()).await?;
+            state.closed = true;
+            debug!(
+                event = "producer.close_completed",
+                "producer.epoch" = state.epoch,
+                "producer.seq" = state.next_seq
+            );
+            Ok(response)
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn detach(&self) -> Result<(), Error> {
@@ -182,6 +231,11 @@ impl IdempotentProducer {
                         && matches!(http.kind, ErrorKind::Forbidden)
                         && !retried =>
                 {
+                    debug!(
+                        event = "producer.auto_claim",
+                        "producer.epoch.previous" = state.epoch,
+                        "producer.epoch.claimed" = http.producer_epoch.unwrap_or(state.epoch) + 1
+                    );
                     state.epoch = http.producer_epoch.unwrap_or(state.epoch) + 1;
                     state.next_seq = 0;
                     retried = true;
@@ -217,6 +271,11 @@ impl IdempotentProducer {
                         && matches!(http.kind, ErrorKind::Forbidden)
                         && !retried =>
                 {
+                    debug!(
+                        event = "producer.auto_claim",
+                        "producer.epoch.previous" = state.epoch,
+                        "producer.epoch.claimed" = http.producer_epoch.unwrap_or(state.epoch) + 1
+                    );
                     state.epoch = http.producer_epoch.unwrap_or(state.epoch) + 1;
                     state.next_seq = 0;
                     retried = true;

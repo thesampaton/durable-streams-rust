@@ -1,6 +1,7 @@
 use crate::auth::AuthConfig;
 use crate::config::ClientConfig;
 use crate::error::Error;
+use crate::instrumentation as trace;
 use crate::model::{
     AppendRequest, AppendResponse, CloseStreamRequest, CloseStreamResponse, ConnectRequest,
     ConnectResponse, CreateStreamRequest, CreateStreamResponse, DeleteRequest, DeleteResponse,
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tracing::{Instrument, Span, debug, error};
 
 #[derive(Clone)]
 struct ClientInner {
@@ -49,6 +51,25 @@ impl Client {
     pub fn from_config(config: ClientConfig) -> Result<Self, Error> {
         config.validate()?;
 
+        let server_address = trace::server_address(&config.base_url).to_string();
+        let auth_type = trace::auth_type(&config.auth);
+        let span = tracing::info_span!(
+            "durable_streams.client",
+            "ds.operation" = "client_init",
+            "server.address" = server_address.as_str(),
+            "auth.type" = auth_type,
+            "error.kind" = tracing::field::Empty,
+            "error.message" = tracing::field::Empty
+        );
+        let _guard = span.enter();
+        debug!(
+            event = "client.constructing",
+            "transport.connect_timeout_ms" = config.transport.connect_timeout.as_millis() as u64,
+            "transport.request_timeout_ms" = config.transport.request_timeout.as_millis() as u64,
+            "transport.proxy_enabled" = config.transport.proxy_url.is_some(),
+            user_agent = config.transport.user_agent.as_str()
+        );
+
         let mut builder = reqwest::Client::builder()
             .connect_timeout(config.transport.connect_timeout)
             .timeout(config.transport.request_timeout)
@@ -58,7 +79,16 @@ impl Client {
             builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
         }
 
-        let http = builder.build()?;
+        let http = match builder.build() {
+            Ok(http) => http,
+            Err(error) => {
+                let error = Error::from(error);
+                trace::record_current_error(&error);
+                error!(event = "client.construct_failed");
+                return Err(error);
+            }
+        };
+        debug!(event = "client.constructed");
         Ok(Self {
             inner: Arc::new(ClientInner { config, http }),
         })
@@ -85,8 +115,18 @@ impl Client {
         RetryPolicy::new(self.inner.config.retry)
     }
 
+    fn server_address(&self) -> &str {
+        trace::server_address(&self.inner.config.base_url)
+    }
+
+    fn auth_type(&self) -> &'static str {
+        trace::auth_type(&self.inner.config.auth)
+    }
+
     async fn send_request<F>(
         &self,
+        operation: &'static str,
+        stream_id: &str,
         method: Method,
         url: Url,
         options: &RequestOptions,
@@ -95,12 +135,26 @@ impl Client {
     where
         F: FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
     {
-        let builder = customize(self.request(method, url, options));
-        Ok(builder.send().await?)
+        let span = trace::http_request_span(operation, stream_id, &method, &url, self.auth_type());
+        async move {
+            debug!(event = "request.started");
+            let builder = customize(self.request(method, url, options));
+            let response = builder.send().await?;
+            Span::current().record("http.status_code", response.status().as_u16());
+            debug!(
+                event = "response.received",
+                "http.status_code" = response.status().as_u16()
+            );
+            Ok(response)
+        }
+        .instrument(span)
+        .await
     }
 
     async fn send_retrying_request<F>(
         &self,
+        operation: &'static str,
+        stream_id: &str,
         method: Method,
         url: Url,
         options: &RequestOptions,
@@ -111,8 +165,26 @@ impl Client {
     {
         self.retry_policy()
             .run(|| {
-                let builder = customize(self.request(method.clone(), url.clone(), options));
-                async move { Ok(builder.send().await?) }
+                let operation = operation;
+                let stream_id = stream_id;
+                let method = method.clone();
+                let url = url.clone();
+                let span =
+                    trace::http_request_span(operation, stream_id, &method, &url, self.auth_type());
+                let builder = span.in_scope(|| {
+                    debug!(event = "request.started");
+                    customize(self.request(method, url, options))
+                });
+                async move {
+                    let response = builder.send().await?;
+                    Span::current().record("http.status_code", response.status().as_u16());
+                    debug!(
+                        event = "response.received",
+                        "http.status_code" = response.status().as_u16()
+                    );
+                    Ok(response)
+                }
+                .instrument(span)
             })
             .await
     }
@@ -121,7 +193,9 @@ impl Client {
         response: reqwest::Response,
         expected: &[StatusCode],
     ) -> Result<reqwest::Response, Error> {
-        if expected.contains(&response.status()) {
+        let status = response.status();
+        Span::current().record("http.status_code", status.as_u16());
+        if expected.contains(&status) {
             Ok(response)
         } else {
             Err(response_error(response).await.into())
@@ -129,7 +203,9 @@ impl Client {
     }
 
     async fn require_success(response: reqwest::Response) -> Result<reqwest::Response, Error> {
-        if response.status().is_success() {
+        let status = response.status();
+        Span::current().record("http.status_code", status.as_u16());
+        if status.is_success() {
             Ok(response)
         } else {
             Err(response_error(response).await.into())
@@ -141,32 +217,69 @@ impl Client {
         path: &str,
         request: &CreateStreamRequest,
     ) -> Result<CreateStreamResponse, Error> {
-        let url = self.stream_url(path, &request.options)?;
-        let response = self
-            .send_retrying_request(Method::PUT, url, &request.options, |mut builder| {
-                builder = builder.header(CONTENT_TYPE, &request.content_type);
-                if let Some(ttl_seconds) = request.ttl_seconds {
-                    builder = builder.header(STREAM_TTL, ttl_seconds.to_string());
+        let span = trace::client_operation_span(
+            "create_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = async {
+                let url = self.stream_url(path, &request.options)?;
+                let response = self
+                    .send_retrying_request(
+                        "create_stream",
+                        path,
+                        Method::PUT,
+                        url,
+                        &request.options,
+                        |mut builder| {
+                            builder = builder.header(CONTENT_TYPE, &request.content_type);
+                            if let Some(ttl_seconds) = request.ttl_seconds {
+                                builder = builder.header(STREAM_TTL, ttl_seconds.to_string());
+                            }
+                            if let Some(expires_at) = &request.expires_at {
+                                builder = builder.header(STREAM_EXPIRES_AT, expires_at);
+                            }
+                            if request.closed {
+                                builder = builder.header(STREAM_CLOSED, "true");
+                            }
+                            if let Some(body) = &request.body {
+                                builder = builder.body(body.clone());
+                            }
+                            builder
+                        },
+                    )
+                    .await?;
+                let response =
+                    Self::require_status(response, &[StatusCode::OK, StatusCode::CREATED]).await?;
+                Ok(CreateStreamResponse {
+                    status: response.status().as_u16(),
+                    next_offset: header_value(&response, STREAM_NEXT_OFFSET),
+                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+                })
+            }
+            .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        response.next_offset.as_deref(),
+                    );
+                    debug!(event = "operation.completed");
                 }
-                if let Some(expires_at) = &request.expires_at {
-                    builder = builder.header(STREAM_EXPIRES_AT, expires_at);
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
                 }
-                if request.closed {
-                    builder = builder.header(STREAM_CLOSED, "true");
-                }
-                if let Some(body) = &request.body {
-                    builder = builder.body(body.clone());
-                }
-                builder
-            })
-            .await?;
-        let response =
-            Self::require_status(response, &[StatusCode::OK, StatusCode::CREATED]).await?;
-        Ok(CreateStreamResponse {
-            status: response.status().as_u16(),
-            next_offset: header_value(&response, STREAM_NEXT_OFFSET),
-            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-        })
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn connect(
@@ -174,21 +287,51 @@ impl Client {
         path: &str,
         request: &ConnectRequest,
     ) -> Result<ConnectResponse, Error> {
-        let head = self
-            .head(
-                path,
-                &HeadRequest {
-                    options: request.options.clone(),
-                },
-            )
-            .await?;
+        let span = trace::client_operation_span(
+            "connect_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = async {
+                let head = self
+                    .head_once(
+                        path,
+                        &HeadRequest {
+                            options: request.options.clone(),
+                        },
+                    )
+                    .await?;
 
-        Ok(ConnectResponse {
-            status: head.status,
-            offset: head.offset,
-            content_type: head.content_type,
-            stream_closed: head.stream_closed,
-        })
+                Ok(ConnectResponse {
+                    status: head.status,
+                    offset: head.offset,
+                    content_type: head.content_type,
+                    stream_closed: head.stream_closed,
+                })
+            }
+            .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        response.offset.as_deref(),
+                    );
+                    debug!(event = "operation.completed");
+                }
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
+                }
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn append(
@@ -196,36 +339,74 @@ impl Client {
         path: &str,
         request: &AppendRequest,
     ) -> Result<AppendResponse, Error> {
-        let url = self.stream_url(path, &request.options)?;
-        let response = self
-            .send_retrying_request(Method::POST, url, &request.options, |mut builder| {
-                if let Some(content_type) = &request.content_type {
-                    builder = builder.header(CONTENT_TYPE, content_type);
+        let span = trace::client_operation_span(
+            "append_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = async {
+                let url = self.stream_url(path, &request.options)?;
+                let response = self
+                    .send_retrying_request(
+                        "append_stream",
+                        path,
+                        Method::POST,
+                        url,
+                        &request.options,
+                        |mut builder| {
+                            if let Some(content_type) = &request.content_type {
+                                builder = builder.header(CONTENT_TYPE, content_type);
+                            }
+                            if let Some(stream_seq) = &request.stream_seq {
+                                builder = builder.header(STREAM_SEQ, stream_seq);
+                            }
+                            if let Some(producer) = &request.producer {
+                                builder = builder
+                                    .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
+                                    .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
+                                    .header(
+                                        crate::protocol::PRODUCER_SEQ,
+                                        producer.producer_seq.to_string(),
+                                    );
+                            }
+                            builder.body(request.body.clone())
+                        },
+                    )
+                    .await?;
+                let response =
+                    Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT])
+                        .await?;
+                Ok(AppendResponse {
+                    status: response.status().as_u16(),
+                    next_offset: header_value(&response, STREAM_NEXT_OFFSET),
+                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+                    producer_epoch: parse_i64_header(&response, PRODUCER_EPOCH),
+                    producer_seq: parse_i64_header(&response, PRODUCER_SEQ),
+                })
+            }
+            .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        response.next_offset.as_deref(),
+                    );
+                    debug!(event = "operation.completed");
                 }
-                if let Some(stream_seq) = &request.stream_seq {
-                    builder = builder.header(STREAM_SEQ, stream_seq);
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
                 }
-                if let Some(producer) = &request.producer {
-                    builder = builder
-                        .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
-                        .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                        .header(
-                            crate::protocol::PRODUCER_SEQ,
-                            producer.producer_seq.to_string(),
-                        );
-                }
-                builder.body(request.body.clone())
-            })
-            .await?;
-        let response =
-            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
-        Ok(AppendResponse {
-            status: response.status().as_u16(),
-            next_offset: header_value(&response, STREAM_NEXT_OFFSET),
-            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-            producer_epoch: parse_i64_header(&response, PRODUCER_EPOCH),
-            producer_seq: parse_i64_header(&response, PRODUCER_SEQ),
-        })
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn close(
@@ -233,42 +414,87 @@ impl Client {
         path: &str,
         request: &CloseStreamRequest,
     ) -> Result<CloseStreamResponse, Error> {
-        let url = self.stream_url(path, &request.options)?;
-        let response = self
-            .send_retrying_request(Method::POST, url, &request.options, |mut builder| {
-                builder = builder.header(STREAM_CLOSED, "true");
-                if let Some(content_type) = &request.content_type {
-                    builder = builder.header(CONTENT_TYPE, content_type);
+        let span = trace::client_operation_span(
+            "close_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = async {
+                let url = self.stream_url(path, &request.options)?;
+                let response = self
+                    .send_retrying_request(
+                        "close_stream",
+                        path,
+                        Method::POST,
+                        url,
+                        &request.options,
+                        |mut builder| {
+                            builder = builder.header(STREAM_CLOSED, "true");
+                            if let Some(content_type) = &request.content_type {
+                                builder = builder.header(CONTENT_TYPE, content_type);
+                            }
+                            if let Some(producer) = &request.producer {
+                                builder = builder
+                                    .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
+                                    .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
+                                    .header(
+                                        crate::protocol::PRODUCER_SEQ,
+                                        producer.producer_seq.to_string(),
+                                    );
+                            }
+                            if let Some(body) = &request.body {
+                                builder = builder.body(body.clone());
+                            }
+                            builder
+                        },
+                    )
+                    .await?;
+                let response =
+                    Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT])
+                        .await?;
+                Ok(CloseStreamResponse {
+                    status: response.status().as_u16(),
+                    final_offset: header_value(&response, STREAM_NEXT_OFFSET)
+                        .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?,
+                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+                })
+            }
+            .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        Some(response.final_offset.as_str()),
+                    );
+                    debug!(event = "operation.completed");
                 }
-                if let Some(producer) = &request.producer {
-                    builder = builder
-                        .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
-                        .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                        .header(
-                            crate::protocol::PRODUCER_SEQ,
-                            producer.producer_seq.to_string(),
-                        );
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
                 }
-                if let Some(body) = &request.body {
-                    builder = builder.body(body.clone());
-                }
-                builder
-            })
-            .await?;
-        let response =
-            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
-        Ok(CloseStreamResponse {
-            status: response.status().as_u16(),
-            final_offset: header_value(&response, STREAM_NEXT_OFFSET)
-                .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?,
-            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-        })
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
-    pub async fn head(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
+    async fn head_once(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
         let response = self
-            .send_request(Method::HEAD, url, &request.options, |builder| builder)
+            .send_request(
+                "head_stream",
+                path,
+                Method::HEAD,
+                url,
+                &request.options,
+                |builder| builder,
+            )
             .await?;
         let response = Self::require_success(response).await?;
 
@@ -284,26 +510,126 @@ impl Client {
         })
     }
 
+    pub async fn head(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
+        let span = trace::client_operation_span(
+            "head_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = self.head_once(path, request).await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        response.offset.as_deref(),
+                    );
+                    debug!(event = "operation.completed");
+                }
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
+                }
+            }
+            result
+        }
+        .instrument(span)
+        .await
+    }
+
     pub async fn delete(
         &self,
         path: &str,
         request: &DeleteRequest,
     ) -> Result<DeleteResponse, Error> {
-        let url = self.stream_url(path, &request.options)?;
-        let response = self
-            .send_request(Method::DELETE, url, &request.options, |builder| builder)
-            .await?;
-        let response =
-            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
-        Ok(DeleteResponse {
-            status: response.status().as_u16(),
-        })
+        let span = trace::client_operation_span(
+            "delete_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        async {
+            debug!(event = "operation.started");
+            let result = async {
+                let url = self.stream_url(path, &request.options)?;
+                let response = self
+                    .send_request(
+                        "delete_stream",
+                        path,
+                        Method::DELETE,
+                        url,
+                        &request.options,
+                        |builder| builder,
+                    )
+                    .await?;
+                let response =
+                    Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT])
+                        .await?;
+                Ok(DeleteResponse {
+                    status: response.status().as_u16(),
+                })
+            }
+            .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    debug!(event = "operation.completed");
+                }
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
+                }
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     pub async fn read(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
-        self.retry_policy()
-            .run(|| self.read_once(path, request))
-            .await
+        let span = trace::client_operation_span(
+            "read_stream",
+            path,
+            self.server_address(),
+            self.auth_type(),
+        );
+        span.record("ds.live_mode", trace::live_mode_name(request.live));
+        trace::record_optional_str(&span, "ds.offset", request.offset.as_deref());
+        trace::record_optional_str(&span, "ds.cursor", request.cursor.as_deref());
+        async {
+            debug!(event = "operation.started");
+            let result = self
+                .retry_policy()
+                .run(|| self.read_once(path, request))
+                .await;
+            match &result {
+                Ok(response) => {
+                    Span::current().record("http.status_code", response.status);
+                    Span::current().record("ds.up_to_date", response.up_to_date);
+                    Span::current().record("ds.stream_closed", response.stream_closed);
+                    trace::record_current_optional_str(
+                        "ds.resume_offset",
+                        Some(response.next_offset.as_str()),
+                    );
+                    trace::record_current_optional_str("ds.cursor", response.cursor.as_deref());
+                    debug!(
+                        event = "operation.completed",
+                        "ds.chunk_count" = response.chunks.len()
+                    );
+                }
+                Err(error) => {
+                    trace::record_current_error(error);
+                    error!(event = "operation.failed");
+                }
+            }
+            result
+        }
+        .instrument(span)
+        .await
     }
 
     async fn read_once(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
@@ -332,6 +658,7 @@ impl Client {
             if let Some(budget) = budget {
                 let elapsed = started_at.elapsed();
                 if elapsed >= budget {
+                    debug!(event = "read.long_poll_budget_exhausted");
                     return Ok(aggregate.unwrap_or(ReadResponse {
                         status: 200,
                         next_offset: current_request
@@ -385,6 +712,11 @@ impl Client {
             }
 
             current_request.offset = Some(next_offset_for_cursor);
+            trace::record_current_optional_str(
+                "ds.resume_offset",
+                current_request.offset.as_deref(),
+            );
+            debug!(event = "read.resume_updated");
         }
     }
 
@@ -397,13 +729,20 @@ impl Client {
         let url = self.read_url(path, request, live)?;
         let future = async {
             let response = self
-                .send_request(Method::GET, url, &request.options, |builder| {
-                    if let Some(etag) = &request.if_none_match {
-                        builder.header(reqwest::header::IF_NONE_MATCH, etag)
-                    } else {
-                        builder
-                    }
-                })
+                .send_request(
+                    "read_stream",
+                    path,
+                    Method::GET,
+                    url,
+                    &request.options,
+                    |builder| {
+                        if let Some(etag) = &request.if_none_match {
+                            builder.header(reqwest::header::IF_NONE_MATCH, etag)
+                        } else {
+                            builder
+                        }
+                    },
+                )
                 .await?;
             let response = Self::require_success(response).await?;
             collect_catch_up(response).await
@@ -412,17 +751,20 @@ impl Client {
         match request.timeout {
             Some(timeout) => match tokio::time::timeout(timeout, future).await {
                 Ok(result) => result,
-                Err(_) if matches!(request.live, LiveMode::LongPoll) => Ok(ReadResponse {
-                    status: 204,
-                    next_offset: request.offset.clone().unwrap_or_else(|| "-1".to_string()),
-                    up_to_date: true,
-                    stream_closed: false,
-                    cursor: None,
-                    content_type: None,
-                    etag: None,
-                    chunks: Vec::new(),
-                    payload: None,
-                }),
+                Err(_) if matches!(request.live, LiveMode::LongPoll) => {
+                    debug!(event = "read.long_poll_timeout");
+                    Ok(ReadResponse {
+                        status: 204,
+                        next_offset: request.offset.clone().unwrap_or_else(|| "-1".to_string()),
+                        up_to_date: true,
+                        stream_closed: false,
+                        cursor: None,
+                        content_type: None,
+                        etag: None,
+                        chunks: Vec::new(),
+                        payload: None,
+                    })
+                }
                 Err(_) => Err(Error::parse("timed out waiting for response")),
             },
             None => future.await,
@@ -433,7 +775,14 @@ impl Client {
         let url = self.read_url(path, request, Some("sse"))?;
         let future = async {
             let response = self
-                .send_request(Method::GET, url, &request.options, |builder| builder)
+                .send_request(
+                    "read_stream",
+                    path,
+                    Method::GET,
+                    url,
+                    &request.options,
+                    |builder| builder,
+                )
                 .await?;
             let response = Self::require_success(response).await?;
             collect_sse(response, request.max_chunks, request.wait_for_up_to_date).await
@@ -456,6 +805,10 @@ impl Client {
             return Ok(initial);
         }
 
+        debug!(
+            event = "read.auto_fallback",
+            "ds.resume_offset" = initial.next_offset.as_str()
+        );
         let mut live = request.clone();
         live.live = LiveMode::LongPoll;
         live.offset = Some(initial.next_offset.clone());
@@ -470,33 +823,75 @@ impl Client {
     pub fn subscribe(&self, path: &str, request: SubscribeRequest) -> Subscription {
         let client = self.clone();
         let path = path.to_string();
+        let server_address = self.server_address().to_string();
+        let auth_type = self.auth_type();
+        let subscription_span = trace::subscription_span(&path, server_address.as_str(), auth_type);
+        subscription_span.record("ds.live_mode", trace::live_mode_name(request.read.live));
+        trace::record_optional_str(
+            &subscription_span,
+            "ds.offset",
+            request.read.offset.as_deref(),
+        );
+        trace::record_optional_str(
+            &subscription_span,
+            "ds.cursor",
+            request.read.cursor.as_deref(),
+        );
         let (sender, receiver) = mpsc::channel(32);
-        let task = tokio::spawn(async move {
-            let mut next_request = request.read;
-            loop {
-                match client.read(&path, &next_request).await {
-                    Ok(response) => {
-                        let event = response_to_event(&response);
-                        if sender.send(Ok(event)).await.is_err() {
+        let task = tokio::spawn(
+            async move {
+                debug!(event = "subscription.started");
+                let mut next_request = request.read;
+                loop {
+                    match client.read(&path, &next_request).await {
+                        Ok(response) => {
+                            Span::current().record("ds.up_to_date", response.up_to_date);
+                            Span::current().record("ds.stream_closed", response.stream_closed);
+                            trace::record_current_optional_str(
+                                "ds.resume_offset",
+                                Some(response.next_offset.as_str()),
+                            );
+                            trace::record_current_optional_str(
+                                "ds.cursor",
+                                response.cursor.as_deref(),
+                            );
+                            debug!(
+                                event = "subscription.event",
+                                "ds.chunk_count" = response.chunks.len()
+                            );
+                            let event = response_to_event(&response);
+                            if sender.send(Ok(event)).await.is_err() {
+                                debug!(event = "subscription.consumer_dropped");
+                                break;
+                            }
+                            if response.stream_closed {
+                                debug!(event = "subscription.completed");
+                                break;
+                            }
+                            next_request.offset = Some(response.next_offset);
+                            next_request.live = if matches!(next_request.live, LiveMode::CatchUp) {
+                                LiveMode::LongPoll
+                            } else {
+                                next_request.live
+                            };
+                            trace::record_current_optional_str(
+                                "ds.offset",
+                                next_request.offset.as_deref(),
+                            );
+                            Span::current()
+                                .record("ds.live_mode", trace::live_mode_name(next_request.live));
+                            debug!(event = "subscription.resume_updated");
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Err(error)).await;
+                            debug!(event = "subscription.terminated");
                             break;
                         }
-                        if response.stream_closed {
-                            break;
-                        }
-                        next_request.offset = Some(response.next_offset);
-                        next_request.live = if matches!(next_request.live, LiveMode::CatchUp) {
-                            LiveMode::LongPoll
-                        } else {
-                            next_request.live
-                        };
-                    }
-                    Err(error) => {
-                        let _ = sender.send(Err(error)).await;
-                        break;
                     }
                 }
             }
-        });
+            .instrument(subscription_span),
+        );
 
         Subscription { receiver, task }
     }

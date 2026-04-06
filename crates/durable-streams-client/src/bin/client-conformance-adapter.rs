@@ -34,7 +34,10 @@ enum Command {
         closed: Option<bool>,
         data: Option<String>,
     },
-    Connect { path: String, headers: Option<HashMap<String, String>> },
+    Connect {
+        path: String,
+        headers: Option<HashMap<String, String>>,
+    },
     Append {
         path: String,
         data: String,
@@ -60,8 +63,14 @@ enum Command {
         wait_for_up_to_date: Option<bool>,
         headers: Option<HashMap<String, String>>,
     },
-    Head { path: String, headers: Option<HashMap<String, String>> },
-    Delete { path: String, headers: Option<HashMap<String, String>> },
+    Head {
+        path: String,
+        headers: Option<HashMap<String, String>>,
+    },
+    Delete {
+        path: String,
+        headers: Option<HashMap<String, String>>,
+    },
     Close {
         path: String,
         data: Option<String>,
@@ -84,7 +93,9 @@ enum Command {
     },
     #[serde(rename = "clear-dynamic")]
     ClearDynamic,
-    Validate { target: ValidateTarget },
+    Validate {
+        target: ValidateTarget,
+    },
     #[serde(rename = "idempotent-append")]
     IdempotentAppend {
         path: String,
@@ -290,7 +301,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .replace('\u{2029}', "\\u2029");
         writeln!(stdout, "{encoded}")?;
         stdout.flush()?;
-        if matches!(result, AdapterOutput::Success(SuccessResult { result_type, .. }) if result_type == "shutdown") {
+        if matches!(result, AdapterOutput::Success(SuccessResult { result_type, .. }) if result_type == "shutdown")
+        {
             break;
         }
     }
@@ -307,7 +319,10 @@ enum AdapterOutput {
 
 async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> AdapterOutput {
     match command {
-        Command::Init { server_url, timeout_ms } => {
+        Command::Init {
+            server_url,
+            timeout_ms,
+        } => {
             let mut config = ClientConfig::default();
             config.base_url = match url::Url::parse(&server_url) {
                 Ok(url) => url,
@@ -317,7 +332,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         None,
                         ErrorCode::InvalidArgument,
                         error.to_string(),
-                    ))
+                    ));
                 }
             };
             let client = match Client::new(config) {
@@ -362,9 +377,15 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("create", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "create",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
-            let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+            let content_type =
+                content_type.unwrap_or_else(|| "application/octet-stream".to_string());
             let request = CreateStreamRequest {
                 content_type: content_type.clone(),
                 ttl_seconds,
@@ -394,7 +415,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         Command::Connect { path, headers } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("connect", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "connect",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match client
                 .connect(
@@ -410,7 +436,9 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             {
                 Ok(result) => {
                     if let Some(content_type) = &result.content_type {
-                        state.content_types.insert(path.clone(), content_type.clone());
+                        state
+                            .content_types
+                            .insert(path.clone(), content_type.clone());
                     }
                     AdapterOutput::Success(SuccessResult {
                         result_type: "connect".to_string(),
@@ -436,13 +464,25 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("append", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "append",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
             let body = if binary.unwrap_or(false) {
                 match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
                     Ok(body) => body,
-                    Err(error) => return AdapterOutput::Error(error_output("append", None, ErrorCode::ParseError, error.to_string())),
+                    Err(error) => {
+                        return AdapterOutput::Error(error_output(
+                            "append",
+                            None,
+                            ErrorCode::ParseError,
+                            error.to_string(),
+                        ));
+                    }
                 }
             } else {
                 data.into_bytes()
@@ -492,13 +532,20 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("read", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "read",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
             let live = match live {
                 Some(serde_json::Value::Bool(true)) => LiveMode::Auto,
                 Some(serde_json::Value::Bool(false)) | None => LiveMode::CatchUp,
-                Some(serde_json::Value::String(value)) if value == "long-poll" => LiveMode::LongPoll,
+                Some(serde_json::Value::String(value)) if value == "long-poll" => {
+                    LiveMode::LongPoll
+                }
                 Some(serde_json::Value::String(value)) if value == "sse" => LiveMode::Sse,
                 _ => LiveMode::CatchUp,
             };
@@ -540,13 +587,20 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         ..Default::default()
                     })
                 }
-                Err(error) => AdapterOutput::Error(read_error_output(&path, live, offset.as_deref(), &error)),
+                Err(error) => {
+                    AdapterOutput::Error(read_error_output(&path, live, offset.as_deref(), &error))
+                }
             }
         }
         Command::Head { path, headers } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("head", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "head",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match client
                 .head(
@@ -562,7 +616,9 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             {
                 Ok(result) => {
                     if let Some(content_type) = &result.content_type {
-                        state.content_types.insert(path.clone(), content_type.clone());
+                        state
+                            .content_types
+                            .insert(path.clone(), content_type.clone());
                     }
                     AdapterOutput::Success(SuccessResult {
                         result_type: "head".to_string(),
@@ -580,7 +636,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         Command::Delete { path, headers } => {
             let state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("delete", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "delete",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match client
                 .delete(
@@ -603,10 +664,19 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 Err(error) => AdapterOutput::Error(error_to_output("delete", Some(&path), &error)),
             }
         }
-        Command::Close { path, data, content_type } => {
+        Command::Close {
+            path,
+            data,
+            content_type,
+        } => {
             let state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("close", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "close",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             let content_type = content_type.or_else(|| state.content_types.get(&path).cloned());
             match client
@@ -632,7 +702,11 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 Err(error) => AdapterOutput::Error(error_to_output("close", Some(&path), &error)),
             }
         }
-        Command::SetDynamicHeader { name, value_type, initial_value } => {
+        Command::SetDynamicHeader {
+            name,
+            value_type,
+            initial_value,
+        } => {
             let mut state = state.lock().await;
             state.dynamic_headers.insert(
                 name,
@@ -681,7 +755,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("idempotent-append", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "idempotent-append",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match get_or_create_producer(
                 client,
@@ -699,9 +778,15 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         status: Some(200),
                         ..Default::default()
                     }),
-                    Err(error) => AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error)),
+                    Err(error) => AdapterOutput::Error(error_to_output(
+                        "idempotent-append",
+                        Some(&path),
+                        &error,
+                    )),
                 },
-                Err(error) => AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error)),
+                Err(error) => {
+                    AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error))
+                }
             }
         }
         Command::IdempotentAppendBatch {
@@ -715,7 +800,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("idempotent-append-batch", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "idempotent-append-batch",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match create_producer(
                 client,
@@ -742,10 +832,18 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                                 ..Default::default()
                             })
                         }
-                        Err(error) => AdapterOutput::Error(error_to_output("idempotent-append-batch", Some(&path), &error)),
+                        Err(error) => AdapterOutput::Error(error_to_output(
+                            "idempotent-append-batch",
+                            Some(&path),
+                            &error,
+                        )),
                     }
                 }
-                Err(error) => AdapterOutput::Error(error_to_output("idempotent-append-batch", Some(&path), &error)),
+                Err(error) => AdapterOutput::Error(error_to_output(
+                    "idempotent-append-batch",
+                    Some(&path),
+                    &error,
+                )),
             }
         }
         Command::IdempotentClose {
@@ -758,7 +856,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
         } => {
             let mut state = state.lock().await;
             let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output("idempotent-close", None, ErrorCode::InternalError, "client adapter not initialized"));
+                return AdapterOutput::Error(error_output(
+                    "idempotent-close",
+                    None,
+                    ErrorCode::InternalError,
+                    "client adapter not initialized",
+                ));
             };
             match get_or_create_producer(
                 client,
@@ -778,9 +881,15 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         stream_closed: Some(result.stream_closed),
                         ..Default::default()
                     }),
-                    Err(error) => AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error)),
+                    Err(error) => AdapterOutput::Error(error_to_output(
+                        "idempotent-close",
+                        Some(&path),
+                        &error,
+                    )),
                 },
-                Err(error) => AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error)),
+                Err(error) => {
+                    AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error))
+                }
             }
         }
         Command::IdempotentDetach {
@@ -849,7 +958,8 @@ fn error_to_output(command_type: &str, path: Option<&str>, error: &Error) -> Err
             let error_code = match http.kind {
                 ErrorKind::NotFound => ErrorCode::NotFound,
                 ErrorKind::Conflict
-                    if http.producer_expected_seq.is_some() || http.producer_received_seq.is_some() =>
+                    if http.producer_expected_seq.is_some()
+                        || http.producer_received_seq.is_some() =>
                 {
                     ErrorCode::SequenceConflict
                 }
@@ -859,9 +969,7 @@ fn error_to_output(command_type: &str, path: Option<&str>, error: &Error) -> Err
                 {
                     ErrorCode::SequenceConflict
                 }
-                ErrorKind::Conflict if lower_message.contains("closed") => {
-                    ErrorCode::StreamClosed
-                }
+                ErrorKind::Conflict if lower_message.contains("closed") => ErrorCode::StreamClosed,
                 ErrorKind::Conflict => ErrorCode::Conflict,
                 ErrorKind::StreamClosed => ErrorCode::StreamClosed,
                 ErrorKind::InvalidOffset => ErrorCode::InvalidOffset,
@@ -869,7 +977,12 @@ fn error_to_output(command_type: &str, path: Option<&str>, error: &Error) -> Err
                 ErrorKind::RateLimited => ErrorCode::UnexpectedStatus,
                 _ => ErrorCode::UnexpectedStatus,
             };
-            error_output(command_type, Some(http.status.as_u16()), error_code, message)
+            error_output(
+                command_type,
+                Some(http.status.as_u16()),
+                error_code,
+                message,
+            )
         }
         other => error_output(
             command_type,
@@ -933,7 +1046,9 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
             }
             if let (Some(initial), Some(max)) = (initial_delay_ms, max_delay_ms) {
                 if max < initial {
-                    return Err("maxDelayMs must be greater than or equal to initialDelayMs".to_string());
+                    return Err(
+                        "maxDelayMs must be greater than or equal to initialDelayMs".to_string()
+                    );
                 }
             }
             if multiplier.is_some_and(|value| value < 1.0) {
@@ -970,7 +1085,11 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
 fn resolve_dynamic(
     state: &mut AdapterState,
     explicit_headers: Option<HashMap<String, String>>,
-) -> (HashMap<String, String>, HashMap<String, String>, HashMap<String, String>) {
+) -> (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    HashMap<String, String>,
+) {
     let mut headers_sent = HashMap::new();
     let mut params_sent = HashMap::new();
     let mut headers = explicit_headers.unwrap_or_default();

@@ -1,7 +1,9 @@
 use crate::error::Error;
+use crate::instrumentation as trace;
 use crate::model::RetryOptions;
 use std::future::Future;
 use std::time::Duration;
+use tracing::{Instrument, debug, warn};
 
 /// Retry policy for transient operations.
 #[derive(Debug, Clone, Copy)]
@@ -43,12 +45,36 @@ impl RetryPolicy {
         let mut delay = self.options.initial_backoff;
 
         loop {
-            match operation().await {
-                Ok(value) => return Ok(value),
+            let attempt_number = attempt + 1;
+            let span = trace::retry_span(attempt_number, self.options.max_retries);
+            let result = operation().instrument(span.clone()).await;
+            match result {
+                Ok(value) => {
+                    if attempt > 0 {
+                        debug!(
+                            parent: &span,
+                            event = "retry.completed",
+                            "retry.attempt" = attempt_number
+                        );
+                    }
+                    return Ok(value);
+                }
                 Err(error) if attempt < self.options.max_retries && error.is_retryable() => {
+                    trace::record_error(&span, &error);
+                    span.record("retry.backoff_ms", delay.as_millis() as u64);
+                    warn!(
+                        parent: &span,
+                        event = "retry.scheduled",
+                        "retry.attempt" = attempt_number,
+                        "retry.backoff_ms" = delay.as_millis() as u64
+                    );
                     tokio::time::sleep(delay).await;
                     attempt += 1;
-                    delay = next_delay(delay, self.options.max_backoff, self.options.backoff_multiplier);
+                    delay = next_delay(
+                        delay,
+                        self.options.max_backoff,
+                        self.options.backoff_multiplier,
+                    );
                 }
                 Err(error) => return Err(error),
             }
