@@ -8,9 +8,9 @@ use crate::model::{
     SubscribeRequest, SubscriptionEvent,
 };
 use crate::protocol::{
-    collect_catch_up, collect_sse, header_value, parse_bool_header, parse_i64_header,
-    response_error, response_to_event, PRODUCER_EPOCH, PRODUCER_SEQ, STREAM_CLOSED,
-    STREAM_EXPIRES_AT, STREAM_NEXT_OFFSET, STREAM_SEQ, STREAM_TTL,
+    PRODUCER_EPOCH, PRODUCER_SEQ, STREAM_CLOSED, STREAM_EXPIRES_AT, STREAM_NEXT_OFFSET, STREAM_SEQ,
+    STREAM_TTL, collect_catch_up, collect_sse, header_value, parse_bool_header, parse_i64_header,
+    response_error, response_to_event,
 };
 use crate::retry::RetryPolicy;
 use reqwest::header::CONTENT_TYPE;
@@ -81,12 +81,69 @@ impl Client {
         }
     }
 
-    pub async fn create(&self, path: &str, request: &CreateStreamRequest) -> Result<CreateStreamResponse, Error> {
+    fn retry_policy(&self) -> RetryPolicy {
+        RetryPolicy::new(self.inner.config.retry)
+    }
+
+    async fn send_request<F>(
+        &self,
+        method: Method,
+        url: Url,
+        options: &RequestOptions,
+        customize: F,
+    ) -> Result<reqwest::Response, Error>
+    where
+        F: FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
+        let builder = customize(self.request(method, url, options));
+        Ok(builder.send().await?)
+    }
+
+    async fn send_retrying_request<F>(
+        &self,
+        method: Method,
+        url: Url,
+        options: &RequestOptions,
+        mut customize: F,
+    ) -> Result<reqwest::Response, Error>
+    where
+        F: FnMut(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
+        self.retry_policy()
+            .run(|| {
+                let builder = customize(self.request(method.clone(), url.clone(), options));
+                async move { Ok(builder.send().await?) }
+            })
+            .await
+    }
+
+    async fn require_status(
+        response: reqwest::Response,
+        expected: &[StatusCode],
+    ) -> Result<reqwest::Response, Error> {
+        if expected.contains(&response.status()) {
+            Ok(response)
+        } else {
+            Err(response_error(response).await.into())
+        }
+    }
+
+    async fn require_success(response: reqwest::Response) -> Result<reqwest::Response, Error> {
+        if response.status().is_success() {
+            Ok(response)
+        } else {
+            Err(response_error(response).await.into())
+        }
+    }
+
+    pub async fn create(
+        &self,
+        path: &str,
+        request: &CreateStreamRequest,
+    ) -> Result<CreateStreamResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
-        let retry = RetryPolicy::new(self.inner.config.retry);
-        retry
-            .run(|| async {
-                let mut builder = self.request(Method::PUT, url.clone(), &request.options);
+        let response = self
+            .send_retrying_request(Method::PUT, url, &request.options, |mut builder| {
                 builder = builder.header(CONTENT_TYPE, &request.content_type);
                 if let Some(ttl_seconds) = request.ttl_seconds {
                     builder = builder.header(STREAM_TTL, ttl_seconds.to_string());
@@ -100,27 +157,31 @@ impl Client {
                 if let Some(body) = &request.body {
                     builder = builder.body(body.clone());
                 }
-                let response = builder.send().await?;
-                if !matches!(response.status(), StatusCode::OK | StatusCode::CREATED) {
-                    return Err(response_error(response).await.into());
-                }
-                Ok(CreateStreamResponse {
-                    status: response.status().as_u16(),
-                    next_offset: header_value(&response, STREAM_NEXT_OFFSET),
-                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-                })
+                builder
             })
-            .await
+            .await?;
+        let response =
+            Self::require_status(response, &[StatusCode::OK, StatusCode::CREATED]).await?;
+        Ok(CreateStreamResponse {
+            status: response.status().as_u16(),
+            next_offset: header_value(&response, STREAM_NEXT_OFFSET),
+            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+        })
     }
 
-    pub async fn connect(&self, path: &str, request: &ConnectRequest) -> Result<ConnectResponse, Error> {
-        let head = self.head(
-            path,
-            &HeadRequest {
-                options: request.options.clone(),
-            },
-        )
-        .await?;
+    pub async fn connect(
+        &self,
+        path: &str,
+        request: &ConnectRequest,
+    ) -> Result<ConnectResponse, Error> {
+        let head = self
+            .head(
+                path,
+                &HeadRequest {
+                    options: request.options.clone(),
+                },
+            )
+            .await?;
 
         Ok(ConnectResponse {
             status: head.status,
@@ -130,12 +191,14 @@ impl Client {
         })
     }
 
-    pub async fn append(&self, path: &str, request: &AppendRequest) -> Result<AppendResponse, Error> {
+    pub async fn append(
+        &self,
+        path: &str,
+        request: &AppendRequest,
+    ) -> Result<AppendResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
-        let retry = RetryPolicy::new(self.inner.config.retry);
-        retry
-            .run(|| async {
-                let mut builder = self.request(Method::POST, url.clone(), &request.options);
+        let response = self
+            .send_retrying_request(Method::POST, url, &request.options, |mut builder| {
                 if let Some(content_type) = &request.content_type {
                     builder = builder.header(CONTENT_TYPE, content_type);
                 }
@@ -146,29 +209,33 @@ impl Client {
                     builder = builder
                         .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
                         .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                        .header(crate::protocol::PRODUCER_SEQ, producer.producer_seq.to_string());
+                        .header(
+                            crate::protocol::PRODUCER_SEQ,
+                            producer.producer_seq.to_string(),
+                        );
                 }
-                let response = builder.body(request.body.clone()).send().await?;
-                if !matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT) {
-                    return Err(response_error(response).await.into());
-                }
-                Ok(AppendResponse {
-                    status: response.status().as_u16(),
-                    next_offset: header_value(&response, STREAM_NEXT_OFFSET),
-                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-                    producer_epoch: parse_i64_header(&response, PRODUCER_EPOCH),
-                    producer_seq: parse_i64_header(&response, PRODUCER_SEQ),
-                })
+                builder.body(request.body.clone())
             })
-            .await
+            .await?;
+        let response =
+            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
+        Ok(AppendResponse {
+            status: response.status().as_u16(),
+            next_offset: header_value(&response, STREAM_NEXT_OFFSET),
+            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+            producer_epoch: parse_i64_header(&response, PRODUCER_EPOCH),
+            producer_seq: parse_i64_header(&response, PRODUCER_SEQ),
+        })
     }
 
-    pub async fn close(&self, path: &str, request: &CloseStreamRequest) -> Result<CloseStreamResponse, Error> {
+    pub async fn close(
+        &self,
+        path: &str,
+        request: &CloseStreamRequest,
+    ) -> Result<CloseStreamResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
-        let retry = RetryPolicy::new(self.inner.config.retry);
-        retry
-            .run(|| async {
-                let mut builder = self.request(Method::POST, url.clone(), &request.options);
+        let response = self
+            .send_retrying_request(Method::POST, url, &request.options, |mut builder| {
                 builder = builder.header(STREAM_CLOSED, "true");
                 if let Some(content_type) = &request.content_type {
                     builder = builder.header(CONTENT_TYPE, content_type);
@@ -177,57 +244,66 @@ impl Client {
                     builder = builder
                         .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
                         .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                        .header(crate::protocol::PRODUCER_SEQ, producer.producer_seq.to_string());
+                        .header(
+                            crate::protocol::PRODUCER_SEQ,
+                            producer.producer_seq.to_string(),
+                        );
                 }
                 if let Some(body) = &request.body {
                     builder = builder.body(body.clone());
                 }
-                let response = builder.send().await?;
-                if !matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT) {
-                    return Err(response_error(response).await.into());
-                }
-                Ok(CloseStreamResponse {
-                    status: response.status().as_u16(),
-                    final_offset: header_value(&response, STREAM_NEXT_OFFSET)
-                        .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?,
-                    stream_closed: parse_bool_header(&response, STREAM_CLOSED),
-                })
+                builder
             })
-            .await
+            .await?;
+        let response =
+            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
+        Ok(CloseStreamResponse {
+            status: response.status().as_u16(),
+            final_offset: header_value(&response, STREAM_NEXT_OFFSET)
+                .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?,
+            stream_closed: parse_bool_header(&response, STREAM_CLOSED),
+        })
     }
 
     pub async fn head(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
-        let response = self.request(Method::HEAD, url, &request.options).send().await?;
-        if !response.status().is_success() {
-            return Err(response_error(response).await.into());
-        }
+        let response = self
+            .send_request(Method::HEAD, url, &request.options, |builder| builder)
+            .await?;
+        let response = Self::require_success(response).await?;
 
         Ok(HeadResponse {
             status: response.status().as_u16(),
             offset: header_value(&response, STREAM_NEXT_OFFSET),
             content_type: header_value(&response, CONTENT_TYPE.as_str()),
-            ttl_seconds: header_value(&response, STREAM_TTL).and_then(|value| value.parse::<u64>().ok()),
+            ttl_seconds: header_value(&response, STREAM_TTL)
+                .and_then(|value| value.parse::<u64>().ok()),
             expires_at: header_value(&response, STREAM_EXPIRES_AT),
             stream_closed: parse_bool_header(&response, STREAM_CLOSED),
             etag: header_value(&response, reqwest::header::ETAG.as_str()),
         })
     }
 
-    pub async fn delete(&self, path: &str, request: &DeleteRequest) -> Result<DeleteResponse, Error> {
+    pub async fn delete(
+        &self,
+        path: &str,
+        request: &DeleteRequest,
+    ) -> Result<DeleteResponse, Error> {
         let url = self.stream_url(path, &request.options)?;
-        let response = self.request(Method::DELETE, url, &request.options).send().await?;
-        if !matches!(response.status(), StatusCode::OK | StatusCode::NO_CONTENT) {
-            return Err(response_error(response).await.into());
-        }
+        let response = self
+            .send_request(Method::DELETE, url, &request.options, |builder| builder)
+            .await?;
+        let response =
+            Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT]).await?;
         Ok(DeleteResponse {
             status: response.status().as_u16(),
         })
     }
 
     pub async fn read(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
-        let retry = RetryPolicy::new(self.inner.config.retry);
-        retry.run(|| self.read_once(path, request)).await
+        self.retry_policy()
+            .run(|| self.read_once(path, request))
+            .await
     }
 
     async fn read_once(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
@@ -239,7 +315,11 @@ impl Client {
         }
     }
 
-    async fn read_long_poll(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
+    async fn read_long_poll(
+        &self,
+        path: &str,
+        request: &ReadRequest,
+    ) -> Result<ReadResponse, Error> {
         let started_at = Instant::now();
         let budget = request.timeout;
         let max_chunks = request.max_chunks.unwrap_or(usize::MAX);
@@ -254,7 +334,10 @@ impl Client {
                 if elapsed >= budget {
                     return Ok(aggregate.unwrap_or(ReadResponse {
                         status: 200,
-                        next_offset: current_request.offset.clone().unwrap_or_else(|| "-1".to_string()),
+                        next_offset: current_request
+                            .offset
+                            .clone()
+                            .unwrap_or_else(|| "-1".to_string()),
                         up_to_date: true,
                         stream_closed: false,
                         cursor: None,
@@ -267,7 +350,9 @@ impl Client {
                 current_request.timeout = Some(budget - elapsed);
             }
 
-            let response = self.read_http(path, &current_request, Some("long-poll")).await?;
+            let response = self
+                .read_http(path, &current_request, Some("long-poll"))
+                .await?;
             match &mut aggregate {
                 Some(collected) => {
                     collected.status = response.status;
@@ -309,16 +394,17 @@ impl Client {
         live: Option<&str>,
     ) -> Result<ReadResponse, Error> {
         let url = self.read_url(path, request, live)?;
-        let mut builder = self.request(Method::GET, url, &request.options);
-        if let Some(etag) = &request.if_none_match {
-            builder = builder.header(reqwest::header::IF_NONE_MATCH, etag);
-        }
-
         let future = async {
-            let response = builder.send().await?;
-            if !response.status().is_success() {
-                return Err(response_error(response).await.into());
-            }
+            let response = self
+                .send_request(Method::GET, url, &request.options, |builder| {
+                    if let Some(etag) = &request.if_none_match {
+                        builder.header(reqwest::header::IF_NONE_MATCH, etag)
+                    } else {
+                        builder
+                    }
+                })
+                .await?;
+            let response = Self::require_success(response).await?;
             collect_catch_up(response).await
         };
 
@@ -344,12 +430,11 @@ impl Client {
 
     async fn read_sse(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
         let url = self.read_url(path, request, Some("sse"))?;
-        let builder = self.request(Method::GET, url, &request.options);
         let future = async {
-            let response = builder.send().await?;
-            if !response.status().is_success() {
-                return Err(response_error(response).await.into());
-            }
+            let response = self
+                .send_request(Method::GET, url, &request.options, |builder| builder)
+                .await?;
+            let response = Self::require_success(response).await?;
             collect_sse(response, request.max_chunks, request.wait_for_up_to_date).await
         };
 
@@ -415,14 +500,22 @@ impl Client {
         Subscription { receiver, task }
     }
 
-    fn request(&self, method: Method, url: Url, options: &RequestOptions) -> reqwest::RequestBuilder {
+    fn request(
+        &self,
+        method: Method,
+        url: Url,
+        options: &RequestOptions,
+    ) -> reqwest::RequestBuilder {
         let mut builder = self.inner.http.request(method, url);
         builder = self.apply_default_headers(builder);
         builder = self.apply_request_headers(builder, options);
         self.apply_auth(builder)
     }
 
-    fn apply_default_headers(&self, mut builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_default_headers(
+        &self,
+        mut builder: reqwest::RequestBuilder,
+    ) -> reqwest::RequestBuilder {
         for (name, value) in &self.inner.config.defaults.headers {
             builder = builder.header(name, value);
         }
@@ -448,7 +541,11 @@ impl Client {
     }
 
     fn stream_url(&self, path: &str, options: &RequestOptions) -> Result<Url, Error> {
-        let mut url = self.inner.config.base_url.join(path.trim_start_matches('/'))?;
+        let mut url = self
+            .inner
+            .config
+            .base_url
+            .join(path.trim_start_matches('/'))?;
         {
             let mut pairs = url.query_pairs_mut();
             for (key, value) in &self.inner.config.defaults.query {
@@ -461,7 +558,12 @@ impl Client {
         Ok(url)
     }
 
-    fn read_url(&self, path: &str, request: &ReadRequest, live: Option<&str>) -> Result<Url, Error> {
+    fn read_url(
+        &self,
+        path: &str,
+        request: &ReadRequest,
+        live: Option<&str>,
+    ) -> Result<Url, Error> {
         let mut url = self.stream_url(path, &request.options)?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -482,7 +584,10 @@ impl Client {
 }
 
 impl StreamHandle {
-    pub async fn create(&self, request: &CreateStreamRequest) -> Result<CreateStreamResponse, Error> {
+    pub async fn create(
+        &self,
+        request: &CreateStreamRequest,
+    ) -> Result<CreateStreamResponse, Error> {
         self.client.create(&self.path, request).await
     }
 
