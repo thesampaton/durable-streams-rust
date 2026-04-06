@@ -1,6 +1,6 @@
 # durable-streams-rust
 
-Canonical Rust workspace scaffold for Durable Streams components.
+Canonical Rust workspace for Durable Streams components.
 
 This repository now contains the Rust client, the migrated Rust server, and the
 workspace plumbing around them.
@@ -45,6 +45,8 @@ It does **not** vendor or wrap the upstream example Rust client.
   crate, carried into this workspace from the former standalone repository with
   its existing runtime, storage, and protocol behaviour preserved as much as
   practical.
+  The current in-tree server is intentionally a lift-and-shift of the published
+  `durable-streams-server` `0.1.3` codebase, not a redesign.
 - `tests/conformance` and `scripts/conformance` define where upstream Durable
   Streams conformance adapters and runners live.
 - `docs/architecture.md` describes the intended long-term shape.
@@ -75,6 +77,7 @@ the adapter, such as higher-level batching and retry-options validation.
 The Rust server now lives in this workspace as `crates/durable-streams-server`.
 
 - Binary crate and library crate name: `durable-streams-server`
+- Current migrated version: published crate `durable-streams-server` `0.1.3`
 - Existing integration and unit tests are crate-local under
   `crates/durable-streams-server/tests`
 - Workspace launcher used by the upstream server suite:
@@ -147,7 +150,7 @@ To run the upstream client conformance suite against the adapter in this repo:
 ./scripts/conformance/run-client-suite.sh --fail-fast
 ```
 
-To run the upstream server conformance suite once a server launcher is ready:
+To run the upstream server conformance suite from this workspace:
 
 ```bash
 ./scripts/conformance/run-server-suite.sh

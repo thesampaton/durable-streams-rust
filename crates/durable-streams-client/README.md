@@ -1,8 +1,8 @@
 # durable-streams-client
 
-Production-oriented Rust client library for Durable Streams.
+Rust client library for Durable Streams.
 
-This crate is intended for normal service and backend usage:
+This crate provides:
 
 - explicit typed request and response models
 - first-class typed configuration
@@ -12,7 +12,7 @@ This crate is intended for normal service and backend usage:
 - async HTTP client built on `reqwest` and `tokio`
 - idempotent producer support
 
-## Public API
+## Main Types
 
 The main entry points are:
 
@@ -52,7 +52,7 @@ println!("next offset: {}", response.next_offset);
 # }
 ```
 
-## TOML Config
+## Configuration
 
 Example `config/default.toml`:
 
@@ -94,11 +94,9 @@ let _client = Client::new(config)?;
 # }
 ```
 
-## Environment Overrides
+Environment overrides use the `DURABLE_STREAMS_CLIENT__` prefix.
 
-The default env prefix is `DURABLE_STREAMS_CLIENT__`.
-
-Common overrides:
+Common variables:
 
 - `DURABLE_STREAMS_CLIENT__CLIENT__BASE_URL`
 - `DURABLE_STREAMS_CLIENT__AUTH__TYPE`
@@ -121,7 +119,7 @@ Common overrides:
 
 `DEFAULTS__HEADERS_JSON` and `DEFAULTS__QUERY_JSON` expect JSON objects.
 
-## Auth Model
+## Authentication
 
 Supported auth modes:
 
@@ -134,7 +132,7 @@ The `header` mode is intended for gatekeepers, API gateways, or custom auth
 proxies where a static request header is operationally simpler than standard
 HTTP auth schemes.
 
-## Conformance
+## Verification
 
 This crate is wired to the upstream client conformance suite through:
 

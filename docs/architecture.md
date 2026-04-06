@@ -2,13 +2,15 @@
 
 ## Current Shape
 
-This repository is a Rust workspace that establishes the intended long-term home
-for Durable Streams Rust components without prematurely committing to internal
-shared abstractions.
+This repository is a Rust workspace that is now the long-term home for Durable
+Streams Rust components without prematurely committing to internal shared
+abstractions.
 
-- `durable-streams-client` is the first-class target for the next stage of work.
-- `durable-streams-server` is present only as a placeholder boundary so the
-  existing production server can later be migrated in cleanly.
+- `durable-streams-client` is the actively developed client crate.
+- `durable-streams-server` now contains the migrated server crate. The current
+  workspace copy is a deliberate lift-and-shift of the published
+  `durable-streams-server` `0.1.3` codebase so behaviour is preserved before any
+  later cleanup or redesign.
 - Workspace-level `tests/conformance` and `scripts/conformance` exist because
   the upstream conformance suites exercise process-level behavior and external
   standards alignment, not just crate-local Rust APIs.
@@ -19,17 +21,16 @@ The workspace intentionally avoids adding a shared `core`, `protocol`, or
 `common` crate at this stage. Those splits should only appear once concrete code
 demands them.
 
-Likewise, the repository does not yet define release automation, packaging
-policy, or server/client binary layouts beyond the minimum needed to make the
-workspace compile and evolve cleanly.
+Likewise, the repository does not yet define shared-core extraction, release
+automation, or packaging policy beyond the minimum needed to make the workspace
+compile, test, and evolve cleanly.
 
 ## Planned Evolution
 
-1. Build the production-quality Rust client inside
-   `crates/durable-streams-client`.
-2. Replace the conformance adapter placeholders with runnable adapters that
-   invoke the client surface under test, and replace the server launcher
-   placeholder with a runnable server startup script.
-3. Import the existing server into `crates/durable-streams-server` when the
-   migration plan is ready.
-4. Introduce additional crates only when real code boundaries justify them.
+1. Continue evolving the Rust client inside `crates/durable-streams-client`.
+2. Keep the migrated server building and conforming inside
+   `crates/durable-streams-server` without mixing preservation work and
+   redesign work.
+3. Introduce additional crates only when real code boundaries justify them.
+4. Revisit release automation and packaging policy once the workspace shape has
+   stabilised.

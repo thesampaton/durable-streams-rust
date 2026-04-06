@@ -16,6 +16,9 @@ Streams conformance suites.
 The upstream suites are external standards-alignment checks. They are therefore
 tracked at workspace level rather than being hidden inside a single crate.
 
+The current server-side harness targets the migrated `durable-streams-server`
+`0.1.3` code now living in this workspace.
+
 ## Client Conformance
 
 Install the pinned npm dependencies first:
