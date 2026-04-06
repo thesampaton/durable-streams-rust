@@ -173,7 +173,7 @@ enum ValidateTarget {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SuccessResult {
     #[serde(rename = "type")]
@@ -337,15 +337,6 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             AdapterOutput::Success(SuccessResult {
                 result_type: "init".to_string(),
                 success: true,
-                status: None,
-                offset: None,
-                final_offset: None,
-                up_to_date: None,
-                stream_closed: None,
-                content_type: None,
-                headers_sent: None,
-                params_sent: None,
-                chunks: None,
                 client_name: Some("durable-streams-client-rust".to_string()),
                 client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 features: Some(FeatureFlags {
@@ -357,6 +348,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     dynamic_headers: true,
                     strict_zero_validation: true,
                 }),
+                ..Default::default()
             })
         }
         Command::Create {
@@ -392,16 +384,8 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         success: true,
                         status: Some(result.status),
                         offset: result.next_offset,
-                        final_offset: None,
-                        up_to_date: None,
                         stream_closed: Some(result.stream_closed),
-                        content_type: None,
-                        headers_sent: None,
-                        params_sent: None,
-                        chunks: None,
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     })
                 }
                 Err(error) => AdapterOutput::Error(error_to_output("create", Some(&path), &error)),
@@ -433,16 +417,8 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         success: true,
                         status: Some(result.status),
                         offset: result.offset,
-                        final_offset: None,
-                        up_to_date: None,
                         stream_closed: Some(result.stream_closed),
-                        content_type: None,
-                        headers_sent: None,
-                        params_sent: None,
-                        chunks: None,
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     })
                 }
                 Err(error) => AdapterOutput::Error(error_to_output("connect", Some(&path), &error)),
@@ -497,16 +473,10 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     success: true,
                     status: Some(200),
                     offset: result.next_offset,
-                    final_offset: None,
-                    up_to_date: None,
                     stream_closed: Some(result.stream_closed),
-                    content_type: None,
                     headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
                     params_sent: Some(params_sent).filter(|m| !m.is_empty()),
-                    chunks: None,
-                    client_name: None,
-                    client_version: None,
-                    features: None,
+                    ..Default::default()
                 }),
                 Err(error) => AdapterOutput::Error(error_to_output("append", Some(&path), &error)),
             }
@@ -562,16 +532,12 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         success: true,
                         status: Some(result.status),
                         offset: Some(result.next_offset),
-                        final_offset: None,
                         up_to_date: Some(result.up_to_date),
                         stream_closed: Some(result.stream_closed),
-                        content_type: None,
                         headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
                         params_sent: Some(params_sent).filter(|m| !m.is_empty()),
                         chunks: Some(chunks),
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     })
                 }
                 Err(error) => AdapterOutput::Error(read_error_output(&path, live, offset.as_deref(), &error)),
@@ -603,16 +569,9 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         success: true,
                         status: Some(result.status),
                         offset: result.offset,
-                        final_offset: None,
-                        up_to_date: None,
                         stream_closed: Some(result.stream_closed),
                         content_type: result.content_type,
-                        headers_sent: None,
-                        params_sent: None,
-                        chunks: None,
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     })
                 }
                 Err(error) => AdapterOutput::Error(error_to_output("head", Some(&path), &error)),
@@ -639,17 +598,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     result_type: "delete".to_string(),
                     success: true,
                     status: Some(200),
-                    offset: None,
-                    final_offset: None,
-                    up_to_date: None,
-                    stream_closed: None,
-                    content_type: None,
-                    headers_sent: None,
-                    params_sent: None,
-                    chunks: None,
-                    client_name: None,
-                    client_version: None,
-                    features: None,
+                    ..Default::default()
                 }),
                 Err(error) => AdapterOutput::Error(error_to_output("delete", Some(&path), &error)),
             }
@@ -676,17 +625,9 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     result_type: "close".to_string(),
                     success: true,
                     status: Some(200),
-                    offset: None,
                     final_offset: Some(result.final_offset),
-                    up_to_date: None,
                     stream_closed: Some(result.stream_closed),
-                    content_type: None,
-                    headers_sent: None,
-                    params_sent: None,
-                    chunks: None,
-                    client_name: None,
-                    client_version: None,
-                    features: None,
+                    ..Default::default()
                 }),
                 Err(error) => AdapterOutput::Error(error_to_output("close", Some(&path), &error)),
             }
@@ -756,17 +697,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         result_type: "idempotent-append".to_string(),
                         success: true,
                         status: Some(200),
-                        offset: None,
-                        final_offset: None,
-                        up_to_date: None,
-                        stream_closed: None,
-                        content_type: None,
-                        headers_sent: None,
-                        params_sent: None,
-                        chunks: None,
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     }),
                     Err(error) => AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error)),
                 },
@@ -808,17 +739,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                                 result_type: "idempotent-append-batch".to_string(),
                                 success: true,
                                 status: Some(200),
-                                offset: None,
-                                final_offset: None,
-                                up_to_date: None,
-                                stream_closed: None,
-                                content_type: None,
-                                headers_sent: None,
-                                params_sent: None,
-                                chunks: None,
-                                client_name: None,
-                                client_version: None,
-                                features: None,
+                                ..Default::default()
                             })
                         }
                         Err(error) => AdapterOutput::Error(error_to_output("idempotent-append-batch", Some(&path), &error)),
@@ -853,17 +774,9 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         result_type: "idempotent-close".to_string(),
                         success: true,
                         status: Some(200),
-                        offset: None,
                         final_offset: Some(result.final_offset),
-                        up_to_date: None,
                         stream_closed: Some(result.stream_closed),
-                        content_type: None,
-                        headers_sent: None,
-                        params_sent: None,
-                        chunks: None,
-                        client_name: None,
-                        client_version: None,
-                        features: None,
+                        ..Default::default()
                     }),
                     Err(error) => AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error)),
                 },
@@ -884,17 +797,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 result_type: "idempotent-detach".to_string(),
                 success: true,
                 status: Some(200),
-                offset: None,
-                final_offset: None,
-                up_to_date: None,
-                stream_closed: None,
-                content_type: None,
-                headers_sent: None,
-                params_sent: None,
-                chunks: None,
-                client_name: None,
-                client_version: None,
-                features: None,
+                ..Default::default()
             })
         }
         Command::Shutdown => AdapterOutput::Success(empty_success("shutdown")),
@@ -905,18 +808,7 @@ fn empty_success(result_type: &str) -> SuccessResult {
     SuccessResult {
         result_type: result_type.to_string(),
         success: true,
-        status: None,
-        offset: None,
-        final_offset: None,
-        up_to_date: None,
-        stream_closed: None,
-        content_type: None,
-        headers_sent: None,
-        params_sent: None,
-        chunks: None,
-        client_name: None,
-        client_version: None,
-        features: None,
+        ..Default::default()
     }
 }
 
