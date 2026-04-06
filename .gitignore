@@ -13,6 +13,8 @@ pnpm-debug.log*
 .env.*
 !.env.example
 .direnv/
+/crates/durable-streams-server/config/local.toml
+/crates/durable-streams-server/data/
 
 # Editor / IDE files
 /.idea/
