@@ -1,3 +1,5 @@
+//! Retry policy for transient client operations.
+
 use crate::error::Error;
 use crate::instrumentation as trace;
 use crate::model::RetryOptions;
@@ -12,11 +14,13 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
+    /// Create a retry policy from caller-supplied options.
     #[must_use]
     pub const fn new(options: RetryOptions) -> Self {
         Self { options }
     }
 
+    /// Validate retry parameters before policy construction or execution.
     pub fn validate(options: RetryOptions) -> Result<(), Error> {
         if options.initial_backoff.is_zero() {
             return Err(Error::invalid_argument(
@@ -36,6 +40,7 @@ impl RetryPolicy {
         Ok(())
     }
 
+    /// Run an operation with bounded retry behavior for retryable errors.
     pub async fn run<T, F, Fut>(&self, mut operation: F) -> Result<T, Error>
     where
         F: FnMut() -> Fut,
@@ -82,6 +87,7 @@ impl RetryPolicy {
     }
 }
 
+/// Compute the next exponential backoff delay capped at `max_delay`.
 #[must_use]
 pub fn next_delay(current: Duration, max_delay: Duration, multiplier: f64) -> Duration {
     let next = current.mul_f64(multiplier);

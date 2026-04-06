@@ -1,3 +1,5 @@
+//! Authentication configuration applied by the client.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

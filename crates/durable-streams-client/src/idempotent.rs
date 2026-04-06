@@ -1,3 +1,8 @@
+//! Idempotent producer helper for sequence-aware append workflows.
+//!
+//! [`IdempotentProducer`] wraps [`crate::Client`] and manages producer headers,
+//! local sequence advancement, and optional epoch auto-claim behavior.
+
 use crate::client::{Client, ProducerHeaders};
 use crate::error::{Error, ErrorKind};
 use crate::instrumentation as trace;
@@ -17,10 +22,15 @@ struct ProducerState {
 /// Idempotent producer configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdempotentProducerConfig {
+    /// Producer identifier sent in `Producer-Id`.
     pub producer_id: String,
+    /// Starting epoch used for the first append.
     pub epoch: i64,
+    /// Whether 403 fencing responses should trigger one local epoch claim retry.
     pub auto_claim: bool,
+    /// Maximum bytes allowed in a batched append payload.
     pub max_batch_bytes: usize,
+    /// Optional maximum number of logical items per batch.
     pub max_batch_items: Option<usize>,
 }
 
@@ -37,6 +47,7 @@ impl Default for IdempotentProducerConfig {
 }
 
 impl IdempotentProducerConfig {
+    /// Validate producer configuration before construction.
     pub fn validate(&self) -> Result<(), Error> {
         if self.producer_id.trim().is_empty() {
             return Err(Error::invalid_argument("producerId must not be empty"));
@@ -61,6 +72,9 @@ impl IdempotentProducerConfig {
 }
 
 /// Producer helper that manages producer headers and sequence advancement.
+///
+/// This type is intended for callers that want a higher-level append API than
+/// constructing [`crate::ProducerRequest`] manually on every call.
 pub struct IdempotentProducer {
     client: Client,
     path: String,
@@ -71,6 +85,7 @@ pub struct IdempotentProducer {
 }
 
 impl IdempotentProducer {
+    /// Create a producer bound to one stream path and content type.
     pub fn new(
         client: Client,
         path: impl Into<String>,
@@ -104,6 +119,7 @@ impl IdempotentProducer {
         })
     }
 
+    /// Append one payload and advance the local producer sequence on success.
     pub async fn append(&self, body: Vec<u8>) -> Result<crate::model::AppendResponse, Error> {
         let span = trace::producer_span("producer_append", &self.path);
         async {
@@ -125,6 +141,10 @@ impl IdempotentProducer {
         .await
     }
 
+    /// Append multiple logical payloads as one request body.
+    ///
+    /// JSON content types are wrapped into one JSON array. Other content types
+    /// are concatenated as raw bytes.
     pub async fn append_batch(
         &self,
         bodies: &[Vec<u8>],
@@ -148,6 +168,7 @@ impl IdempotentProducer {
         self.append(combined).await
     }
 
+    /// Close the stream using the current producer state.
     pub async fn close(
         &self,
         body: Option<Vec<u8>>,
@@ -203,6 +224,9 @@ impl IdempotentProducer {
         .await
     }
 
+    /// Release the producer handle without sending any protocol call.
+    ///
+    /// This currently exists as an explicit lifecycle no-op for API symmetry.
     pub async fn detach(&self) -> Result<(), Error> {
         Ok(())
     }

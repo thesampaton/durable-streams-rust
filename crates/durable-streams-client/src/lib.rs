@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code)]
 #![allow(missing_docs)]
+#![doc = include_str!("../README.md")]
 
 //! Production-oriented Durable Streams client library.
 //!
@@ -65,6 +66,19 @@
 //! The config loader is intentionally separate from the HTTP client so
 //! applications can either adopt the built-in operational model or construct
 //! [`ClientConfig`] directly.
+
+//! # Library Entry Points
+//!
+//! Most users will start with:
+//!
+//! - [`Client`] for top-level stream operations
+//! - [`StreamHandle`] for path-bound operations on one stream
+//! - [`ClientConfig`] or [`ClientConfigLoader`] for construction
+//! - [`IdempotentProducer`] when producer fencing and sequence management matter
+//! - request and response types re-exported at crate root for ergonomic imports
+//!
+//! The public modules remain available when you want to browse one area of the
+//! API in rustdoc by concern: auth, config, error handling, models, and retry.
 
 pub mod auth;
 pub mod client;

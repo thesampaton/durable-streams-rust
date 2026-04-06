@@ -1,3 +1,9 @@
+//! High-level asynchronous client and stream-scoped handles.
+//!
+//! [`Client`] owns the configured HTTP transport and exposes the full Durable
+//! Streams operation set. [`StreamHandle`] binds a stream path so callers can
+//! reuse one client for many operations without repeating the path argument.
+
 use crate::auth::AuthConfig;
 use crate::config::ClientConfig;
 use crate::error::Error;
@@ -33,19 +39,28 @@ struct ClientInner {
 }
 
 /// Durable Streams HTTP client.
+///
+/// This is the main integration entry point for applications. It owns the
+/// configured `reqwest` client, default headers, auth behavior, and retry
+/// policy derived from [`ClientConfig`].
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<ClientInner>,
 }
 
-/// Stream-scoped view over a client.
+/// Stream-scoped view over a [`Client`].
+///
+/// Use this when one caller performs repeated operations on a single stream.
 #[derive(Clone)]
 pub struct StreamHandle {
     client: Client,
     path: String,
 }
 
-/// Background subscription handle.
+/// Background subscription handle returned by [`Client::subscribe`].
+///
+/// The receiver yields collected subscription events until the background task
+/// completes or is aborted.
 pub struct Subscription {
     receiver: mpsc::Receiver<Result<SubscriptionEvent, Error>>,
     task: JoinHandle<()>,
@@ -59,6 +74,7 @@ pub(crate) struct ProducerHeaders<'a> {
 }
 
 impl Client {
+    /// Build a client from validated configuration.
     pub fn from_config(config: ClientConfig) -> Result<Self, Error> {
         config.validate()?;
 
@@ -112,15 +128,18 @@ impl Client {
         })
     }
 
+    /// Alias for [`Client::from_config`].
     pub fn new(config: ClientConfig) -> Result<Self, Error> {
         Self::from_config(config)
     }
 
+    /// Return the resolved configuration used by this client.
     #[must_use]
     pub fn config(&self) -> &ClientConfig {
         &self.inner.config
     }
 
+    /// Bind a stream path and return a path-scoped handle.
     #[must_use]
     pub fn stream(&self, path: impl Into<String>) -> StreamHandle {
         StreamHandle {
@@ -238,6 +257,10 @@ impl Client {
         }
     }
 
+    /// Create a stream.
+    ///
+    /// Maps to `PUT /v1/stream/{name}` and returns the created or idempotently
+    /// reused stream state, including the next offset when the server provides it.
     pub async fn create(
         &self,
         path: &str,
@@ -309,6 +332,7 @@ impl Client {
         .await
     }
 
+    /// Fetch metadata for an existing stream without reading message bodies.
     pub async fn connect(
         &self,
         path: &str,
@@ -361,6 +385,10 @@ impl Client {
         .await
     }
 
+    /// Append one request body to an existing stream.
+    ///
+    /// When `request.producer` is set, the append uses the protocol's idempotent
+    /// producer headers and returns any acknowledged producer sequence state.
     pub async fn append(
         &self,
         path: &str,
@@ -464,6 +492,7 @@ impl Client {
         .await
     }
 
+    /// Close a stream, optionally including a final body payload.
     pub async fn close(
         &self,
         path: &str,
@@ -591,6 +620,7 @@ impl Client {
         })
     }
 
+    /// Read from a stream in catch-up, long-poll, or SSE-backed collection mode.
     pub async fn head(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
         let span = trace::client_operation_span(
             "head_stream",
@@ -622,6 +652,7 @@ impl Client {
         .await
     }
 
+    /// Delete a stream.
     pub async fn delete(
         &self,
         path: &str,
@@ -671,6 +702,10 @@ impl Client {
         .await
     }
 
+    /// Collect a read response into owned chunks and payload metadata.
+    ///
+    /// For `live = sse`, this method consumes the SSE stream and returns the
+    /// collected chunks rather than exposing the raw event stream directly.
     pub async fn read(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
         let span = trace::client_operation_span(
             "read_stream",
@@ -901,6 +936,10 @@ impl Client {
         }
     }
 
+    /// Start a background subscription for one stream.
+    ///
+    /// The returned [`Subscription`] can be polled with [`Subscription::next`]
+    /// or aborted explicitly with [`Subscription::abort`].
     pub fn subscribe(&self, path: &str, request: SubscribeRequest) -> Subscription {
         let client = self.clone();
         let path = path.to_string();
@@ -1075,6 +1114,7 @@ fn build_default_headers(config: &ClientConfig) -> Result<HeaderMap, Error> {
 }
 
 impl StreamHandle {
+    /// Create this stream using the handle's bound path.
     pub async fn create(
         &self,
         request: &CreateStreamRequest,
@@ -1082,36 +1122,44 @@ impl StreamHandle {
         self.client.create(&self.path, request).await
     }
 
+    /// Fetch metadata for this stream.
     pub async fn connect(&self, request: &ConnectRequest) -> Result<ConnectResponse, Error> {
         self.client.connect(&self.path, request).await
     }
 
+    /// Append to this stream.
     pub async fn append(&self, request: &AppendRequest) -> Result<AppendResponse, Error> {
         self.client.append(&self.path, request).await
     }
 
+    /// Read from this stream.
     pub async fn read(&self, request: &ReadRequest) -> Result<ReadResponse, Error> {
         self.client.read(&self.path, request).await
     }
 
+    /// Close this stream.
     pub async fn close(&self, request: &CloseStreamRequest) -> Result<CloseStreamResponse, Error> {
         self.client.close(&self.path, request).await
     }
 
+    /// Read head metadata for this stream.
     pub async fn head(&self, request: &HeadRequest) -> Result<HeadResponse, Error> {
         self.client.head(&self.path, request).await
     }
 
+    /// Delete this stream.
     pub async fn delete(&self, request: &DeleteRequest) -> Result<DeleteResponse, Error> {
         self.client.delete(&self.path, request).await
     }
 }
 
 impl Subscription {
+    /// Receive the next subscription event, or `None` when the task has finished.
     pub async fn next(&mut self) -> Option<Result<SubscriptionEvent, Error>> {
         self.receiver.recv().await
     }
 
+    /// Abort the background subscription task.
     pub fn abort(&self) {
         self.task.abort();
     }

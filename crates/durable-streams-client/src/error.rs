@@ -1,3 +1,9 @@
+//! Error types exposed by the client crate.
+//!
+//! [`enum@Error`] is the main application-facing type. [`HttpError`] preserves
+//! protocol details from non-success responses when callers need to branch on
+//! offsets, stream state, or producer metadata.
+
 use reqwest::StatusCode;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -38,21 +44,25 @@ pub enum Error {
 }
 
 impl Error {
+    /// Construct an invalid-argument error.
     #[must_use]
     pub fn invalid_argument(message: impl Into<String>) -> Self {
         Self::InvalidArgument(message.into())
     }
 
+    /// Construct a configuration error.
     #[must_use]
     pub fn config(message: impl Into<String>) -> Self {
         Self::Config(message.into())
     }
 
+    /// Construct a protocol parse error.
     #[must_use]
     pub fn parse(message: impl Into<String>) -> Self {
         Self::Parse(message.into())
     }
 
+    /// Return the normalized error category.
     #[must_use]
     pub fn kind(&self) -> ErrorKind {
         match self {
@@ -68,6 +78,7 @@ impl Error {
         }
     }
 
+    /// Return whether the error is a candidate for retry.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
@@ -78,7 +89,7 @@ impl Error {
     }
 }
 
-/// Normalized error category.
+/// Normalized error category used across transport and protocol failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
     InvalidArgument,
@@ -96,7 +107,7 @@ pub enum ErrorKind {
     Io,
 }
 
-/// Coarse error code used by the conformance adapter and callers.
+/// Coarse error code used by the conformance adapter and simple callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     NetworkError,
@@ -114,6 +125,9 @@ pub enum ErrorCode {
 }
 
 /// HTTP error with preserved protocol details.
+///
+/// This retains parsed response headers and server-reported sequencing metadata
+/// so higher-level code can make conflict or recovery decisions.
 #[derive(Debug)]
 pub struct HttpError {
     pub status: StatusCode,
@@ -130,6 +144,7 @@ pub struct HttpError {
 }
 
 impl HttpError {
+    /// Return whether this HTTP status is typically safe to retry.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(

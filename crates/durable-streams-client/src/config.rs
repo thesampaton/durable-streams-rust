@@ -1,3 +1,8 @@
+//! Configuration types and layered loading for the client crate.
+//!
+//! [`ClientConfig`] is the resolved runtime view. [`ClientConfigLoader`] is the
+//! operational helper that merges TOML files and environment-variable overrides.
+
 use crate::auth::AuthConfig;
 use crate::error::Error;
 use crate::model::RetryOptions;
@@ -10,13 +15,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use url::Url;
 
-/// Resolved client configuration.
+/// Resolved client configuration used to construct a [`crate::Client`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientConfig {
+    /// Base server URL, for example `http://127.0.0.1:4437`.
     pub base_url: Url,
+    /// Authentication mode applied to outgoing requests.
     pub auth: AuthConfig,
+    /// Transport-level timeouts, headers, and proxy settings.
     pub transport: TransportConfig,
+    /// Retry behavior for transient operations.
     pub retry: RetryOptions,
+    /// Request defaults merged into per-call options.
     pub defaults: DefaultsConfig,
 }
 
@@ -38,6 +48,7 @@ impl Default for ClientConfig {
 }
 
 impl ClientConfig {
+    /// Validate auth, transport, and retry settings before client construction.
     pub fn validate(&self) -> Result<(), Error> {
         self.auth.validate()?;
         crate::retry::RetryPolicy::validate(self.retry)?;
@@ -47,6 +58,9 @@ impl ClientConfig {
 }
 
 /// Default request-level options assembled from configuration.
+///
+/// These values are merged into individual requests unless the call site
+/// overrides them explicitly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct DefaultsConfig {
@@ -55,13 +69,17 @@ pub struct DefaultsConfig {
     pub query: HashMap<String, String>,
 }
 
-/// Transport-level configuration.
+/// Transport-level configuration for the underlying HTTP client.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct TransportConfig {
+    /// TCP/TLS connect timeout.
     pub connect_timeout: Duration,
+    /// Whole-request timeout.
     pub request_timeout: Duration,
+    /// User-Agent header sent with requests.
     pub user_agent: String,
+    /// Optional proxy URL passed through to `reqwest`.
     pub proxy_url: Option<String>,
 }
 
@@ -92,12 +110,24 @@ impl TransportConfig {
     }
 }
 
-/// File-and-env configuration loader.
+/// File-and-environment configuration loader.
+///
+/// Load order:
+///
+/// 1. `config/default.toml`
+/// 2. `config/<profile>.toml`
+/// 3. `config/local.toml`
+/// 4. `config_override` if set
+/// 5. environment variables with `env_prefix`
 #[derive(Debug, Clone)]
 pub struct ClientConfigLoader {
+    /// Directory containing layered TOML config files.
     pub config_dir: PathBuf,
+    /// Profile loaded after `default.toml`.
     pub profile: String,
+    /// Optional extra TOML file merged last before env overrides.
     pub config_override: Option<PathBuf>,
+    /// Environment variable prefix, for example `DURABLE_STREAMS_CLIENT__`.
     pub env_prefix: String,
 }
 
@@ -113,10 +143,12 @@ impl Default for ClientConfigLoader {
 }
 
 impl ClientConfigLoader {
+    /// Load configuration from files plus environment-variable overrides.
     pub fn load(&self) -> Result<ClientConfig, ClientConfigLoaderError> {
         self.load_with_lookup(&|key| env::var(key).ok())
     }
 
+    /// Load configuration from the default search path plus one explicit override file.
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<ClientConfig, ClientConfigLoaderError> {
         let mut loader = Self::default();
         loader.config_override = Some(path.as_ref().to_path_buf());
@@ -176,7 +208,7 @@ impl ClientConfigLoader {
     }
 }
 
-/// Config loader errors.
+/// Errors returned while assembling [`ClientConfig`] from operational sources.
 #[derive(Debug)]
 pub enum ClientConfigLoaderError {
     Io(std::io::Error),

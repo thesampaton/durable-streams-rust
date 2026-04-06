@@ -23,7 +23,7 @@ The main entry points are:
 
 ## Example
 
-```rust
+```no_run
 use durable_streams_client::{
     Client, ClientConfig, CreateStreamRequest, ReadRequest, RequestOptions,
 };
