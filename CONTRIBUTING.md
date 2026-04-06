@@ -30,3 +30,12 @@ together:
 2. `Cargo.toml` workspace metadata
 3. `package.json` conformance package pins
 4. Any related CI or harness scripts
+
+## Server Migration Posture
+
+The current server crate in this workspace is a deliberate lift-and-shift of
+published `durable-streams-server` `0.1.3`.
+
+When touching `crates/durable-streams-server`, preserve behaviour first and do
+not mix routine migration continuity work with opportunistic redesign unless the
+change is explicitly intended.

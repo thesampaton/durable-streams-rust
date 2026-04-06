@@ -44,6 +44,9 @@ Current tracked baselines for this repo:
 - client conformance suite: `@durable-streams/client-conformance-tests@0.2.3`
 - server conformance suite: `@durable-streams/server-conformance-tests@0.2.3`
 
+The current server crate in this workspace is a lift-and-shift of published
+`durable-streams-server` `0.1.3`.
+
 These values should match:
 
 - `docs/standards.md`
@@ -100,7 +103,9 @@ The workspace-level runner:
 
 - optionally launches the local server via `start-server.sh`
 - uses `DURABLE_STREAMS_SERVER_URL` as the target base URL
-- invokes `durable-streams-server-conformance -- --run <url>`
+- creates a temporary Vitest entrypoint that calls
+  `runConformanceTests({ baseUrl })` from the pinned npm package
+- invokes that entrypoint via `npm exec vitest run ...`
 
 Supported local environment knobs:
 

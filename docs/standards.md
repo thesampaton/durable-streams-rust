@@ -38,5 +38,11 @@ Verified on **2026-04-06**:
 
 - The protocol and package baselines are recorded.
 - The npm package versions are pinned exactly in `package.json`.
-- Runnable adapters are not implemented yet; only their entrypoints are
-  scaffolded.
+- The client conformance adapter is implemented in
+  `crates/durable-streams-client`.
+- The server conformance launcher is implemented in
+  `tests/conformance/server/start-server.sh` and targets
+  `crates/durable-streams-server`.
+- The in-tree server crate is currently a lift-and-shift of published
+  `durable-streams-server` `0.1.3`, so server maintenance should distinguish
+  between migration-preservation work and intentional semantic change.

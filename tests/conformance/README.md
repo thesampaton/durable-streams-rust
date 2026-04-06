@@ -16,6 +16,9 @@ Streams conformance suites.
 The upstream suites are external standards-alignment checks. They are therefore
 tracked at workspace level rather than being hidden inside a single crate.
 
+The current server-side harness targets the migrated `durable-streams-server`
+`0.1.3` code now living in this workspace.
+
 ## Client Conformance
 
 Install the pinned npm dependencies first:
@@ -45,9 +48,16 @@ cargo run --quiet -p durable-streams-client --bin client-conformance-adapter -- 
 
 ## Server Conformance
 
-The upstream server suite is still workspace-level, but the local server
-launcher remains a separate concern from the client crate. Use:
+The upstream server suite remains workspace-level. The local launcher now boots
+the migrated Rust server crate from this workspace. Use:
 
 ```bash
 ./scripts/conformance/run-server-suite.sh
+```
+
+The default launcher is `tests/conformance/server/start-server.sh`, which
+executes:
+
+```bash
+cargo run --quiet -p durable-streams-server --
 ```
