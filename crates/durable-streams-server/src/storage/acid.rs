@@ -1,3 +1,9 @@
+//! Crash-resilient redb-backed storage with sharded databases.
+//!
+//! This backend stores stream metadata and messages in redb tables and uses a
+//! stable hash-based shard layout so a stream always maps to the same database
+//! file after restarts.
+
 use super::{
     CreateStreamResult, CreateWithDataResult, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
     ProducerCheck, ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata,
@@ -58,6 +64,11 @@ pub struct AcidStorage {
 }
 
 impl AcidStorage {
+    /// Create or reopen an ACID storage root.
+    ///
+    /// The backend stores its files beneath `<root>/acid`, validates a layout
+    /// manifest, and rebuilds aggregate state from disk before serving requests.
+    ///
     /// # Errors
     ///
     /// Returns `Error::Storage` if storage layout validation fails, shard
@@ -112,6 +123,7 @@ impl AcidStorage {
         Ok(storage)
     }
 
+    /// Return the currently tracked total payload bytes across all streams.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes.load(Ordering::Acquire)

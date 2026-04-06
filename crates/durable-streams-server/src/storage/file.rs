@@ -1,3 +1,9 @@
+//! File-backed storage using one append-only log per stream.
+//!
+//! This backend keeps an in-memory index for fast reads and stores stream data
+//! beneath a caller-supplied root directory. It is a good fit when you want
+//! local persistence without introducing an external database.
+
 use super::{
     CreateStreamResult, CreateWithDataResult, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
     ProducerCheck, ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata,
@@ -84,6 +90,10 @@ impl StreamEntry {
 /// - In-memory offset/file index for fast reads
 /// - Stream-level write lock serializes appends and preserves monotonic offsets
 /// - Batched write per append call reduces syscall overhead
+///
+/// `sync_on_append = false` prioritizes throughput and may lose recently
+/// appended data on crash. `sync_on_append = true` trades latency for stronger
+/// durability semantics.
 #[allow(clippy::module_name_repetitions)]
 pub struct FileStorage {
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
@@ -96,6 +106,11 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
+    /// Create or reopen a file-backed storage root.
+    ///
+    /// Existing streams under `root_dir` are discovered and indexed during
+    /// startup so subsequent reads can serve offsets without rescanning files.
+    ///
     /// # Errors
     ///
     /// Returns `Error::Storage` if the root directory cannot be created or
@@ -134,6 +149,8 @@ impl FileStorage {
         Ok(storage)
     }
 
+    /// Return the currently tracked total payload bytes across all streams.
+    ///
     /// # Panics
     ///
     /// Panics if the internal `total_bytes` lock is poisoned.

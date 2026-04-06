@@ -173,12 +173,32 @@ For this repo specifically:
 
 - Conformance harness plumbing belongs at workspace level.
 - Protocol and conformance version alignment should be recorded, not implied.
+- New crates and public modules should be shaped for rustdoc/docs.rs, not just
+  for local source navigation.
+
+### Rustdoc And Crate Surface
+
+When adding or refining a crate in this workspace:
+
+- Add a crate-level `//!` narrative or `#![doc = include_str!(...)]` so the
+  rustdoc landing page explains the crate on first open.
+- Re-export the intended integration surface at crate root when that materially
+  improves discoverability.
+- Keep internal plumbing modules private or `pub(crate)` unless they are part of
+  the real supported API.
+- Add short `//!` docs to public boundary modules so rustdoc lists show purpose,
+  not just names.
+- Prefer docs that describe integration entry points, invariants, and
+  operational tradeoffs over restating implementation details.
+- Before considering docs done, sanity-check what `cargo doc` or docs.rs will
+  render for the crate index and main public modules.
 
 ## Review Checklist
 
 - Is the code compatible with the workspace MSRV?
 - Does it satisfy pedantic clippy without resorting to lint suppression?
 - Are public items documented appropriately?
+- Does the crate/module public surface look intentional in rustdoc/docs.rs?
 - Is a new dependency actually justified?
 - Is the API explicit and boring in the good sense?
 - Does the code fit the current crate boundary instead of inventing a new one?
@@ -190,6 +210,7 @@ For this repo specifically:
 Naming: snake_case (fn/var), CamelCase (type), SCREAMING_SNAKE_CASE (const/static)
 Format: rustfmt
 Docs: /// for public items, //! for module docs when the module is a public boundary
+Rustdoc: shape crate root and public modules for docs.rs, not just source readers
 Lint: workspace lints are policy; write code to satisfy clippy::pedantic by default
 Deps: prefer std first; justify every new crate
 ```

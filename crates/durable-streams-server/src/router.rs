@@ -1,3 +1,7 @@
+//! Axum router construction for the Durable Streams HTTP surface.
+//!
+//! [`build_router`] is the main embedding entry point for library consumers.
+
 use crate::config::{Config, LongPollTimeout, SseReconnectInterval};
 use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;

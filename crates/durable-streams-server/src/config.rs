@@ -1,3 +1,9 @@
+//! Configuration loading and runtime settings for the server crate.
+//!
+//! [`Config`] is the resolved runtime view. Use [`Config::from_sources`] for the
+//! layered TOML plus environment-variable flow used by the binary, or
+//! [`Config::from_env`] when tests only need the `DS_*` override surface.
+
 use axum::http::HeaderValue;
 use figment::{
     Figment,
@@ -8,7 +14,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Storage runtime mode.
+/// Storage backend selection for the server runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageMode {
     /// In-memory backend.
@@ -46,41 +52,44 @@ impl StorageMode {
 /// Server configuration
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Port to bind the server to
+    /// TCP port to bind the server to.
     pub port: u16,
-    /// Maximum total memory usage in bytes
+    /// Maximum total in-process payload bytes across all streams.
     pub max_memory_bytes: u64,
-    /// Maximum bytes per stream
+    /// Maximum payload bytes retained for any single stream.
     pub max_stream_bytes: u64,
-    /// CORS allowed origins (comma-separated, "*" for all)
+    /// CORS allowlist as `"*"` or a comma-separated origin list.
     pub cors_origins: String,
-    /// Long-poll timeout duration
+    /// Long-poll timeout used by `GET ?live=long-poll`.
     pub long_poll_timeout: Duration,
-    /// SSE reconnect interval in seconds (0 disables).
+    /// SSE reconnect interval in seconds (`0` disables forced reconnects).
     ///
     /// Matches Caddy's `sse_reconnect_interval`. Connections are closed after
     /// this many idle seconds to enable CDN request collapsing.
     pub sse_reconnect_interval_secs: u64,
-    /// Selected storage mode
+    /// Selected persistence backend.
     pub storage_mode: StorageMode,
-    /// Root directory for file/acid-backed storage.
+    /// Root directory for file-backed and acid-backed storage.
     ///
     /// Matches Caddy's `data_dir`.
     pub data_dir: String,
-    /// Number of shards for acid/redb storage mode.
+    /// Number of shards used by the acid/redb backend.
     pub acid_shard_count: usize,
-    /// Optional TLS certificate path (PEM). Requires `tls_key_path`.
+    /// Optional TLS certificate path in PEM format. Requires `tls_key_path`.
     pub tls_cert_path: Option<String>,
-    /// Optional TLS private key path (PEM or PKCS#8). Requires `tls_cert_path`.
+    /// Optional TLS private key path in PEM or PKCS#8 format. Requires `tls_cert_path`.
     pub tls_key_path: Option<String>,
-    /// Default log filter when `RUST_LOG` is not explicitly set.
+    /// Default tracing filter used when `RUST_LOG` is not explicitly set.
     pub rust_log: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConfigLoadOptions {
+    /// Directory containing `default.toml`, `<profile>.toml`, and `local.toml`.
     pub config_dir: PathBuf,
+    /// Named profile loaded after `default.toml`, for example `dev` or `prod`.
     pub profile: String,
+    /// Optional extra TOML file merged after the standard config files.
     pub config_override: Option<PathBuf>,
 }
 

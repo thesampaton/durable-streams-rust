@@ -1,3 +1,11 @@
+//! Storage backends and the persistence contract used by the server.
+//!
+//! [`Storage`] is the central abstraction. The built-in implementations are:
+//!
+//! - [`memory::InMemoryStorage`] for ephemeral development and tests
+//! - [`file::FileStorage`] for append-log persistence on the local filesystem
+//! - [`acid::AcidStorage`] for crash-resilient redb-backed persistence
+
 pub mod acid;
 pub mod file;
 pub mod memory;
@@ -10,9 +18,11 @@ use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 
-/// Stream configuration
+/// Immutable stream configuration captured at create time.
 ///
-/// Immutable configuration set at stream creation time.
+/// This is the durable metadata returned by `HEAD` and used for idempotent
+/// create checks. The server treats it as part of the stream identity: recreating
+/// an existing stream with a different configuration is a conflict.
 ///
 /// Custom `PartialEq`: when `ttl_seconds` is `Some`, `expires_at` is
 /// derived from `Utc::now()` and will drift between requests.  The
@@ -46,7 +56,7 @@ impl PartialEq for StreamConfig {
 }
 
 impl StreamConfig {
-    /// Create a new stream config with required fields
+    /// Create a config with a normalized content type and default flags.
     #[must_use]
     pub fn new(content_type: String) -> Self {
         Self {
@@ -57,21 +67,21 @@ impl StreamConfig {
         }
     }
 
-    /// Set TTL in seconds
+    /// Set a relative time-to-live in seconds.
     #[must_use]
     pub fn with_ttl(mut self, ttl_seconds: u64) -> Self {
         self.ttl_seconds = Some(ttl_seconds);
         self
     }
 
-    /// Set absolute expiration time
+    /// Set an absolute expiration timestamp.
     #[must_use]
     pub fn with_expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
         self.expires_at = Some(expires_at);
         self
     }
 
-    /// Set created closed flag
+    /// Record that the stream should be considered created in the closed state.
     #[must_use]
     pub fn with_created_closed(mut self, created_closed: bool) -> Self {
         self.created_closed = created_closed;
@@ -79,7 +89,7 @@ impl StreamConfig {
     }
 }
 
-/// A message in a stream
+/// Stored message plus bookkeeping metadata used by storage backends.
 #[derive(Debug, Clone)]
 pub struct Message {
     /// Message offset (unique identifier within stream)
@@ -91,7 +101,7 @@ pub struct Message {
 }
 
 impl Message {
-    /// Create a new message
+    /// Create a stored message and derive its tracked byte length.
     #[must_use]
     pub fn new(offset: Offset, data: Bytes) -> Self {
         let byte_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
@@ -103,7 +113,9 @@ impl Message {
     }
 }
 
-/// Read result from storage
+/// Snapshot returned by [`Storage::read`].
+///
+/// Handlers map this directly into catch-up, long-poll, and SSE responses.
 #[derive(Debug)]
 pub struct ReadResult {
     /// Messages read
@@ -116,7 +128,7 @@ pub struct ReadResult {
     pub closed: bool,
 }
 
-/// Stream metadata
+/// Stream-level metadata returned by [`Storage::head`].
 #[derive(Debug, Clone)]
 pub struct StreamMetadata {
     /// Stream configuration
@@ -133,7 +145,7 @@ pub struct StreamMetadata {
     pub created_at: DateTime<Utc>,
 }
 
-/// Result of create-stream operation.
+/// Outcome of [`Storage::create_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateStreamResult {
     /// A new stream was created.
@@ -142,7 +154,7 @@ pub enum CreateStreamResult {
     AlreadyExists,
 }
 
-/// Result of atomic create-with-data operation.
+/// Outcome of [`Storage::create_stream_with_data`].
 ///
 /// Bundles creation status with a metadata snapshot taken under the
 /// same lock hold so the handler never needs a separate `head()` call.
@@ -156,7 +168,7 @@ pub struct CreateWithDataResult {
     pub closed: bool,
 }
 
-/// Result of an append with producer sequencing.
+/// Outcome of [`Storage::append_with_producer`].
 ///
 /// Includes a snapshot of stream state taken atomically with the operation
 /// so handlers never need a separate `head()` call.
@@ -317,35 +329,46 @@ pub(crate) fn check_producer(
     Ok(ProducerCheck::Accept)
 }
 
-/// Storage trait for stream persistence
+/// Persistence contract for Durable Streams server state.
 ///
-/// Methods are intentionally sync (not async) to keep the core logic simple.
-/// Async boundaries are at the handler layer and notification layer.
+/// Methods are intentionally synchronous. The server keeps async boundaries in
+/// the HTTP and notification layers so storage implementations can focus on
+/// atomicity, ordering, and recovery.
 ///
-/// Implementations must be thread-safe (Send + Sync).
+/// Implementations are expected to preserve these invariants:
+///
+/// - per-stream offsets are monotonic
+/// - create, append, close, and delete are atomic at the stream level
+/// - duplicate producer appends are idempotent
+/// - reads observe a coherent snapshot
+/// - expired streams behave as if they no longer exist
+///
+/// Implementations must also be thread-safe (`Send + Sync`), because the axum
+/// server shares them across request handlers.
 ///
 /// Error conditions are documented inline rather than in separate sections
 /// to avoid repetitive documentation on internal trait methods.
 #[allow(clippy::missing_errors_doc)]
 pub trait Storage: Send + Sync {
-    /// Create a new stream
-    ///
-    /// Returns whether the stream was newly created or already existed.
+    /// Create a stream entry with immutable configuration.
+///
+    /// Returns whether the stream was newly created or already existed with
+    /// matching configuration.
     ///
     /// Returns `Err(Error::ConfigMismatch)` if stream exists with different config.
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult>;
 
-    /// Append data to a stream
-    ///
-    /// Generates and returns the offset for this message.
-    /// Offsets must be monotonically increasing.
+    /// Append one message to an existing stream.
+///
+    /// Generates and returns the offset assigned to the appended message.
+    /// Offsets must remain monotonically increasing within a stream.
     ///
     /// Returns `Err(Error::StreamClosed)` if stream is closed.
     /// Returns `Err(Error::ContentTypeMismatch)` if content type doesn't match.
     fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<Offset>;
 
-    /// Append multiple messages atomically
-    ///
+    /// Append a batch of messages as one atomic operation.
+///
     /// All messages are validated and committed as a single atomic operation.
     /// Either all messages are appended successfully, or none are.
     /// Returns the next offset (the offset that will be assigned to the
@@ -366,34 +389,35 @@ pub trait Storage: Send + Sync {
         seq: Option<&str>,
     ) -> Result<Offset>;
 
-    /// Read messages from a stream starting at offset
-    ///
-    /// If `from_offset` is `Offset::start()`, reads from beginning.
-    /// If `from_offset` is `Offset::now()`, returns empty result at tail.
+    /// Read from a stream starting at `from_offset`.
+///
+    /// `Offset::start()` reads from the beginning of the stream.
+    /// `Offset::now()` positions the caller at the current tail and returns
+    /// an empty catch-up result.
     ///
     /// Returns `Err(Error::NotFound)` if stream doesn't exist.
     /// Returns `Err(Error::InvalidOffset)` if offset is invalid.
     fn read(&self, name: &str, from_offset: &Offset) -> Result<ReadResult>;
 
-    /// Delete a stream
+    /// Delete a stream and all of its persisted data.
     ///
     /// Returns `Ok(())` on successful deletion.
     /// Returns `Err(Error::NotFound)` if stream doesn't exist.
     fn delete(&self, name: &str) -> Result<()>;
 
-    /// Get stream metadata
+    /// Return stream metadata without reading message bodies.
     ///
     /// Returns `Err(Error::NotFound)` if stream doesn't exist.
     fn head(&self, name: &str) -> Result<StreamMetadata>;
 
-    /// Close a stream
+    /// Mark a stream closed so future appends are rejected.
     ///
     /// Prevents further appends.
     /// Returns `Ok(())` if already closed (idempotent).
     /// Returns `Err(Error::NotFound)` if stream doesn't exist.
     fn close_stream(&self, name: &str) -> Result<()>;
 
-    /// Append messages with producer sequencing (atomic validation + append)
+    /// Append with idempotent producer sequencing.
     ///
     /// Validates producer epoch/sequence, appends data if accepted, and
     /// optionally closes the stream — all within a single lock hold.
@@ -413,7 +437,7 @@ pub trait Storage: Send + Sync {
         seq: Option<&str>,
     ) -> Result<ProducerAppendResult>;
 
-    /// Atomically create a stream with optional initial data and close.
+    /// Atomically create a stream, optionally seed it with data, and optionally close it.
     ///
     /// Creates the stream, appends `messages` (if non-empty), and closes
     /// (if `should_close`) — all before the entry becomes visible to other
