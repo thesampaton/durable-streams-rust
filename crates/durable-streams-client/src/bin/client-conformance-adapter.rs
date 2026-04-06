@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use base64::Engine;
+use bytes::Bytes;
 use durable_streams_client::{
     Client, ClientConfig, CloseStreamRequest, ConnectRequest, CreateStreamRequest, DeleteRequest,
     Error, ErrorCode, ErrorKind, HeadRequest, IdempotentProducer, IdempotentProducerConfig,
@@ -391,7 +392,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ttl_seconds,
                 expires_at,
                 closed: closed.unwrap_or(false),
-                body: data.map(String::into_bytes),
+                body: data.map(Bytes::from),
                 options: RequestOptions {
                     headers: headers.unwrap_or_default(),
                     query: HashMap::new(),
@@ -474,7 +475,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
             let body = if binary.unwrap_or(false) {
                 match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
-                    Ok(body) => body,
+                    Ok(body) => Bytes::from(body),
                     Err(error) => {
                         return AdapterOutput::Error(error_output(
                             "append",
@@ -485,7 +486,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     }
                 }
             } else {
-                data.into_bytes()
+                Bytes::from(data)
             };
             let request = durable_streams_client::AppendRequest {
                 body,
@@ -683,7 +684,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 .close(
                     &path,
                     &CloseStreamRequest {
-                        body: data.map(String::into_bytes),
+                        body: data.map(Bytes::from),
                         content_type,
                         producer: None,
                         options: RequestOptions::default(),

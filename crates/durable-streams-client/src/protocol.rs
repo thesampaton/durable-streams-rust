@@ -1,8 +1,9 @@
 use crate::error::{Error, ErrorKind, HttpError};
 use crate::model::{ReadChunk, ReadPayload, ReadResponse, SubscriptionEvent};
 use base64::Engine;
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
+use memchr::memchr;
 use reqwest::header::{CONTENT_TYPE, ETAG};
 use reqwest::{Response, StatusCode};
 use serde::Deserialize;
@@ -293,7 +294,8 @@ pub(crate) async fn collect_catch_up(response: Response) -> Result<ReadResponse,
 struct SseParser {
     buffer: BytesMut,
     current_event: Option<String>,
-    data_lines: Vec<String>,
+    data: BytesMut,
+    saw_data_line: bool,
 }
 
 #[derive(Debug)]
@@ -304,29 +306,27 @@ struct ParsedEvent {
 
 impl SseParser {
     fn push(&mut self, bytes: &[u8]) -> Result<Vec<ParsedEvent>, Error> {
-        self.buffer.put(bytes);
+        self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
 
-        loop {
-            let Some(line_end) = self.buffer.windows(1).position(|window| window == b"\n") else {
-                break;
-            };
-
+        while let Some(line_end) = memchr(b'\n', self.buffer.as_ref()) {
             let mut line = self.buffer.split_to(line_end + 1);
-            if line.ends_with(b"\n") {
-                line.truncate(line.len() - 1);
-            }
+            line.truncate(line.len() - 1);
+
             if line.ends_with(b"\r") {
                 line.truncate(line.len() - 1);
             }
 
             if line.is_empty() {
-                if !self.data_lines.is_empty() || self.current_event.is_some() {
+                if self.saw_data_line || self.current_event.is_some() {
                     events.push(ParsedEvent {
                         kind: self.current_event.take(),
-                        data: self.data_lines.join("\n"),
+                        data: std::str::from_utf8(&self.data)
+                            .map_err(|_| Error::parse("SSE stream contained invalid UTF-8"))?
+                            .to_owned(),
                     });
-                    self.data_lines.clear();
+                    self.data.clear();
+                    self.saw_data_line = false;
                 }
                 continue;
             }
@@ -337,7 +337,11 @@ impl SseParser {
                 self.current_event = Some(rest.trim().to_string());
             } else if let Some(rest) = text.strip_prefix("data:") {
                 let rest = rest.strip_prefix(' ').unwrap_or(rest);
-                self.data_lines.push(rest.to_string());
+                if self.saw_data_line {
+                    self.data.extend_from_slice(b"\n");
+                }
+                self.data.extend_from_slice(rest.as_bytes());
+                self.saw_data_line = true;
             }
         }
 
@@ -370,5 +374,19 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind.as_deref(), Some("data"));
         assert_eq!(events[1].kind.as_deref(), Some("control"));
+    }
+
+    #[test]
+    fn preserves_empty_sse_data_lines_across_chunks() {
+        let mut parser = SseParser::default();
+        let mut events = parser
+            .push(b"event: data\ndata:\ndata: x\n")
+            .expect("partial chunk parses");
+        assert!(events.is_empty());
+
+        events = parser.push(b"\n").expect("event terminator parses");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind.as_deref(), Some("data"));
+        assert_eq!(events[0].data, "\nx");
     }
 }

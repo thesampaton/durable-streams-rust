@@ -1,7 +1,8 @@
-use crate::client::Client;
+use crate::client::{Client, ProducerHeaders};
 use crate::error::{Error, ErrorKind};
 use crate::instrumentation as trace;
-use crate::model::{AppendRequest, CloseStreamRequest, ProducerRequest, RequestOptions};
+use crate::model::RequestOptions;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{Instrument, Span, debug};
@@ -109,7 +110,9 @@ impl IdempotentProducer {
             let mut state = self.state.lock().await;
             Span::current().record("producer.epoch", state.epoch);
             Span::current().record("producer.seq", state.next_seq);
-            let response = self.append_with_state(&mut state, body).await?;
+            let response = self
+                .append_with_state(&mut state, Bytes::from(body))
+                .await?;
             state.next_seq += 1;
             debug!(
                 event = "producer.append_completed",
@@ -134,7 +137,8 @@ impl IdempotentProducer {
             }
             serde_json::to_vec(&items)?
         } else {
-            let mut out = Vec::new();
+            let total_bytes = bodies.iter().map(Vec::len).sum();
+            let mut out = Vec::with_capacity(total_bytes);
             for body in bodies {
                 out.extend_from_slice(body);
             }
@@ -153,21 +157,20 @@ impl IdempotentProducer {
             let mut state = self.state.lock().await;
             Span::current().record("producer.epoch", state.epoch);
             Span::current().record("producer.seq", state.next_seq);
+            let body = body.map(Bytes::from);
             if state.closed {
                 return self
                     .client
-                    .close(
+                    .close_parts(
                         &self.path,
-                        &CloseStreamRequest {
-                            body,
-                            content_type: Some(self.content_type.clone()),
-                            producer: Some(ProducerRequest {
-                                producer_id: self.config.producer_id.clone(),
-                                producer_epoch: state.epoch,
-                                producer_seq: state.next_seq,
-                            }),
-                            options: self.options.clone(),
-                        },
+                        &self.options,
+                        Some(self.content_type.as_str()),
+                        Some(ProducerHeaders {
+                            producer_id: self.config.producer_id.as_str(),
+                            producer_epoch: state.epoch,
+                            producer_seq: state.next_seq,
+                        }),
+                        body,
                     )
                     .await
                     .or_else(|error| match error {
@@ -187,7 +190,7 @@ impl IdempotentProducer {
                     });
             }
 
-            let response = self.close_with_state(&mut state, body.clone()).await?;
+            let response = self.close_with_state(&mut state, body).await?;
             state.closed = true;
             debug!(
                 event = "producer.close_completed",
@@ -207,24 +210,27 @@ impl IdempotentProducer {
     async fn append_with_state(
         &self,
         state: &mut ProducerState,
-        body: Vec<u8>,
+        body: Bytes,
     ) -> Result<crate::model::AppendResponse, Error> {
         let mut retried = false;
 
         loop {
-            let request = AppendRequest {
-                body: body.clone(),
-                content_type: Some(self.content_type.clone()),
-                stream_seq: None,
-                producer: Some(ProducerRequest {
-                    producer_id: self.config.producer_id.clone(),
-                    producer_epoch: state.epoch,
-                    producer_seq: state.next_seq,
-                }),
-                options: self.options.clone(),
-            };
-
-            match self.client.append(&self.path, &request).await {
+            match self
+                .client
+                .append_parts(
+                    &self.path,
+                    &self.options,
+                    Some(self.content_type.as_str()),
+                    None,
+                    Some(ProducerHeaders {
+                        producer_id: self.config.producer_id.as_str(),
+                        producer_epoch: state.epoch,
+                        producer_seq: state.next_seq,
+                    }),
+                    body.clone(),
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(Error::Http(http))
                     if self.config.auto_claim
@@ -248,23 +254,26 @@ impl IdempotentProducer {
     async fn close_with_state(
         &self,
         state: &mut ProducerState,
-        body: Option<Vec<u8>>,
+        body: Option<Bytes>,
     ) -> Result<crate::model::CloseStreamResponse, Error> {
         let mut retried = false;
 
         loop {
-            let request = CloseStreamRequest {
-                body: body.clone(),
-                content_type: Some(self.content_type.clone()),
-                producer: Some(ProducerRequest {
-                    producer_id: self.config.producer_id.clone(),
-                    producer_epoch: state.epoch,
-                    producer_seq: state.next_seq,
-                }),
-                options: self.options.clone(),
-            };
-
-            match self.client.close(&self.path, &request).await {
+            match self
+                .client
+                .close_parts(
+                    &self.path,
+                    &self.options,
+                    Some(self.content_type.as_str()),
+                    Some(ProducerHeaders {
+                        producer_id: self.config.producer_id.as_str(),
+                        producer_epoch: state.epoch,
+                        producer_seq: state.next_seq,
+                    }),
+                    body.clone(),
+                )
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err(Error::Http(http))
                     if self.config.auto_claim

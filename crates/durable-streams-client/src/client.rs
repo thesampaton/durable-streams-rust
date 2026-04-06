@@ -9,12 +9,13 @@ use crate::model::{
     SubscribeRequest, SubscriptionEvent,
 };
 use crate::protocol::{
-    PRODUCER_EPOCH, PRODUCER_SEQ, STREAM_CLOSED, STREAM_EXPIRES_AT, STREAM_NEXT_OFFSET, STREAM_SEQ,
-    STREAM_TTL, collect_catch_up, collect_sse, header_value, parse_bool_header, parse_i64_header,
-    response_error, response_to_event,
+    PRODUCER_EPOCH, PRODUCER_ID, PRODUCER_SEQ, STREAM_CLOSED, STREAM_EXPIRES_AT,
+    STREAM_NEXT_OFFSET, STREAM_SEQ, STREAM_TTL, collect_catch_up, collect_sse, header_value,
+    parse_bool_header, parse_i64_header, response_error, response_to_event,
 };
 use crate::retry::RetryPolicy;
-use reqwest::header::CONTENT_TYPE;
+use bytes::Bytes;
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
 use std::sync::Arc;
 use std::time::Instant;
@@ -26,6 +27,9 @@ use tracing::{Instrument, Span, debug, error};
 struct ClientInner {
     config: ClientConfig,
     http: reqwest::Client,
+    default_headers: HeaderMap,
+    server_address: String,
+    auth_type: &'static str,
 }
 
 /// Durable Streams HTTP client.
@@ -47,12 +51,20 @@ pub struct Subscription {
     task: JoinHandle<()>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ProducerHeaders<'a> {
+    pub producer_id: &'a str,
+    pub producer_epoch: i64,
+    pub producer_seq: i64,
+}
+
 impl Client {
     pub fn from_config(config: ClientConfig) -> Result<Self, Error> {
         config.validate()?;
 
         let server_address = trace::server_address(&config.base_url).to_string();
         let auth_type = trace::auth_type(&config.auth);
+        let default_headers = build_default_headers(&config)?;
         let span = tracing::info_span!(
             "durable_streams.client",
             "ds.operation" = "client_init",
@@ -90,7 +102,13 @@ impl Client {
         };
         debug!(event = "client.constructed");
         Ok(Self {
-            inner: Arc::new(ClientInner { config, http }),
+            inner: Arc::new(ClientInner {
+                config,
+                http,
+                default_headers,
+                server_address,
+                auth_type,
+            }),
         })
     }
 
@@ -116,11 +134,11 @@ impl Client {
     }
 
     fn server_address(&self) -> &str {
-        trace::server_address(&self.inner.config.base_url)
+        &self.inner.server_address
     }
 
     fn auth_type(&self) -> &'static str {
-        trace::auth_type(&self.inner.config.auth)
+        self.inner.auth_type
     }
 
     async fn send_request<F>(
@@ -157,6 +175,7 @@ impl Client {
         stream_id: &str,
         method: Method,
         url: Url,
+        expected: &[StatusCode],
         options: &RequestOptions,
         mut customize: F,
     ) -> Result<reqwest::Response, Error>
@@ -177,12 +196,19 @@ impl Client {
                 });
                 async move {
                     let response = builder.send().await?;
-                    Span::current().record("http.status_code", response.status().as_u16());
+                    let status = response.status();
+                    Span::current().record("http.status_code", status.as_u16());
                     debug!(
                         event = "response.received",
-                        "http.status_code" = response.status().as_u16()
+                        "http.status_code" = status.as_u16()
                     );
-                    Ok(response)
+                    if expected.contains(&status) {
+                        Ok(response)
+                    } else {
+                        let error = Error::from(response_error(response).await);
+                        trace::record_current_error(&error);
+                        Err(error)
+                    }
                 }
                 .instrument(span)
             })
@@ -227,17 +253,20 @@ impl Client {
             debug!(event = "operation.started");
             let result = async {
                 let url = self.stream_url(path, &request.options)?;
+                let ttl_seconds = request.ttl_seconds.map(|value| value.to_string());
+                let body = request.body.clone();
                 let response = self
                     .send_retrying_request(
                         "create_stream",
                         path,
                         Method::PUT,
                         url,
+                        &[StatusCode::OK, StatusCode::CREATED],
                         &request.options,
                         |mut builder| {
                             builder = builder.header(CONTENT_TYPE, &request.content_type);
-                            if let Some(ttl_seconds) = request.ttl_seconds {
-                                builder = builder.header(STREAM_TTL, ttl_seconds.to_string());
+                            if let Some(ttl_seconds) = ttl_seconds.as_deref() {
+                                builder = builder.header(STREAM_TTL, ttl_seconds);
                             }
                             if let Some(expires_at) = &request.expires_at {
                                 builder = builder.header(STREAM_EXPIRES_AT, expires_at);
@@ -245,15 +274,13 @@ impl Client {
                             if request.closed {
                                 builder = builder.header(STREAM_CLOSED, "true");
                             }
-                            if let Some(body) = &request.body {
+                            if let Some(body) = &body {
                                 builder = builder.body(body.clone());
                             }
                             builder
                         },
                     )
                     .await?;
-                let response =
-                    Self::require_status(response, &[StatusCode::OK, StatusCode::CREATED]).await?;
                 Ok(CreateStreamResponse {
                     status: response.status().as_u16(),
                     next_offset: header_value(&response, STREAM_NEXT_OFFSET),
@@ -339,6 +366,30 @@ impl Client {
         path: &str,
         request: &AppendRequest,
     ) -> Result<AppendResponse, Error> {
+        self.append_parts(
+            path,
+            &request.options,
+            request.content_type.as_deref(),
+            request.stream_seq.as_deref(),
+            request.producer.as_ref().map(|producer| ProducerHeaders {
+                producer_id: producer.producer_id.as_str(),
+                producer_epoch: producer.producer_epoch,
+                producer_seq: producer.producer_seq,
+            }),
+            request.body.clone(),
+        )
+        .await
+    }
+
+    pub(crate) async fn append_parts(
+        &self,
+        path: &str,
+        options: &RequestOptions,
+        content_type: Option<&str>,
+        stream_seq: Option<&str>,
+        producer: Option<ProducerHeaders<'_>>,
+        body: Bytes,
+    ) -> Result<AppendResponse, Error> {
         let span = trace::client_operation_span(
             "append_stream",
             path,
@@ -348,37 +399,41 @@ impl Client {
         async {
             debug!(event = "operation.started");
             let result = async {
-                let url = self.stream_url(path, &request.options)?;
+                let url = self.stream_url(path, options)?;
+                let producer_headers = producer.map(|value| {
+                    (
+                        value.producer_id,
+                        value.producer_epoch.to_string(),
+                        value.producer_seq.to_string(),
+                    )
+                });
                 let response = self
                     .send_retrying_request(
                         "append_stream",
                         path,
                         Method::POST,
                         url,
-                        &request.options,
+                        &[StatusCode::OK, StatusCode::NO_CONTENT],
+                        options,
                         |mut builder| {
-                            if let Some(content_type) = &request.content_type {
+                            if let Some(content_type) = content_type {
                                 builder = builder.header(CONTENT_TYPE, content_type);
                             }
-                            if let Some(stream_seq) = &request.stream_seq {
+                            if let Some(stream_seq) = stream_seq {
                                 builder = builder.header(STREAM_SEQ, stream_seq);
                             }
-                            if let Some(producer) = &request.producer {
+                            if let Some((producer_id, producer_epoch, producer_seq)) =
+                                &producer_headers
+                            {
                                 builder = builder
-                                    .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
-                                    .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                                    .header(
-                                        crate::protocol::PRODUCER_SEQ,
-                                        producer.producer_seq.to_string(),
-                                    );
+                                    .header(PRODUCER_ID, *producer_id)
+                                    .header(PRODUCER_EPOCH, producer_epoch.as_str())
+                                    .header(PRODUCER_SEQ, producer_seq.as_str());
                             }
-                            builder.body(request.body.clone())
+                            builder.body(body.clone())
                         },
                     )
                     .await?;
-                let response =
-                    Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT])
-                        .await?;
                 Ok(AppendResponse {
                     status: response.status().as_u16(),
                     next_offset: header_value(&response, STREAM_NEXT_OFFSET),
@@ -414,6 +469,28 @@ impl Client {
         path: &str,
         request: &CloseStreamRequest,
     ) -> Result<CloseStreamResponse, Error> {
+        self.close_parts(
+            path,
+            &request.options,
+            request.content_type.as_deref(),
+            request.producer.as_ref().map(|producer| ProducerHeaders {
+                producer_id: producer.producer_id.as_str(),
+                producer_epoch: producer.producer_epoch,
+                producer_seq: producer.producer_seq,
+            }),
+            request.body.clone(),
+        )
+        .await
+    }
+
+    pub(crate) async fn close_parts(
+        &self,
+        path: &str,
+        options: &RequestOptions,
+        content_type: Option<&str>,
+        producer: Option<ProducerHeaders<'_>>,
+        body: Option<Bytes>,
+    ) -> Result<CloseStreamResponse, Error> {
         let span = trace::client_operation_span(
             "close_stream",
             path,
@@ -423,38 +500,42 @@ impl Client {
         async {
             debug!(event = "operation.started");
             let result = async {
-                let url = self.stream_url(path, &request.options)?;
+                let url = self.stream_url(path, options)?;
+                let producer_headers = producer.map(|value| {
+                    (
+                        value.producer_id,
+                        value.producer_epoch.to_string(),
+                        value.producer_seq.to_string(),
+                    )
+                });
                 let response = self
                     .send_retrying_request(
                         "close_stream",
                         path,
                         Method::POST,
                         url,
-                        &request.options,
+                        &[StatusCode::OK, StatusCode::NO_CONTENT],
+                        options,
                         |mut builder| {
                             builder = builder.header(STREAM_CLOSED, "true");
-                            if let Some(content_type) = &request.content_type {
+                            if let Some(content_type) = content_type {
                                 builder = builder.header(CONTENT_TYPE, content_type);
                             }
-                            if let Some(producer) = &request.producer {
+                            if let Some((producer_id, producer_epoch, producer_seq)) =
+                                &producer_headers
+                            {
                                 builder = builder
-                                    .header(crate::protocol::PRODUCER_ID, &producer.producer_id)
-                                    .header(PRODUCER_EPOCH, producer.producer_epoch.to_string())
-                                    .header(
-                                        crate::protocol::PRODUCER_SEQ,
-                                        producer.producer_seq.to_string(),
-                                    );
+                                    .header(PRODUCER_ID, *producer_id)
+                                    .header(PRODUCER_EPOCH, producer_epoch.as_str())
+                                    .header(PRODUCER_SEQ, producer_seq.as_str());
                             }
-                            if let Some(body) = &request.body {
+                            if let Some(body) = &body {
                                 builder = builder.body(body.clone());
                             }
                             builder
                         },
                     )
                     .await?;
-                let response =
-                    Self::require_status(response, &[StatusCode::OK, StatusCode::NO_CONTENT])
-                        .await?;
                 Ok(CloseStreamResponse {
                     status: response.status().as_u16(),
                     final_offset: header_value(&response, STREAM_NEXT_OFFSET)
@@ -908,14 +989,12 @@ impl Client {
         self.apply_auth(builder)
     }
 
-    fn apply_default_headers(
-        &self,
-        mut builder: reqwest::RequestBuilder,
-    ) -> reqwest::RequestBuilder {
-        for (name, value) in &self.inner.config.defaults.headers {
-            builder = builder.header(name, value);
+    fn apply_default_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.inner.default_headers.is_empty() {
+            builder
+        } else {
+            builder.headers(self.inner.default_headers.clone())
         }
-        builder
     }
 
     fn apply_request_headers(
@@ -977,6 +1056,22 @@ impl Client {
         }
         Ok(url)
     }
+}
+
+fn build_default_headers(config: &ClientConfig) -> Result<HeaderMap, Error> {
+    let mut headers = HeaderMap::with_capacity(config.defaults.headers.len());
+    for (name, value) in &config.defaults.headers {
+        let header_name = HeaderName::try_from(name.as_str()).map_err(|error| {
+            Error::invalid_argument(format!("invalid default header name '{name}': {error}"))
+        })?;
+        let header_value = HeaderValue::try_from(value.as_str()).map_err(|error| {
+            Error::invalid_argument(format!(
+                "invalid default header value for '{name}': {error}"
+            ))
+        })?;
+        headers.append(header_name, header_value);
+    }
+    Ok(headers)
 }
 
 impl StreamHandle {

@@ -75,7 +75,7 @@ pub struct CreateStreamRequest {
     #[serde(default)]
     pub closed: bool,
     #[serde(default)]
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Bytes>,
     #[serde(default)]
     pub options: RequestOptions,
 }
@@ -107,7 +107,7 @@ pub struct ConnectResponse {
 /// Request to append to a stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppendRequest {
-    pub body: Vec<u8>,
+    pub body: Bytes,
     #[serde(default)]
     pub content_type: Option<String>,
     #[serde(default)]
@@ -214,7 +214,7 @@ pub struct DeleteResponse {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloseStreamRequest {
     #[serde(default)]
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Bytes>,
     #[serde(default)]
     pub content_type: Option<String>,
     #[serde(default)]
