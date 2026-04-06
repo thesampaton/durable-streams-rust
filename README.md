@@ -62,6 +62,8 @@ The workspace MSRV is **Rust 1.89**.
 - Each crate declares `rust-version = "1.89"`.
 - CI validates `cargo check --workspace --all-targets` on Rust `1.89.0` and on
   current stable.
+- CI also runs `cargo clippy --workspace --all-targets` with workspace-level
+  `clippy::pedantic` enabled as a standing baseline.
 - The MSRV may be raised deliberately over time, but only as an explicit policy
   change.
 
@@ -69,6 +71,7 @@ The workspace MSRV is **Rust 1.89**.
 
 ```bash
 cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
