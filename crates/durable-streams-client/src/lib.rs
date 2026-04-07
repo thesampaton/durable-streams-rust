@@ -17,21 +17,19 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+//! use durable_streams_client::Client;
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::new(ClientConfig::default())?;
+//! let client = Client::builder()
+//!     .base_url("http://127.0.0.1:8080")
+//!     .default_content_type("application/json")
+//!     .build()?;
 //! let orders = client.stream("/orders");
 //!
-//! orders.create().content_type("application/json").send().await?;
+//! orders.create().send().await?;
 //!
-//! let page = orders
-//!     .read()
-//!     .offset(Offset::Beginning)
-//!     .live(LiveMode::CatchUp)
-//!     .send()
-//!     .await?;
+//! let page = orders.read().send().await?;
 //! let _next_offset = page.next_offset;
 //! # Ok(())
 //! # }
@@ -107,10 +105,7 @@ pub use config::{
 };
 pub use error::{Error, ErrorCode, ErrorKind, HttpError};
 pub use idempotent::{IdempotentProducer, IdempotentProducerConfig};
-pub use model::{
-    AppendRequest, AppendResponse, CloseStreamRequest, CloseStreamResponse, ConnectRequest,
-    ConnectResponse, CreateStreamRequest, CreateStreamResponse, DeleteRequest, DeleteResponse,
-    HeadRequest, HeadResponse, LiveMode, ProducerRequest, ReadChunk, ReadPayload, ReadRequest,
-    ReadResponse, RequestOptions, RetryOptions, SubscribeRequest, SubscriptionEvent,
+pub use model::{LiveMode, ReadPayload, RequestOptions, RetryOptions, SubscriptionEvent};
+pub use types::{
+    AppendOutcome, CloseOutcome, CreateOutcome, Offset, ReadPage, StreamChunk, StreamInfo,
 };
-pub use types::{AppendAck, CloseAck, CreateAck, Offset, ReadPage, StreamChunk, StreamInfo};

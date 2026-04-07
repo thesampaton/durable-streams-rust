@@ -4,9 +4,12 @@
 use base64::Engine;
 use bytes::Bytes;
 use durable_streams_client::{
-    Client, ClientConfig, CloseStreamRequest, ConnectRequest, CreateStreamRequest, DeleteRequest,
-    Error, ErrorCode, ErrorKind, HeadRequest, IdempotentProducer, IdempotentProducerConfig,
-    LiveMode, ReadRequest, RequestOptions,
+    Client, ClientConfig, Error, ErrorCode, ErrorKind, IdempotentProducer,
+    IdempotentProducerConfig, LiveMode, RequestOptions,
+    raw::{
+        AppendRequest, CloseStreamRequest, ConnectRequest, CreateStreamRequest, DeleteRequest,
+        HeadRequest, ProducerRequest, ReadRequest,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -488,7 +491,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             } else {
                 Bytes::from(data)
             };
-            let request = durable_streams_client::AppendRequest {
+            let request = AppendRequest {
                 body,
                 content_type: Some(
                     state
@@ -498,7 +501,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         .unwrap_or_else(|| "application/octet-stream".to_string()),
                 ),
                 stream_seq: seq.map(|value| value.to_string()),
-                producer: producer_id.map(|producer_id| durable_streams_client::ProducerRequest {
+                producer: producer_id.map(|producer_id| ProducerRequest {
                     producer_id,
                     producer_epoch: producer_epoch.unwrap_or(0),
                     producer_seq: producer_seq.unwrap_or(0),

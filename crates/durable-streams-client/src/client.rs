@@ -9,10 +9,10 @@
 //! Create a client and bind a stream handle:
 //!
 //! ```no_run
-//! use durable_streams_client::{Client, ClientConfig};
+//! use durable_streams_client::Client;
 //!
 //! # fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::new(ClientConfig::default())?;
+//! let client = Client::builder().base_url("http://127.0.0.1:8080").build()?;
 //! let orders = client.stream("/orders");
 //! # let _ = orders;
 //! # Ok(())
@@ -22,14 +22,17 @@
 //! Create a stream and append one JSON event:
 //!
 //! ```no_run
-//! use durable_streams_client::{Client, ClientConfig};
+//! use durable_streams_client::Client;
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::new(ClientConfig::default())?;
+//! let client = Client::builder()
+//!     .base_url("http://127.0.0.1:8080")
+//!     .default_content_type("application/json")
+//!     .build()?;
 //! let orders = client.stream("/orders");
 //!
-//! orders.create().content_type("application/json").send().await?;
+//! orders.create().send().await?;
 //! orders.append_json(&serde_json::json!({ "type": "created" })).await?;
 //! # Ok(())
 //! # }
@@ -38,22 +41,20 @@
 //! Read from the beginning of the stream:
 //!
 //! ```no_run
-//! use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+//! use durable_streams_client::Client;
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::new(ClientConfig::default())?;
+//! let client = Client::builder()
+//!     .base_url("http://127.0.0.1:8080")
+//!     .default_content_type("application/json")
+//!     .build()?;
 //! let orders = client.stream("/orders");
 //!
-//! let page = orders
-//!     .read()
-//!     .offset(Offset::Beginning)
-//!     .live(LiveMode::CatchUp)
-//!     .send()
-//!     .await?;
+//! let page = orders.read().send().await?;
 //!
 //! for chunk in page.chunks {
-//!     println!("{}", chunk.next_offset);
+//!     println!("{}", chunk.offset);
 //! }
 //! # Ok(())
 //! # }
@@ -75,7 +76,7 @@ use crate::protocol::{
     parse_bool_header, parse_i64_header, response_error, response_to_event,
 };
 use crate::retry::RetryPolicy;
-use crate::types::{AppendAck, CloseAck, CreateAck, Offset, ReadPage, StreamInfo};
+use crate::types::{AppendOutcome, CloseOutcome, CreateOutcome, Offset, ReadPage, StreamInfo};
 use bytes::Bytes;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
@@ -720,10 +721,15 @@ impl Client {
                         },
                     )
                     .await?;
+                let final_offset = header_value(&response, STREAM_NEXT_OFFSET)
+                    .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?;
+                if final_offset.is_empty() {
+                    return Err(Error::parse("empty Stream-Next-Offset header"));
+                }
+
                 Ok(CloseStreamResponse {
                     status: response.status().as_u16(),
-                    final_offset: header_value(&response, STREAM_NEXT_OFFSET)
-                        .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?,
+                    final_offset,
                     stream_closed: parse_bool_header(&response, STREAM_CLOSED),
                 })
             }
@@ -1450,9 +1456,12 @@ impl CreateBuilder {
         self
     }
 
-    /// Replace the low-level request options for this operation.
+    /// Replace all low-level request options for this operation.
+    ///
+    /// This overwrites any headers or query parameters already added on this
+    /// builder.
     #[must_use]
-    pub fn request_options(mut self, options: RequestOptions) -> Self {
+    pub fn replace_options(mut self, options: RequestOptions) -> Self {
         self.options = options;
         self
     }
@@ -1471,11 +1480,11 @@ impl CreateBuilder {
     }
 
     /// Execute the create operation.
-    pub async fn send(self) -> Result<CreateAck, Error> {
+    pub async fn send(self) -> Result<CreateOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
         let response = stream.create_raw(&request).await?;
-        Ok(CreateAck::from(response))
+        Ok(CreateOutcome::from(response))
     }
 }
 
@@ -1508,9 +1517,12 @@ impl AppendBuilder {
         self
     }
 
-    /// Replace the low-level request options for this operation.
+    /// Replace all low-level request options for this operation.
+    ///
+    /// This overwrites any headers or query parameters already added on this
+    /// builder.
     #[must_use]
-    pub fn request_options(mut self, options: RequestOptions) -> Self {
+    pub fn replace_options(mut self, options: RequestOptions) -> Self {
         self.options = options;
         self
     }
@@ -1526,11 +1538,11 @@ impl AppendBuilder {
     }
 
     /// Execute the append operation.
-    pub async fn send(self) -> Result<AppendAck, Error> {
+    pub async fn send(self) -> Result<AppendOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
         let response = stream.append_raw(&request).await?;
-        Ok(AppendAck::from(response))
+        Ok(AppendOutcome::from(response))
     }
 }
 
@@ -1563,9 +1575,12 @@ impl CloseBuilder {
         self
     }
 
-    /// Replace the low-level request options for this operation.
+    /// Replace all low-level request options for this operation.
+    ///
+    /// This overwrites any headers or query parameters already added on this
+    /// builder.
     #[must_use]
-    pub fn request_options(mut self, options: RequestOptions) -> Self {
+    pub fn replace_options(mut self, options: RequestOptions) -> Self {
         self.options = options;
         self
     }
@@ -1580,11 +1595,11 @@ impl CloseBuilder {
     }
 
     /// Execute the close operation.
-    pub async fn send(self) -> Result<CloseAck, Error> {
+    pub async fn send(self) -> Result<CloseOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
         let response = stream.close_raw(&request).await?;
-        Ok(CloseAck::from(response))
+        Ok(CloseOutcome::from(response))
     }
 }
 
@@ -1652,9 +1667,12 @@ impl ReadBuilder {
         self
     }
 
-    /// Replace the low-level request options for this operation.
+    /// Replace all low-level request options for this operation.
+    ///
+    /// This overwrites any headers or query parameters already added on this
+    /// builder.
     #[must_use]
-    pub fn request_options(mut self, options: RequestOptions) -> Self {
+    pub fn replace_options(mut self, options: RequestOptions) -> Self {
         self.options = options;
         self
     }
@@ -1689,6 +1707,12 @@ impl StreamHandle {
     }
 
     /// Start building a stream creation request.
+    ///
+    /// If neither the builder nor the client config supplies a content type,
+    /// [`CreateBuilder::send`] falls back to `application/octet-stream`.
+    /// Use [`raw::CreateStreamRequest`](crate::raw::CreateStreamRequest) when
+    /// you want protocol-shaped request construction with fully explicit
+    /// fields.
     ///
     /// # Example
     ///
@@ -1795,7 +1819,7 @@ impl StreamHandle {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn append_json<T>(&self, value: &T) -> Result<AppendAck, Error>
+    pub async fn append_json<T>(&self, value: &T) -> Result<AppendOutcome, Error>
     where
         T: Serialize,
     {
@@ -1835,22 +1859,22 @@ impl StreamHandle {
 
     /// Start building a collected read request.
     ///
+    /// The ergonomic builder defaults to `Offset::Beginning` and
+    /// `LiveMode::CatchUp`, so `stream.read().send().await?` reads the stream
+    /// from the start in the common case. Use [`ReadBuilder::offset`] and
+    /// [`ReadBuilder::live`] only when you need non-default behavior.
+    ///
     /// # Example
     ///
     /// ```no_run
-    /// use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+    /// use durable_streams_client::{Client, ClientConfig};
     ///
     /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() -> Result<(), durable_streams_client::Error> {
     /// let client = Client::new(ClientConfig::default())?;
     /// let orders = client.stream("/orders");
     ///
-    /// let page = orders
-    ///     .read()
-    ///     .offset(Offset::Beginning)
-    ///     .live(LiveMode::CatchUp)
-    ///     .send()
-    ///     .await?;
+    /// let page = orders.read().send().await?;
     ///
     /// println!("{}", page.next_offset);
     /// # Ok(())

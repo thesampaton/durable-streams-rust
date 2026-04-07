@@ -81,7 +81,7 @@ pub struct StreamInfo {
 
 /// Result of creating a stream through the ergonomic API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateAck {
+pub struct CreateOutcome {
     pub created: bool,
     pub next_offset: Option<Offset>,
     pub closed: bool,
@@ -89,23 +89,21 @@ pub struct CreateAck {
 
 /// Result of appending to a stream through the ergonomic API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppendAck {
+pub struct AppendOutcome {
     pub next_offset: Option<Offset>,
-    pub closed: bool,
 }
 
 /// Result of closing a stream through the ergonomic API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloseAck {
+pub struct CloseOutcome {
     pub final_offset: Offset,
-    pub closed: bool,
 }
 
 /// One chunk of stream data in the ergonomic read API.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamChunk {
     pub data: Bytes,
-    pub next_offset: Offset,
+    pub offset: Offset,
 }
 
 /// Collected read result in the ergonomic API.
@@ -134,7 +132,7 @@ impl From<HeadResponse> for StreamInfo {
     }
 }
 
-impl From<CreateStreamResponse> for CreateAck {
+impl From<CreateStreamResponse> for CreateOutcome {
     fn from(value: CreateStreamResponse) -> Self {
         Self {
             created: value.status == 201,
@@ -144,20 +142,18 @@ impl From<CreateStreamResponse> for CreateAck {
     }
 }
 
-impl From<AppendResponse> for AppendAck {
+impl From<AppendResponse> for AppendOutcome {
     fn from(value: AppendResponse) -> Self {
         Self {
             next_offset: value.next_offset.map(Offset::from),
-            closed: value.stream_closed,
         }
     }
 }
 
-impl From<CloseStreamResponse> for CloseAck {
+impl From<CloseStreamResponse> for CloseOutcome {
     fn from(value: CloseStreamResponse) -> Self {
         Self {
             final_offset: Offset::from(value.final_offset),
-            closed: value.stream_closed,
         }
     }
 }
@@ -166,7 +162,7 @@ impl From<ReadChunk> for StreamChunk {
     fn from(value: ReadChunk) -> Self {
         Self {
             data: value.data,
-            next_offset: Offset::from(value.next_offset),
+            offset: Offset::from(value.next_offset),
         }
     }
 }

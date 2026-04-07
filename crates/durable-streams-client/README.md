@@ -27,22 +27,20 @@ The main entry points are:
 ## Example
 
 ```no_run
-use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+use durable_streams_client::Client;
 
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
+let client = Client::builder()
+    .base_url("http://127.0.0.1:8080")
+    .default_content_type("application/json")
+    .build()?;
 let stream = client.stream("/example");
 
-stream.create().content_type("application/json").send().await?;
+stream.create().send().await?;
 stream.append_json(&serde_json::json!({ "type": "created" })).await?;
 
-let page = stream
-    .read()
-    .offset(Offset::Beginning)
-    .live(LiveMode::CatchUp)
-    .send()
-    .await?;
+let page = stream.read().send().await?;
 println!("next offset: {}", page.next_offset);
 # Ok(())
 # }
@@ -53,18 +51,17 @@ println!("next offset: {}", page.next_offset);
 ### Create A Stream And Append JSON
 
 ```no_run
-use durable_streams_client::{Client, ClientConfig};
+use durable_streams_client::Client;
 
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
+let client = Client::builder()
+    .base_url("http://127.0.0.1:8080")
+    .default_content_type("application/json")
+    .build()?;
 let orders = client.stream("/orders");
 
-orders
-    .create()
-    .content_type("application/json")
-    .send()
-    .await?;
+orders.create().send().await?;
 
 orders
     .append_json(&serde_json::json!({
@@ -79,22 +76,17 @@ orders
 ### Read From The Beginning
 
 ```no_run
-use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+use durable_streams_client::{Client, ClientConfig};
 
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
 let client = Client::new(ClientConfig::default())?;
 let orders = client.stream("/orders");
 
-let page = orders
-    .read()
-    .offset(Offset::Beginning)
-    .live(LiveMode::CatchUp)
-    .send()
-    .await?;
+let page = orders.read().send().await?;
 
 for chunk in page.chunks {
-    println!("chunk at {}: {} bytes", chunk.next_offset, chunk.data.len());
+    println!("chunk at {}: {} bytes", chunk.offset, chunk.data.len());
 }
 # Ok(())
 # }
