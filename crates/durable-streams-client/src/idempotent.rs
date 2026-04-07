@@ -74,7 +74,7 @@ impl IdempotentProducerConfig {
 /// Producer helper that manages producer headers and sequence advancement.
 ///
 /// This type is intended for callers that want a higher-level append API than
-/// constructing [`crate::ProducerRequest`] manually on every call.
+/// constructing [`crate::raw::ProducerRequest`] manually on every call.
 pub struct IdempotentProducer {
     client: Client,
     path: String,

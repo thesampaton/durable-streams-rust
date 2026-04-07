@@ -4,9 +4,12 @@
 use base64::Engine;
 use bytes::Bytes;
 use durable_streams_client::{
-    Client, ClientConfig, CloseStreamRequest, ConnectRequest, CreateStreamRequest, DeleteRequest,
-    Error, ErrorCode, ErrorKind, HeadRequest, IdempotentProducer, IdempotentProducerConfig,
-    LiveMode, ReadRequest, RequestOptions,
+    Client, ClientConfig, Error, ErrorCode, ErrorKind, IdempotentProducer,
+    IdempotentProducerConfig, LiveMode, RequestOptions,
+    raw::{
+        AppendRequest, CloseStreamRequest, ConnectRequest, CreateStreamRequest, DeleteRequest,
+        HeadRequest, ProducerRequest, ReadRequest,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -398,7 +401,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.create(&path, &request).await {
+            match client.create_raw(&path, &request).await {
                 Ok(result) => {
                     state.content_types.insert(path.clone(), content_type);
                     AdapterOutput::Success(SuccessResult {
@@ -424,7 +427,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .connect(
+                .connect_raw(
                     &path,
                     &ConnectRequest {
                         options: RequestOptions {
@@ -488,7 +491,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             } else {
                 Bytes::from(data)
             };
-            let request = durable_streams_client::AppendRequest {
+            let request = AppendRequest {
                 body,
                 content_type: Some(
                     state
@@ -498,7 +501,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                         .unwrap_or_else(|| "application/octet-stream".to_string()),
                 ),
                 stream_seq: seq.map(|value| value.to_string()),
-                producer: producer_id.map(|producer_id| durable_streams_client::ProducerRequest {
+                producer: producer_id.map(|producer_id| ProducerRequest {
                     producer_id,
                     producer_epoch: producer_epoch.unwrap_or(0),
                     producer_seq: producer_seq.unwrap_or(0),
@@ -508,7 +511,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.append(&path, &request).await {
+            match client.append_raw(&path, &request).await {
                 Ok(result) => AdapterOutput::Success(SuccessResult {
                     result_type: "append".to_string(),
                     success: true,
@@ -565,7 +568,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.read(&path, &request).await {
+            match client.read_raw(&path, &request).await {
                 Ok(result) => {
                     let chunks = result
                         .chunks
@@ -604,7 +607,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .head(
+                .head_raw(
                     &path,
                     &HeadRequest {
                         options: RequestOptions {
@@ -645,7 +648,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .delete(
+                .delete_raw(
                     &path,
                     &DeleteRequest {
                         options: RequestOptions {
@@ -681,7 +684,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             };
             let content_type = content_type.or_else(|| state.content_types.get(&path).cloned());
             match client
-                .close(
+                .close_raw(
                     &path,
                     &CloseStreamRequest {
                         body: data.map(Bytes::from),

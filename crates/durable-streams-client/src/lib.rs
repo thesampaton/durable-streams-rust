@@ -17,30 +17,20 @@
 //! # Quick Start
 //!
 //! ```no_run
-//! use durable_streams_client::{
-//!     Client, ClientConfig, CreateStreamRequest, ReadRequest,
-//! };
+//! use durable_streams_client::Client;
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::new(ClientConfig::default())?;
+//! let client = Client::builder()
+//!     .base_url("http://127.0.0.1:4437/v1/stream/")
+//!     .default_content_type("application/json")
+//!     .build()?;
+//! let orders = client.stream("/orders");
 //!
-//! client
-//!     .create(
-//!         "/orders",
-//!         &CreateStreamRequest {
-//!             content_type: "application/json".to_string(),
-//!             body: None,
-//!             ttl_seconds: None,
-//!             expires_at: None,
-//!             closed: false,
-//!             options: Default::default(),
-//!         },
-//!     )
-//!     .await?;
+//! orders.create().send().await?;
 //!
-//! let response = client.read("/orders", &ReadRequest::default()).await?;
-//! let _next_offset = response.next_offset;
+//! let page = orders.read().send().await?;
+//! let _next_offset = page.next_offset;
 //! # Ok(())
 //! # }
 //! ```
@@ -75,7 +65,7 @@
 //! - [`StreamHandle`] for path-bound operations on one stream
 //! - [`ClientConfig`] or [`ClientConfigLoader`] for construction
 //! - [`IdempotentProducer`] when producer fencing and sequence management matter
-//! - request and response types re-exported at crate root for ergonomic imports
+//! - [`raw`] for protocol-shaped request and response models when you need them
 //!
 //! The public modules remain available when you want to browse one area of the
 //! API in rustdoc by concern: auth, config, error handling, models, and retry.
@@ -89,17 +79,33 @@ mod instrumentation;
 pub mod model;
 mod protocol;
 pub mod retry;
+pub mod types;
+
+/// Explicit protocol-shaped request and response models.
+///
+/// Most applications should prefer the stream-first ergonomic API on
+/// [`Client`] and [`StreamHandle`]. Reach for this module when you need direct
+/// control over headers, query parameters, or other wire-level protocol fields.
+pub mod raw {
+    pub use crate::model::{
+        AppendRequest, AppendResponse, CloseStreamRequest, CloseStreamResponse, ConnectRequest,
+        ConnectResponse, CreateStreamRequest, CreateStreamResponse, DeleteRequest, DeleteResponse,
+        HeadRequest, HeadResponse, ProducerRequest, ReadChunk, ReadPayload, ReadRequest,
+        ReadResponse, RequestOptions, RetryOptions, SubscribeRequest, SubscriptionEvent,
+    };
+}
 
 pub use auth::AuthConfig;
-pub use client::{Client, StreamHandle, Subscription};
+pub use client::{
+    AppendBuilder, Client, ClientBuilder, CloseBuilder, CreateBuilder, ReadBuilder, StreamHandle,
+    Subscription,
+};
 pub use config::{
     ClientConfig, ClientConfigLoader, ClientConfigLoaderError, DefaultsConfig, TransportConfig,
 };
 pub use error::{Error, ErrorCode, ErrorKind, HttpError};
 pub use idempotent::{IdempotentProducer, IdempotentProducerConfig};
-pub use model::{
-    AppendRequest, AppendResponse, CloseStreamRequest, CloseStreamResponse, ConnectRequest,
-    ConnectResponse, CreateStreamRequest, CreateStreamResponse, DeleteRequest, DeleteResponse,
-    HeadRequest, HeadResponse, LiveMode, ProducerRequest, ReadChunk, ReadPayload, ReadRequest,
-    ReadResponse, RequestOptions, RetryOptions, SubscribeRequest, SubscriptionEvent,
+pub use model::{LiveMode, ReadPayload, RequestOptions, RetryOptions, SubscriptionEvent};
+pub use types::{
+    AppendOutcome, CloseOutcome, CreateOutcome, Offset, ReadPage, StreamChunk, StreamInfo,
 };
