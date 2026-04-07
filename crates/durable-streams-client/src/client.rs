@@ -3,6 +3,61 @@
 //! [`Client`] owns the configured HTTP transport and exposes the full Durable
 //! Streams operation set. [`StreamHandle`] binds a stream path so callers can
 //! reuse one client for many operations without repeating the path argument.
+//!
+//! # Common Workflows
+//!
+//! Create a client and bind a stream handle:
+//!
+//! ```no_run
+//! use durable_streams_client::{Client, ClientConfig};
+//!
+//! # fn main() -> Result<(), durable_streams_client::Error> {
+//! let client = Client::new(ClientConfig::default())?;
+//! let orders = client.stream("/orders");
+//! # let _ = orders;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Create a stream and append one JSON event:
+//!
+//! ```no_run
+//! use durable_streams_client::{Client, ClientConfig};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), durable_streams_client::Error> {
+//! let client = Client::new(ClientConfig::default())?;
+//! let orders = client.stream("/orders");
+//!
+//! orders.create().content_type("application/json").send().await?;
+//! orders.append_json(&serde_json::json!({ "type": "created" })).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Read from the beginning of the stream:
+//!
+//! ```no_run
+//! use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), durable_streams_client::Error> {
+//! let client = Client::new(ClientConfig::default())?;
+//! let orders = client.stream("/orders");
+//!
+//! let page = orders
+//!     .read()
+//!     .offset(Offset::Beginning)
+//!     .live(LiveMode::CatchUp)
+//!     .send()
+//!     .await?;
+//!
+//! for chunk in page.chunks {
+//!     println!("{}", chunk.next_offset);
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::auth::AuthConfig;
 use crate::config::ClientConfig;
@@ -20,11 +75,13 @@ use crate::protocol::{
     parse_bool_header, parse_i64_header, response_error, response_to_event,
 };
 use crate::retry::RetryPolicy;
+use crate::types::{AppendAck, CloseAck, CreateAck, Offset, ReadPage, StreamInfo};
 use bytes::Bytes;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Method, StatusCode, Url};
+use serde::Serialize;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{Instrument, Span, debug, error};
@@ -43,6 +100,9 @@ struct ClientInner {
 /// This is the main integration entry point for applications. It owns the
 /// configured `reqwest` client, default headers, auth behavior, and retry
 /// policy derived from [`ClientConfig`].
+///
+/// Most application code should construct a client once and then create one or
+/// more [`StreamHandle`]s with [`Client::stream`].
 #[derive(Clone)]
 pub struct Client {
     inner: Arc<ClientInner>,
@@ -51,19 +111,104 @@ pub struct Client {
 /// Stream-scoped view over a [`Client`].
 ///
 /// Use this when one caller performs repeated operations on a single stream.
+///
+/// The handle is lightweight and cloneable. It does not hold an open
+/// connection; each operation performs an HTTP request on demand.
 #[derive(Clone)]
 pub struct StreamHandle {
     client: Client,
     path: String,
 }
 
-/// Background subscription handle returned by [`Client::subscribe`].
+/// Background subscription handle returned by [`Client::subscribe_raw`].
 ///
 /// The receiver yields collected subscription events until the background task
 /// completes or is aborted.
 pub struct Subscription {
     receiver: mpsc::Receiver<Result<SubscriptionEvent, Error>>,
     task: JoinHandle<()>,
+}
+
+/// Fluent builder for constructing a [`Client`] without assembling a full
+/// [`ClientConfig`] manually.
+///
+/// # Example
+///
+/// ```rust
+/// use durable_streams_client::Client;
+/// use std::time::Duration;
+///
+/// # fn main() -> Result<(), durable_streams_client::Error> {
+/// let client = Client::builder()
+///     .base_url("http://127.0.0.1:8080")
+///     .bearer_auth("replace-me")
+///     .request_timeout(Duration::from_secs(30))
+///     .default_content_type("application/json")
+///     .build()?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
+/// ```
+pub struct ClientBuilder {
+    config: ClientConfig,
+    pending_error: Option<Error>,
+}
+
+/// Builder for ergonomic stream creation.
+///
+/// Obtain this from [`StreamHandle::create`], configure the options you need,
+/// and finish with [`CreateBuilder::send`].
+#[derive(Clone)]
+pub struct CreateBuilder {
+    stream: StreamHandle,
+    content_type: Option<String>,
+    ttl_seconds: Option<u64>,
+    expires_at: Option<String>,
+    closed: bool,
+    body: Option<Bytes>,
+    options: RequestOptions,
+}
+
+/// Builder for ergonomic appends.
+///
+/// Obtain this from [`StreamHandle::append`] and finish with
+/// [`AppendBuilder::send`].
+#[derive(Clone)]
+pub struct AppendBuilder {
+    stream: StreamHandle,
+    body: Bytes,
+    content_type: Option<String>,
+    expected_seq: Option<String>,
+    options: RequestOptions,
+}
+
+/// Builder for ergonomic closes.
+///
+/// Obtain this from [`StreamHandle::close`] and finish with
+/// [`CloseBuilder::send`].
+#[derive(Clone)]
+pub struct CloseBuilder {
+    stream: StreamHandle,
+    body: Option<Bytes>,
+    content_type: Option<String>,
+    options: RequestOptions,
+}
+
+/// Builder for ergonomic reads.
+///
+/// Obtain this from [`StreamHandle::read`] and finish with
+/// [`ReadBuilder::send`].
+#[derive(Clone)]
+pub struct ReadBuilder {
+    stream: StreamHandle,
+    offset: Offset,
+    live: LiveMode,
+    timeout: Option<Duration>,
+    max_chunks: Option<usize>,
+    wait_for_up_to_date: bool,
+    cursor: Option<String>,
+    if_none_match: Option<String>,
+    options: RequestOptions,
 }
 
 #[derive(Clone, Copy)]
@@ -74,6 +219,12 @@ pub(crate) struct ProducerHeaders<'a> {
 }
 
 impl Client {
+    /// Start building a client with ergonomic fluent configuration.
+    #[must_use]
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
+    }
+
     /// Build a client from validated configuration.
     pub fn from_config(config: ClientConfig) -> Result<Self, Error> {
         config.validate()?;
@@ -158,6 +309,10 @@ impl Client {
 
     fn auth_type(&self) -> &'static str {
         self.inner.auth_type
+    }
+
+    fn default_content_type(&self) -> Option<&str> {
+        self.inner.config.defaults.default_content_type.as_deref()
     }
 
     async fn send_request<F>(
@@ -261,7 +416,7 @@ impl Client {
     ///
     /// Maps to `PUT /v1/stream/{name}` and returns the created or idempotently
     /// reused stream state, including the next offset when the server provides it.
-    pub async fn create(
+    pub async fn create_raw(
         &self,
         path: &str,
         request: &CreateStreamRequest,
@@ -333,7 +488,7 @@ impl Client {
     }
 
     /// Fetch metadata for an existing stream without reading message bodies.
-    pub async fn connect(
+    pub async fn connect_raw(
         &self,
         path: &str,
         request: &ConnectRequest,
@@ -389,7 +544,7 @@ impl Client {
     ///
     /// When `request.producer` is set, the append uses the protocol's idempotent
     /// producer headers and returns any acknowledged producer sequence state.
-    pub async fn append(
+    pub async fn append_raw(
         &self,
         path: &str,
         request: &AppendRequest,
@@ -493,7 +648,7 @@ impl Client {
     }
 
     /// Close a stream, optionally including a final body payload.
-    pub async fn close(
+    pub async fn close_raw(
         &self,
         path: &str,
         request: &CloseStreamRequest,
@@ -621,7 +776,7 @@ impl Client {
     }
 
     /// Read from a stream in catch-up, long-poll, or SSE-backed collection mode.
-    pub async fn head(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
+    pub async fn head_raw(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
         let span = trace::client_operation_span(
             "head_stream",
             path,
@@ -653,7 +808,7 @@ impl Client {
     }
 
     /// Delete a stream.
-    pub async fn delete(
+    pub async fn delete_raw(
         &self,
         path: &str,
         request: &DeleteRequest,
@@ -706,7 +861,7 @@ impl Client {
     ///
     /// For `live = sse`, this method consumes the SSE stream and returns the
     /// collected chunks rather than exposing the raw event stream directly.
-    pub async fn read(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
+    pub async fn read_raw(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
         let span = trace::client_operation_span(
             "read_stream",
             path,
@@ -940,7 +1095,7 @@ impl Client {
     ///
     /// The returned [`Subscription`] can be polled with [`Subscription::next`]
     /// or aborted explicitly with [`Subscription::abort`].
-    pub fn subscribe(&self, path: &str, request: SubscribeRequest) -> Subscription {
+    pub fn subscribe_raw(&self, path: &str, request: SubscribeRequest) -> Subscription {
         let client = self.clone();
         let path = path.to_string();
         let server_address = self.server_address().to_string();
@@ -963,7 +1118,7 @@ impl Client {
                 debug!(event = "subscription.started");
                 let mut next_request = request.read;
                 loop {
-                    match client.read(&path, &next_request).await {
+                    match client.read_raw(&path, &next_request).await {
                         Ok(response) => {
                             Span::current().record("ds.up_to_date", response.up_to_date);
                             Span::current().record("ds.stream_closed", response.stream_closed);
@@ -1113,43 +1268,677 @@ fn build_default_headers(config: &ClientConfig) -> Result<HeaderMap, Error> {
     Ok(headers)
 }
 
+impl ClientBuilder {
+    /// Create a builder with the crate defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            config: ClientConfig::default(),
+            pending_error: None,
+        }
+    }
+
+    /// Set the Durable Streams server base URL.
+    #[must_use]
+    pub fn base_url(mut self, url: impl AsRef<str>) -> Self {
+        if self.pending_error.is_none() {
+            match Url::parse(url.as_ref()) {
+                Ok(parsed) => self.config.base_url = parsed,
+                Err(error) => self.pending_error = Some(error.into()),
+            }
+        }
+        self
+    }
+
+    /// Configure bearer token authentication.
+    #[must_use]
+    pub fn bearer_auth(mut self, token: impl Into<String>) -> Self {
+        self.config.auth = AuthConfig::Bearer {
+            token: token.into(),
+        };
+        self
+    }
+
+    /// Configure basic authentication.
+    #[must_use]
+    pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.config.auth = AuthConfig::Basic {
+            username: username.into(),
+            password: password.into(),
+        };
+        self
+    }
+
+    /// Configure static header authentication.
+    #[must_use]
+    pub fn header_auth(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.auth = AuthConfig::Header {
+            name: name.into(),
+            value: value.into(),
+        };
+        self
+    }
+
+    /// Set the connect timeout for new requests.
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.config.transport.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the per-request timeout.
+    #[must_use]
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.config.transport.request_timeout = timeout;
+        self
+    }
+
+    /// Set the default user agent.
+    #[must_use]
+    pub fn user_agent(mut self, value: impl Into<String>) -> Self {
+        self.config.transport.user_agent = value.into();
+        self
+    }
+
+    /// Set the proxy URL for the underlying HTTP client.
+    #[must_use]
+    pub fn proxy_url(mut self, value: impl Into<String>) -> Self {
+        self.config.transport.proxy_url = Some(value.into());
+        self
+    }
+
+    /// Set the default content type used by the ergonomic stream API.
+    #[must_use]
+    pub fn default_content_type(mut self, value: impl Into<String>) -> Self {
+        self.config.defaults.default_content_type = Some(value.into());
+        self
+    }
+
+    /// Add a default header applied to every request.
+    #[must_use]
+    pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config
+            .defaults
+            .headers
+            .insert(name.into(), value.into());
+        self
+    }
+
+    /// Add a default query parameter applied to every request.
+    #[must_use]
+    pub fn default_query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.defaults.query.insert(name.into(), value.into());
+        self
+    }
+
+    /// Override the retry policy.
+    #[must_use]
+    pub fn retry(mut self, retry: crate::model::RetryOptions) -> Self {
+        self.config.retry = retry;
+        self
+    }
+
+    /// Build the configured client.
+    pub fn build(self) -> Result<Client, Error> {
+        if let Some(error) = self.pending_error {
+            return Err(error);
+        }
+        Client::from_config(self.config)
+    }
+}
+
+impl Default for ClientBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CreateBuilder {
+    /// Override the content type used for stream creation.
+    #[must_use]
+    pub fn content_type(mut self, value: impl Into<String>) -> Self {
+        self.content_type = Some(value.into());
+        self
+    }
+
+    /// Set the stream TTL in seconds.
+    #[must_use]
+    pub fn ttl(mut self, ttl: Duration) -> Self {
+        self.ttl_seconds = Some(ttl.as_secs());
+        self
+    }
+
+    /// Set the stream TTL in seconds directly.
+    #[must_use]
+    pub fn ttl_seconds(mut self, ttl_seconds: u64) -> Self {
+        self.ttl_seconds = Some(ttl_seconds);
+        self
+    }
+
+    /// Set an explicit expiry timestamp string.
+    #[must_use]
+    pub fn expires_at(mut self, value: impl Into<String>) -> Self {
+        self.expires_at = Some(value.into());
+        self
+    }
+
+    /// Mark the stream as closed immediately after creation.
+    #[must_use]
+    pub fn closed(mut self, closed: bool) -> Self {
+        self.closed = closed;
+        self
+    }
+
+    /// Add an initial body payload.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Bytes>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Add one request header to this operation.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Add one query parameter to this operation.
+    #[must_use]
+    pub fn query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.query.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replace the low-level request options for this operation.
+    #[must_use]
+    pub fn request_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn into_raw(self) -> CreateStreamRequest {
+        CreateStreamRequest {
+            content_type: self
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            ttl_seconds: self.ttl_seconds,
+            expires_at: self.expires_at,
+            closed: self.closed,
+            body: self.body,
+            options: self.options,
+        }
+    }
+
+    /// Execute the create operation.
+    pub async fn send(self) -> Result<CreateAck, Error> {
+        let stream = self.stream.clone();
+        let request = self.into_raw();
+        let response = stream.create_raw(&request).await?;
+        Ok(CreateAck::from(response))
+    }
+}
+
+impl AppendBuilder {
+    /// Override the content type used for this append.
+    #[must_use]
+    pub fn content_type(mut self, value: impl Into<String>) -> Self {
+        self.content_type = Some(value.into());
+        self
+    }
+
+    /// Set the expected stream sequence token.
+    #[must_use]
+    pub fn expected_seq(mut self, value: impl Into<String>) -> Self {
+        self.expected_seq = Some(value.into());
+        self
+    }
+
+    /// Add one request header to this operation.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Add one query parameter to this operation.
+    #[must_use]
+    pub fn query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.query.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replace the low-level request options for this operation.
+    #[must_use]
+    pub fn request_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn into_raw(self) -> AppendRequest {
+        AppendRequest {
+            body: self.body,
+            content_type: self.content_type,
+            stream_seq: self.expected_seq,
+            producer: None,
+            options: self.options,
+        }
+    }
+
+    /// Execute the append operation.
+    pub async fn send(self) -> Result<AppendAck, Error> {
+        let stream = self.stream.clone();
+        let request = self.into_raw();
+        let response = stream.append_raw(&request).await?;
+        Ok(AppendAck::from(response))
+    }
+}
+
+impl CloseBuilder {
+    /// Add a final body payload.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Bytes>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+
+    /// Override the content type used for the final close payload.
+    #[must_use]
+    pub fn content_type(mut self, value: impl Into<String>) -> Self {
+        self.content_type = Some(value.into());
+        self
+    }
+
+    /// Add one request header to this operation.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Add one query parameter to this operation.
+    #[must_use]
+    pub fn query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.query.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replace the low-level request options for this operation.
+    #[must_use]
+    pub fn request_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn into_raw(self) -> CloseStreamRequest {
+        CloseStreamRequest {
+            body: self.body,
+            content_type: self.content_type,
+            producer: None,
+            options: self.options,
+        }
+    }
+
+    /// Execute the close operation.
+    pub async fn send(self) -> Result<CloseAck, Error> {
+        let stream = self.stream.clone();
+        let request = self.into_raw();
+        let response = stream.close_raw(&request).await?;
+        Ok(CloseAck::from(response))
+    }
+}
+
+impl ReadBuilder {
+    /// Start reading from a different offset.
+    #[must_use]
+    pub fn offset(mut self, offset: impl Into<Offset>) -> Self {
+        self.offset = offset.into();
+        self
+    }
+
+    /// Set the live mode used for this read.
+    #[must_use]
+    pub fn live(mut self, live: LiveMode) -> Self {
+        self.live = live;
+        self
+    }
+
+    /// Bound the request time budget.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Limit the number of chunks collected.
+    #[must_use]
+    pub fn max_chunks(mut self, max_chunks: usize) -> Self {
+        self.max_chunks = Some(max_chunks);
+        self
+    }
+
+    /// Keep reading until the server reports that the stream is up to date.
+    #[must_use]
+    pub fn until_up_to_date(mut self) -> Self {
+        self.wait_for_up_to_date = true;
+        self
+    }
+
+    /// Send an initial request-collapsing cursor.
+    #[must_use]
+    pub fn cursor(mut self, value: impl Into<String>) -> Self {
+        self.cursor = Some(value.into());
+        self
+    }
+
+    /// Set an `If-None-Match` precondition.
+    #[must_use]
+    pub fn if_none_match(mut self, value: impl Into<String>) -> Self {
+        self.if_none_match = Some(value.into());
+        self
+    }
+
+    /// Add one request header to this operation.
+    #[must_use]
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.headers.insert(name.into(), value.into());
+        self
+    }
+
+    /// Add one query parameter to this operation.
+    #[must_use]
+    pub fn query(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.query.insert(name.into(), value.into());
+        self
+    }
+
+    /// Replace the low-level request options for this operation.
+    #[must_use]
+    pub fn request_options(mut self, options: RequestOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    fn to_raw_request(&self) -> ReadRequest {
+        ReadRequest {
+            offset: Some(self.offset.to_string()),
+            live: self.live,
+            timeout: self.timeout,
+            max_chunks: self.max_chunks,
+            wait_for_up_to_date: self.wait_for_up_to_date,
+            cursor: self.cursor.clone(),
+            if_none_match: self.if_none_match.clone(),
+            options: self.options.clone(),
+        }
+    }
+
+    /// Execute the collected read operation.
+    pub async fn send(self) -> Result<ReadPage, Error> {
+        let stream = self.stream.clone();
+        let request = self.to_raw_request();
+        let response = stream.read_raw(&request).await?;
+        Ok(ReadPage::from(response))
+    }
+}
+
 impl StreamHandle {
-    /// Create this stream using the handle's bound path.
-    pub async fn create(
-        &self,
-        request: &CreateStreamRequest,
-    ) -> Result<CreateStreamResponse, Error> {
-        self.client.create(&self.path, request).await
+    /// Return the stream path bound to this handle.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
-    /// Fetch metadata for this stream.
-    pub async fn connect(&self, request: &ConnectRequest) -> Result<ConnectResponse, Error> {
-        self.client.connect(&self.path, request).await
+    /// Start building a stream creation request.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// orders
+    ///     .create()
+    ///     .content_type("application/json")
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn create(&self) -> CreateBuilder {
+        CreateBuilder {
+            stream: self.clone(),
+            content_type: self.client.default_content_type().map(ToOwned::to_owned),
+            ttl_seconds: None,
+            expires_at: None,
+            closed: false,
+            body: None,
+            options: RequestOptions::default(),
+        }
     }
 
-    /// Append to this stream.
-    pub async fn append(&self, request: &AppendRequest) -> Result<AppendResponse, Error> {
-        self.client.append(&self.path, request).await
+    /// Fetch stream metadata.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// let info = orders.head().await?;
+    /// println!("{:?}", info.content_type);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn head(&self) -> Result<StreamInfo, Error> {
+        let response = self
+            .client
+            .head_raw(&self.path, &HeadRequest::default())
+            .await?;
+        Ok(StreamInfo::from(response))
     }
 
-    /// Read from this stream.
-    pub async fn read(&self, request: &ReadRequest) -> Result<ReadResponse, Error> {
-        self.client.read(&self.path, request).await
+    /// Append raw bytes to this stream.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// orders
+    ///     .append("hello world")
+    ///     .content_type("text/plain")
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn append(&self, body: impl Into<Bytes>) -> AppendBuilder {
+        AppendBuilder {
+            stream: self.clone(),
+            body: body.into(),
+            content_type: self.client.default_content_type().map(ToOwned::to_owned),
+            expected_seq: None,
+            options: RequestOptions::default(),
+        }
     }
 
-    /// Close this stream.
-    pub async fn close(&self, request: &CloseStreamRequest) -> Result<CloseStreamResponse, Error> {
-        self.client.close(&self.path, request).await
+    /// Serialize one JSON value and append it with `application/json`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// orders
+    ///     .append_json(&serde_json::json!({ "type": "created" }))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn append_json<T>(&self, value: &T) -> Result<AppendAck, Error>
+    where
+        T: Serialize,
+    {
+        let body = serde_json::to_vec(value)?;
+        self.append(body)
+            .content_type("application/json")
+            .send()
+            .await
     }
 
-    /// Read head metadata for this stream.
-    pub async fn head(&self, request: &HeadRequest) -> Result<HeadResponse, Error> {
-        self.client.head(&self.path, request).await
+    /// Start building a close request.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// let close = orders.close().send().await?;
+    /// println!("{}", close.final_offset);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn close(&self) -> CloseBuilder {
+        CloseBuilder {
+            stream: self.clone(),
+            body: None,
+            content_type: self.client.default_content_type().map(ToOwned::to_owned),
+            options: RequestOptions::default(),
+        }
+    }
+
+    /// Start building a collected read request.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// let page = orders
+    ///     .read()
+    ///     .offset(Offset::Beginning)
+    ///     .live(LiveMode::CatchUp)
+    ///     .send()
+    ///     .await?;
+    ///
+    /// println!("{}", page.next_offset);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn read(&self) -> ReadBuilder {
+        ReadBuilder {
+            stream: self.clone(),
+            offset: Offset::Beginning,
+            live: LiveMode::CatchUp,
+            timeout: None,
+            max_chunks: None,
+            wait_for_up_to_date: false,
+            cursor: None,
+            if_none_match: None,
+            options: RequestOptions::default(),
+        }
     }
 
     /// Delete this stream.
-    pub async fn delete(&self, request: &DeleteRequest) -> Result<DeleteResponse, Error> {
-        self.client.delete(&self.path, request).await
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use durable_streams_client::{Client, ClientConfig};
+    ///
+    /// # #[tokio::main(flavor = "current_thread")]
+    /// # async fn main() -> Result<(), durable_streams_client::Error> {
+    /// let client = Client::new(ClientConfig::default())?;
+    /// let orders = client.stream("/orders");
+    ///
+    /// orders.delete().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete(&self) -> Result<(), Error> {
+        self.client
+            .delete_raw(&self.path, &DeleteRequest::default())
+            .await?;
+        Ok(())
+    }
+
+    /// Create this stream using the protocol-shaped raw request API.
+    pub async fn create_raw(
+        &self,
+        request: &CreateStreamRequest,
+    ) -> Result<CreateStreamResponse, Error> {
+        self.client.create_raw(&self.path, request).await
+    }
+
+    /// Fetch metadata for this stream using the protocol-shaped raw API.
+    pub async fn connect_raw(&self, request: &ConnectRequest) -> Result<ConnectResponse, Error> {
+        self.client.connect_raw(&self.path, request).await
+    }
+
+    /// Append to this stream using the protocol-shaped raw API.
+    pub async fn append_raw(&self, request: &AppendRequest) -> Result<AppendResponse, Error> {
+        self.client.append_raw(&self.path, request).await
+    }
+
+    /// Read from this stream using the protocol-shaped raw API.
+    pub async fn read_raw(&self, request: &ReadRequest) -> Result<ReadResponse, Error> {
+        self.client.read_raw(&self.path, request).await
+    }
+
+    /// Close this stream using the protocol-shaped raw API.
+    pub async fn close_raw(
+        &self,
+        request: &CloseStreamRequest,
+    ) -> Result<CloseStreamResponse, Error> {
+        self.client.close_raw(&self.path, request).await
+    }
+
+    /// Fetch metadata for this stream using a raw HEAD request.
+    pub async fn head_raw(&self, request: &HeadRequest) -> Result<HeadResponse, Error> {
+        self.client.head_raw(&self.path, request).await
+    }
+
+    /// Delete this stream using the protocol-shaped raw API.
+    pub async fn delete_raw(&self, request: &DeleteRequest) -> Result<DeleteResponse, Error> {
+        self.client.delete_raw(&self.path, request).await
+    }
+
+    /// Start a background subscription using the raw read request model.
+    #[must_use]
+    pub fn subscribe_raw(&self, request: SubscribeRequest) -> Subscription {
+        self.client.subscribe_raw(&self.path, request)
     }
 }
 
@@ -1162,5 +1951,49 @@ impl Subscription {
     /// Abort the background subscription task.
     pub fn abort(&self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Client, LiveMode, Offset};
+
+    #[test]
+    fn create_builder_uses_client_default_content_type() {
+        let client = Client::builder()
+            .default_content_type("application/json")
+            .build()
+            .expect("client builds");
+        let request = client.stream("/orders").create().into_raw();
+
+        assert_eq!(request.content_type, "application/json");
+    }
+
+    #[test]
+    fn append_builder_maps_expected_seq_to_raw_stream_seq() {
+        let client = Client::builder().build().expect("client builds");
+        let request = client
+            .stream("/orders")
+            .append("payload")
+            .expected_seq("42-0")
+            .into_raw();
+
+        assert_eq!(request.stream_seq.as_deref(), Some("42-0"));
+    }
+
+    #[test]
+    fn read_builder_uses_typed_offsets() {
+        let client = Client::builder().build().expect("client builds");
+        let request = client
+            .stream("/orders")
+            .read()
+            .offset(Offset::Now)
+            .live(LiveMode::Auto)
+            .until_up_to_date()
+            .to_raw_request();
+
+        assert_eq!(request.offset.as_deref(), Some("now"));
+        assert_eq!(request.live, LiveMode::Auto);
+        assert!(request.wait_for_up_to_date);
     }
 }

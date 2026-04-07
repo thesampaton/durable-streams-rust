@@ -398,7 +398,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.create(&path, &request).await {
+            match client.create_raw(&path, &request).await {
                 Ok(result) => {
                     state.content_types.insert(path.clone(), content_type);
                     AdapterOutput::Success(SuccessResult {
@@ -424,7 +424,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .connect(
+                .connect_raw(
                     &path,
                     &ConnectRequest {
                         options: RequestOptions {
@@ -508,7 +508,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.append(&path, &request).await {
+            match client.append_raw(&path, &request).await {
                 Ok(result) => AdapterOutput::Success(SuccessResult {
                     result_type: "append".to_string(),
                     success: true,
@@ -565,7 +565,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                     query: HashMap::new(),
                 },
             };
-            match client.read(&path, &request).await {
+            match client.read_raw(&path, &request).await {
                 Ok(result) => {
                     let chunks = result
                         .chunks
@@ -604,7 +604,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .head(
+                .head_raw(
                     &path,
                     &HeadRequest {
                         options: RequestOptions {
@@ -645,7 +645,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 ));
             };
             match client
-                .delete(
+                .delete_raw(
                     &path,
                     &DeleteRequest {
                         options: RequestOptions {
@@ -681,7 +681,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             };
             let content_type = content_type.or_else(|| state.content_types.get(&path).cloned());
             match client
-                .close(
+                .close_raw(
                     &path,
                     &CloseStreamRequest {
                         body: data.map(Bytes::from),

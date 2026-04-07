@@ -4,7 +4,8 @@ Rust client library for Durable Streams.
 
 This crate provides:
 
-- explicit typed request and response models
+- stream-first ergonomic APIs for common operations
+- explicit raw request and response models when you need protocol control
 - first-class typed configuration
 - layered TOML config loading
 - environment-variable overrides
@@ -18,36 +19,148 @@ The main entry points are:
 
 - `Client` for top-level operations
 - `StreamHandle` for stream-scoped usage
+- `ClientBuilder` for fluent construction
 - `ClientConfig` and `ClientConfigLoader` for config-first construction
+- `raw` for protocol-shaped request/response types
 - `IdempotentProducer` for producer fencing and sequence-aware writes
 
 ## Example
 
 ```no_run
-use durable_streams_client::{
-    Client, ClientConfig, CreateStreamRequest, ReadRequest, RequestOptions,
-};
+use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
 
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
 let client = Client::new(ClientConfig::default())?;
+let stream = client.stream("/example");
 
-client
-    .create(
-        "/example",
-        &CreateStreamRequest {
-            content_type: "application/json".to_string(),
-            body: None,
-            ttl_seconds: None,
-            expires_at: None,
-            closed: false,
-            options: RequestOptions::default(),
-        },
-    )
+stream.create().content_type("application/json").send().await?;
+stream.append_json(&serde_json::json!({ "type": "created" })).await?;
+
+let page = stream
+    .read()
+    .offset(Offset::Beginning)
+    .live(LiveMode::CatchUp)
+    .send()
+    .await?;
+println!("next offset: {}", page.next_offset);
+# Ok(())
+# }
+```
+
+## Common Tasks
+
+### Create A Stream And Append JSON
+
+```no_run
+use durable_streams_client::{Client, ClientConfig};
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), durable_streams_client::Error> {
+let client = Client::new(ClientConfig::default())?;
+let orders = client.stream("/orders");
+
+orders
+    .create()
+    .content_type("application/json")
+    .send()
     .await?;
 
-let response = client.read("/example", &ReadRequest::default()).await?;
-println!("next offset: {}", response.next_offset);
+orders
+    .append_json(&serde_json::json!({
+        "type": "order.created",
+        "id": "ord_123"
+    }))
+    .await?;
+# Ok(())
+# }
+```
+
+### Read From The Beginning
+
+```no_run
+use durable_streams_client::{Client, ClientConfig, LiveMode, Offset};
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), durable_streams_client::Error> {
+let client = Client::new(ClientConfig::default())?;
+let orders = client.stream("/orders");
+
+let page = orders
+    .read()
+    .offset(Offset::Beginning)
+    .live(LiveMode::CatchUp)
+    .send()
+    .await?;
+
+for chunk in page.chunks {
+    println!("chunk at {}: {} bytes", chunk.next_offset, chunk.data.len());
+}
+# Ok(())
+# }
+```
+
+### Resume From A Saved Offset
+
+```no_run
+use durable_streams_client::{Client, ClientConfig, Offset};
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), durable_streams_client::Error> {
+let client = Client::new(ClientConfig::default())?;
+let orders = client.stream("/orders");
+let saved_offset = "42-0";
+
+let page = orders
+    .read()
+    .offset(Offset::at(saved_offset))
+    .send()
+    .await?;
+
+println!("resume from next offset {}", page.next_offset);
+# Ok(())
+# }
+```
+
+### Inspect Stream Metadata
+
+```no_run
+use durable_streams_client::{Client, ClientConfig};
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), durable_streams_client::Error> {
+let client = Client::new(ClientConfig::default())?;
+let orders = client.stream("/orders");
+
+let info = orders.head().await?;
+println!("content type: {:?}", info.content_type);
+println!("closed: {}", info.closed);
+# Ok(())
+# }
+```
+
+### Drop Down To The Raw API
+
+```no_run
+use durable_streams_client::{raw, Client, ClientConfig};
+use bytes::Bytes;
+
+# #[tokio::main(flavor = "current_thread")]
+# async fn main() -> Result<(), durable_streams_client::Error> {
+let client = Client::new(ClientConfig::default())?;
+let orders = client.stream("/orders");
+
+let response = orders
+    .append_raw(&raw::AppendRequest {
+        body: Bytes::from_static(b"raw-bytes"),
+        content_type: Some("application/octet-stream".to_string()),
+        stream_seq: None,
+        producer: None,
+        options: raw::RequestOptions::default(),
+    })
+    .await?;
+
+println!("raw next offset: {:?}", response.next_offset);
 # Ok(())
 # }
 ```
@@ -90,6 +203,23 @@ use durable_streams_client::{Client, ClientConfigLoader};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let config = ClientConfigLoader::default().load()?;
 let _client = Client::new(config)?;
+# Ok(())
+# }
+```
+
+Or build a client fluently:
+
+```rust
+use durable_streams_client::Client;
+use std::time::Duration;
+
+# fn main() -> Result<(), durable_streams_client::Error> {
+let _client = Client::builder()
+    .base_url("http://127.0.0.1:8080")
+    .bearer_auth("replace-me")
+    .default_content_type("application/json")
+    .request_timeout(Duration::from_secs(30))
+    .build()?;
 # Ok(())
 # }
 ```
