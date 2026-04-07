@@ -22,7 +22,7 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
 //! let client = Client::builder()
-//!     .base_url("http://127.0.0.1:8080")
+//!     .base_url("http://127.0.0.1:4437/v1/stream/")
 //!     .default_content_type("application/json")
 //!     .build()?;
 //! let orders = client.stream("/orders");

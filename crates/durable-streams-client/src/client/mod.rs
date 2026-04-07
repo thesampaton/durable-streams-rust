@@ -12,7 +12,9 @@
 //! use durable_streams_client::Client;
 //!
 //! # fn main() -> Result<(), durable_streams_client::Error> {
-//! let client = Client::builder().base_url("http://127.0.0.1:8080").build()?;
+//! let client = Client::builder()
+//!     .base_url("http://127.0.0.1:4437/v1/stream/")
+//!     .build()?;
 //! let orders = client.stream("/orders");
 //! # let _ = orders;
 //! # Ok(())
@@ -27,7 +29,7 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
 //! let client = Client::builder()
-//!     .base_url("http://127.0.0.1:8080")
+//!     .base_url("http://127.0.0.1:4437/v1/stream/")
 //!     .default_content_type("application/json")
 //!     .build()?;
 //! let orders = client.stream("/orders");
@@ -46,7 +48,7 @@
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), durable_streams_client::Error> {
 //! let client = Client::builder()
-//!     .base_url("http://127.0.0.1:8080")
+//!     .base_url("http://127.0.0.1:4437/v1/stream/")
 //!     .default_content_type("application/json")
 //!     .build()?;
 //! let orders = client.stream("/orders");
@@ -54,7 +56,7 @@
 //! let page = orders.read().send().await?;
 //!
 //! for chunk in page.chunks {
-//!     println!("{}", chunk.offset);
+//!     println!("{}", chunk.resume_offset);
 //! }
 //! # Ok(())
 //! # }
@@ -132,7 +134,7 @@ pub struct Subscription {
 ///
 /// # fn main() -> Result<(), durable_streams_client::Error> {
 /// let client = Client::builder()
-///     .base_url("http://127.0.0.1:8080")
+///     .base_url("http://127.0.0.1:4437/v1/stream/")
 ///     .bearer_auth("replace-me")
 ///     .request_timeout(Duration::from_secs(30))
 ///     .default_content_type("application/json")

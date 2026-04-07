@@ -20,7 +20,11 @@ impl ClientBuilder {
         }
     }
 
-    /// Set the Durable Streams server base URL.
+    /// Set the Durable Streams stream collection base URL.
+    ///
+    /// Stream paths from [`crate::Client::stream`] are joined directly onto
+    /// this base URL. For the workspace server, that means using a value like
+    /// `http://127.0.0.1:4437/v1/stream/` rather than just the server origin.
     #[must_use]
     pub fn base_url(mut self, url: impl AsRef<str>) -> Self {
         if self.pending_error.is_none() {
@@ -216,6 +220,11 @@ impl CreateBuilder {
     }
 
     /// Execute the create operation.
+    ///
+    /// Content type precedence is:
+    /// 1. [`CreateBuilder::content_type`]
+    /// 2. the client `default_content_type`
+    /// 3. `application/octet-stream`
     pub async fn send(self) -> Result<CreateOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();

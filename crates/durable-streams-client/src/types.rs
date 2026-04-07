@@ -103,7 +103,11 @@ pub struct CloseOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamChunk {
     pub data: Bytes,
-    pub offset: Offset,
+    /// Resume reading from this offset after consuming this chunk.
+    ///
+    /// This is derived from the protocol read model's `next_offset`, so it is
+    /// a post-chunk resume token rather than a chunk start position.
+    pub resume_offset: Offset,
 }
 
 /// Collected read result in the ergonomic API.
@@ -162,7 +166,7 @@ impl From<ReadChunk> for StreamChunk {
     fn from(value: ReadChunk) -> Self {
         Self {
             data: value.data,
-            offset: Offset::from(value.next_offset),
+            resume_offset: Offset::from(value.next_offset),
         }
     }
 }

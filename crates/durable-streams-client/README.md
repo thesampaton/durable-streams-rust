@@ -32,7 +32,7 @@ use durable_streams_client::Client;
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
 let client = Client::builder()
-    .base_url("http://127.0.0.1:8080")
+    .base_url("http://127.0.0.1:4437/v1/stream/")
     .default_content_type("application/json")
     .build()?;
 let stream = client.stream("/example");
@@ -56,7 +56,7 @@ use durable_streams_client::Client;
 # #[tokio::main(flavor = "current_thread")]
 # async fn main() -> Result<(), durable_streams_client::Error> {
 let client = Client::builder()
-    .base_url("http://127.0.0.1:8080")
+    .base_url("http://127.0.0.1:4437/v1/stream/")
     .default_content_type("application/json")
     .build()?;
 let orders = client.stream("/orders");
@@ -86,7 +86,11 @@ let orders = client.stream("/orders");
 let page = orders.read().send().await?;
 
 for chunk in page.chunks {
-    println!("chunk at {}: {} bytes", chunk.offset, chunk.data.len());
+    println!(
+        "chunk resumes at {}: {} bytes",
+        chunk.resume_offset,
+        chunk.data.len()
+    );
 }
 # Ok(())
 # }
@@ -207,7 +211,7 @@ use std::time::Duration;
 
 # fn main() -> Result<(), durable_streams_client::Error> {
 let _client = Client::builder()
-    .base_url("http://127.0.0.1:8080")
+    .base_url("http://127.0.0.1:4437/v1/stream/")
     .bearer_auth("replace-me")
     .default_content_type("application/json")
     .request_timeout(Duration::from_secs(30))
