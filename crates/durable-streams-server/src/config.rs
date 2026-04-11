@@ -27,6 +27,26 @@ pub enum StorageMode {
     Acid,
 }
 
+/// Redb storage backend used by the [`StorageMode::Acid`] mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcidBackend {
+    /// File-backed redb (default). Data persists across restarts.
+    File,
+    /// In-memory redb. Provides ACID transactions without disk I/O; all data
+    /// is lost on shutdown.
+    InMemory,
+}
+
+impl AcidBackend {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::InMemory => "memory",
+        }
+    }
+}
+
 impl StorageMode {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -75,6 +95,8 @@ pub struct Config {
     pub data_dir: String,
     /// Number of shards used by the acid/redb backend.
     pub acid_shard_count: usize,
+    /// Redb backend selection for the acid storage mode.
+    pub acid_backend: AcidBackend,
     /// Optional TLS certificate path in PEM format. Requires `tls_key_path`.
     pub tls_cert_path: Option<String>,
     /// Optional TLS private key path in PEM or PKCS#8 format. Requires `tls_cert_path`.
@@ -141,6 +163,7 @@ struct StorageSettingsFile {
     mode: Option<String>,
     data_dir: Option<String>,
     acid_shard_count: Option<usize>,
+    acid_backend: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -270,6 +293,10 @@ impl Config {
                 ));
             }
         }
+        if let Some(acid_backend) = settings.storage.acid_backend {
+            config.acid_backend = Self::parse_acid_backend_value(&acid_backend)
+                .ok_or_else(|| format!("invalid storage.acid_backend value: '{acid_backend}'"))?;
+        }
 
         config.tls_cert_path = settings.tls.cert_path;
         config.tls_key_path = settings.tls.key_path;
@@ -335,6 +362,11 @@ impl Config {
                 ));
             }
             self.acid_shard_count = parsed;
+        }
+
+        if let Some(acid_backend) = get("DS_STORAGE__ACID_BACKEND") {
+            self.acid_backend = Self::parse_acid_backend_value(&acid_backend)
+                .ok_or_else(|| format!("invalid DS_STORAGE__ACID_BACKEND value: '{acid_backend}'"))?;
         }
 
         if let Some(cert_path) = get("DS_TLS__CERT_PATH") {
@@ -417,6 +449,14 @@ impl Config {
     fn valid_acid_shard_count(value: usize) -> bool {
         (1..=256).contains(&value) && value.is_power_of_two()
     }
+
+    fn parse_acid_backend_value(raw: &str) -> Option<AcidBackend> {
+        match raw.to_ascii_lowercase().as_str() {
+            "file" => Some(AcidBackend::File),
+            "memory" | "in-memory" | "inmemory" => Some(AcidBackend::InMemory),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -431,6 +471,7 @@ impl Default for Config {
             storage_mode: StorageMode::Memory,
             data_dir: "./data/streams".to_string(),
             acid_shard_count: 16,
+            acid_backend: AcidBackend::File,
             tls_cert_path: None,
             tls_key_path: None,
             rust_log: "info".to_string(),
@@ -485,6 +526,7 @@ mod tests {
         assert_eq!(config.storage_mode, StorageMode::Memory);
         assert_eq!(config.data_dir, "./data/streams");
         assert_eq!(config.acid_shard_count, 16);
+        assert_eq!(config.acid_backend, AcidBackend::File);
         assert_eq!(config.tls_cert_path, None);
         assert_eq!(config.tls_key_path, None);
         assert_eq!(config.rust_log, "info");
@@ -735,6 +777,39 @@ mod tests {
             .expect_err("invalid shard count should fail");
         assert_eq!(err, "invalid DS_STORAGE__ACID_SHARD_COUNT value: 'abc'");
         assert_eq!(config.acid_shard_count, 16);
+    }
+
+    #[test]
+    fn test_acid_backend_env_override() {
+        let mut config = Config::default();
+        assert_eq!(config.acid_backend, AcidBackend::File);
+
+        config
+            .apply_env_overrides(&lookup(&[("DS_STORAGE__ACID_BACKEND", "memory")]))
+            .expect("apply env overrides");
+        assert_eq!(config.acid_backend, AcidBackend::InMemory);
+
+        let mut config = Config::default();
+        config
+            .apply_env_overrides(&lookup(&[("DS_STORAGE__ACID_BACKEND", "in-memory")]))
+            .expect("apply env overrides");
+        assert_eq!(config.acid_backend, AcidBackend::InMemory);
+
+        let mut config = Config::default();
+        config
+            .apply_env_overrides(&lookup(&[("DS_STORAGE__ACID_BACKEND", "file")]))
+            .expect("apply env overrides");
+        assert_eq!(config.acid_backend, AcidBackend::File);
+    }
+
+    #[test]
+    fn test_acid_backend_env_override_rejects_invalid() {
+        let mut config = Config::default();
+        let err = config
+            .apply_env_overrides(&lookup(&[("DS_STORAGE__ACID_BACKEND", "sqlite")]))
+            .expect_err("invalid acid backend should fail");
+        assert_eq!(err, "invalid DS_STORAGE__ACID_BACKEND value: 'sqlite'");
+        assert_eq!(config.acid_backend, AcidBackend::File);
     }
 
     #[test]

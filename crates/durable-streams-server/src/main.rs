@@ -191,7 +191,8 @@ async fn run(config: Config) -> Result<(), String> {
         }
         StorageMode::Acid => {
             tracing::info!(
-                "Acid storage dir: {}, shards: {}",
+                "Acid storage backend: {}, dir: {}, shards: {}",
+                runtime.config.acid_backend.as_str(),
                 runtime.config.data_dir,
                 runtime.config.acid_shard_count
             );
@@ -201,6 +202,7 @@ async fn run(config: Config) -> Result<(), String> {
                     runtime.config.acid_shard_count,
                     runtime.config.max_memory_bytes,
                     runtime.config.max_stream_bytes,
+                    runtime.config.acid_backend,
                 )
                 .map_err(|e| format!("Failed to initialize acid storage: {e}"))?,
             );

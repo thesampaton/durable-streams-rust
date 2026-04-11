@@ -2,7 +2,7 @@
 // Shared across many independent integration-test crates; each crate only uses
 // a subset of helpers, so items appear unused when compiled per-test target.
 
-use durable_streams_server::config::{Config, StorageMode};
+use durable_streams_server::config::{AcidBackend, Config, StorageMode};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
@@ -238,7 +238,7 @@ pub fn create_test_storage_with_limits(
         }
         StorageTestBackend::Acid => {
             let storage_dir = unique_storage_dir("acid");
-            let storage = AcidStorage::new(&storage_dir, 16, max_total_bytes, max_stream_bytes)
+            let storage = AcidStorage::new(&storage_dir, 16, max_total_bytes, max_stream_bytes, AcidBackend::File)
                 .expect("failed to initialize test acid storage");
             TestStorageHandle {
                 storage: TestStorage::Acid(storage),
@@ -322,6 +322,7 @@ pub async fn spawn_test_server_acid() -> (String, u16) {
             config.acid_shard_count,
             config.max_memory_bytes,
             config.max_stream_bytes,
+            AcidBackend::File,
         )
         .expect("Failed to initialize acid test storage"),
     );
