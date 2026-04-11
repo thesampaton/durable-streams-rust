@@ -137,7 +137,7 @@ fn read_catch_up<S: Storage>(
         return Ok(build_304_response(&read_result));
     }
 
-    build_data_response(&read_result, content_type, &etag, None)
+    Ok(build_data_response(&read_result, content_type, &etag, None))
 }
 
 /// Long-poll mode: wait for new data at tail, return immediately if data exists.
@@ -168,7 +168,7 @@ async fn read_long_poll<S: Storage>(
     // Data available → return immediately (like catch-up + cursor)
     if !read_result.messages.is_empty() {
         let cursor_val = cursor::generate(&read_result.next_offset);
-        return build_data_response(&read_result, content_type, &etag, Some(&cursor_val));
+        return Ok(build_data_response(&read_result, content_type, &etag, Some(&cursor_val)));
     }
 
     // At tail + closed → immediate 204 (MUST NOT wait)
@@ -390,7 +390,7 @@ fn handle_long_poll_wake<S: Storage>(
 
     let etag = generate_etag(raw_offset, &read_result);
     let cursor_val = cursor::generate(&read_result.next_offset);
-    build_data_response(&read_result, content_type, &etag, Some(&cursor_val))
+    Ok(build_data_response(&read_result, content_type, &etag, Some(&cursor_val)))
 }
 
 /// Generate `ETag` from read result.
@@ -424,8 +424,8 @@ fn build_data_response(
     content_type: &str,
     etag: &str,
     cursor_val: Option<&str>,
-) -> Result<Response> {
-    let body = build_body(read_result, content_type)?;
+) -> Response {
+    let body = build_body(read_result, content_type);
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
@@ -450,7 +450,7 @@ fn build_data_response(
         headers.insert(names::STREAM_CURSOR, c.parse().unwrap());
     }
 
-    Ok((StatusCode::OK, headers, body).into_response())
+    (StatusCode::OK, headers, body).into_response()
 }
 
 /// Build a 204 No Content response for long-poll timeout or closed stream.
@@ -473,17 +473,17 @@ fn build_204_response(next_offset: &Offset, is_closed: bool) -> Response {
 }
 
 /// Build response body from read result messages.
-fn build_body(read_result: &ReadResult, content_type: &str) -> Result<bytes::Bytes> {
+fn build_body(read_result: &ReadResult, content_type: &str) -> bytes::Bytes {
     if json_mode::is_json_content_type(content_type) {
         json_mode::wrap_read_iter(read_result.messages.iter())
     } else if read_result.messages.is_empty() {
-        Ok(bytes::Bytes::new())
+        bytes::Bytes::new()
     } else {
         let total_len: usize = read_result.messages.iter().map(bytes::Bytes::len).sum();
         let mut buf = BytesMut::with_capacity(total_len);
         for message in &read_result.messages {
             buf.put(message.clone());
         }
-        Ok(buf.freeze())
+        buf.freeze()
     }
 }

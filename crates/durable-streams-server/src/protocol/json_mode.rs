@@ -1,5 +1,7 @@
 use crate::protocol::error::{Error, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+#[cfg(test)]
+use std::iter;
 use serde_json::Value;
 
 /// Process JSON data for append: validate and flatten arrays
@@ -42,27 +44,12 @@ pub fn process_append(data: &[u8]) -> Result<Vec<Bytes>> {
     }
 }
 
-/// Wrap messages in JSON array for read.
-///
-/// Takes a collection of JSON message bytes and wraps them in a JSON array.
-/// If the input is empty, returns an empty array `[]`.
-///
-/// # Errors
-///
-/// This function currently does not return errors and always returns `Ok`.
-pub fn wrap_read(messages: &[Bytes]) -> Result<Bytes> {
-    wrap_read_iter(messages.iter())
-}
-
 /// Wrap JSON messages (iterator form) in a JSON array for read responses.
 ///
 /// Accepts any iterator of `&Bytes` to avoid intermediate allocations
 /// in handler hot paths.
-///
-/// # Errors
-///
-/// This function currently does not return errors and always returns `Ok`.
-pub fn wrap_read_iter<'a, I>(messages: I) -> Result<Bytes>
+#[must_use]
+pub fn wrap_read_iter<'a, I>(messages: I) -> Bytes
 where
     I: IntoIterator<Item = &'a Bytes>,
 {
@@ -82,7 +69,7 @@ where
         wrote_any = true;
     }
     out.put_u8(b']');
-    Ok(out.freeze())
+    out.freeze()
 }
 
 /// Check if a content type is JSON
@@ -142,30 +129,26 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_read_empty() {
-        let messages: Vec<Bytes> = vec![];
-        let result = wrap_read(&messages).unwrap();
-
+    fn test_wrap_read_iter_empty() {
+        let result = wrap_read_iter(iter::empty::<&Bytes>());
         assert_eq!(result, Bytes::from("[]"));
     }
 
     #[test]
-    fn test_wrap_read_single_message() {
+    fn test_wrap_read_iter_single_message() {
         let messages = vec![Bytes::from(r#"{"a":1}"#)];
-        let result = wrap_read(&messages).unwrap();
-
+        let result = wrap_read_iter(messages.iter());
         assert_eq!(result, Bytes::from(r#"[{"a":1}]"#));
     }
 
     #[test]
-    fn test_wrap_read_multiple_messages() {
+    fn test_wrap_read_iter_multiple_messages() {
         let messages = vec![
             Bytes::from(r#"{"a":1}"#),
             Bytes::from(r#"{"b":2}"#),
             Bytes::from(r#"{"c":3}"#),
         ];
-        let result = wrap_read(&messages).unwrap();
-
+        let result = wrap_read_iter(messages.iter());
         assert_eq!(result, Bytes::from(r#"[{"a":1},{"b":2},{"c":3}]"#));
     }
 
