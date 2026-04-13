@@ -91,10 +91,7 @@ fn concurrent_readers_and_writers_no_torn_reads() {
                             let mut prev_seq = None;
                             for (idx, _msg) in read.messages.iter().enumerate() {
                                 if let Some(prev) = prev_seq {
-                                    assert!(
-                                        idx > prev,
-                                        "messages out of order at index {idx}"
-                                    );
+                                    assert!(idx > prev, "messages out of order at index {idx}");
                                 }
                                 prev_seq = Some(idx);
                             }
@@ -173,12 +170,7 @@ fn concurrent_create_stream_with_data_race() {
             let b = Arc::clone(&barrier);
             threads.push(thread::spawn(move || {
                 b.wait();
-                s.create_stream_with_data(
-                    "race",
-                    plain_config(),
-                    vec![Bytes::from("data")],
-                    false,
-                )
+                s.create_stream_with_data("race", plain_config(), vec![Bytes::from("data")], false)
             }));
         }
 
@@ -208,12 +200,14 @@ fn concurrent_create_stream_with_data_race() {
             .count();
 
         assert_eq!(
-            created_count, 1,
+            created_count,
+            1,
             "backend={}: exactly one Created expected, got {created_count}",
             backend.as_str()
         );
         assert_eq!(
-            exists_count, 3,
+            exists_count,
+            3,
             "backend={}: three AlreadyExists expected, got {exists_count}",
             backend.as_str()
         );
@@ -310,7 +304,11 @@ fn subscribe_receives_close_notification() {
             .unwrap();
 
         let rx = storage.subscribe("s");
-        assert!(rx.is_some(), "backend={}: subscribe should succeed", backend.as_str());
+        assert!(
+            rx.is_some(),
+            "backend={}: subscribe should succeed",
+            backend.as_str()
+        );
         let mut rx = rx.unwrap();
 
         // Close the stream -- this should send a notification
@@ -361,10 +359,7 @@ fn broadcast_channel_saturation_does_not_deadlock() {
                 | tokio::sync::broadcast::error::TryRecvError::Empty,
             ) => {}
             Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                panic!(
-                    "backend={}: channel should not be closed",
-                    backend.as_str()
-                );
+                panic!("backend={}: channel should not be closed", backend.as_str());
             }
         }
 

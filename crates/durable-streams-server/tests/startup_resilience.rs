@@ -69,7 +69,11 @@ fn file_storage_startup_with_100_streams() {
     for i in 0..100 {
         let name = format!("stream-{i:03}");
         let read = restored.read(&name, &Offset::start()).unwrap();
-        assert_eq!(read.messages.len(), 1, "stream {name} should have 1 message");
+        assert_eq!(
+            read.messages.len(),
+            1,
+            "stream {name} should have 1 message"
+        );
         assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
     }
 }
@@ -124,10 +128,7 @@ fn acid_truncated_redb_returns_clear_error() {
     assert!(result.is_err(), "truncated shard should fail startup");
     match result {
         Err(Error::Storage(msg)) => {
-            assert!(
-                !msg.is_empty(),
-                "error message should be descriptive"
-            );
+            assert!(!msg.is_empty(), "error message should be descriptive");
         }
         _ => panic!("expected Error::Storage"),
     }
@@ -197,7 +198,10 @@ fn acid_layout_format_version_mismatch() {
     assert!(result.is_err());
     match result {
         Err(Error::Storage(msg)) => {
-            assert!(msg.contains("format_version"), "error should mention format_version: {msg}");
+            assert!(
+                msg.contains("format_version"),
+                "error should mention format_version: {msg}"
+            );
         }
         _ => panic!("expected Error::Storage"),
     }
@@ -220,7 +224,10 @@ fn acid_layout_hash_policy_mismatch() {
     assert!(result.is_err());
     match result {
         Err(Error::Storage(msg)) => {
-            assert!(msg.contains("hash_policy"), "error should mention hash_policy: {msg}");
+            assert!(
+                msg.contains("hash_policy"),
+                "error should mention hash_policy: {msg}"
+            );
         }
         _ => panic!("expected Error::Storage"),
     }
@@ -338,10 +345,7 @@ fn file_storage_handles_stream_dir_without_data_log() {
     }
 
     // Remove just the data.log but keep meta.json
-    let encoded = base64::Engine::encode(
-        &base64::prelude::BASE64_URL_SAFE_NO_PAD,
-        "s".as_bytes(),
-    );
+    let encoded = base64::Engine::encode(&base64::prelude::BASE64_URL_SAFE_NO_PAD, "s".as_bytes());
     let data_log = root.join(&encoded).join("data.log");
     fs::remove_file(&data_log).unwrap();
 

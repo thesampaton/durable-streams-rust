@@ -38,13 +38,29 @@ fn plain_config() -> StreamConfig {
 
 #[derive(Debug, Clone)]
 enum Op {
-    Create { stream_idx: usize },
-    Append { stream_idx: usize, data: Vec<u8> },
-    BatchAppend { stream_idx: usize, messages: Vec<Vec<u8>> },
-    Read { stream_idx: usize },
-    Close { stream_idx: usize },
-    Delete { stream_idx: usize },
-    Head { stream_idx: usize },
+    Create {
+        stream_idx: usize,
+    },
+    Append {
+        stream_idx: usize,
+        data: Vec<u8>,
+    },
+    BatchAppend {
+        stream_idx: usize,
+        messages: Vec<Vec<u8>>,
+    },
+    Read {
+        stream_idx: usize,
+    },
+    Close {
+        stream_idx: usize,
+    },
+    Delete {
+        stream_idx: usize,
+    },
+    Head {
+        stream_idx: usize,
+    },
 }
 
 fn op_strategy() -> impl Strategy<Value = Op> {
@@ -101,19 +117,17 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
         let name = &stream_names[idx];
 
         match op {
-            Op::Create { .. } => {
-                match storage.create_stream(name, plain_config()) {
-                    Ok(CreateStreamResult::Created) => {
-                        created[idx] = true;
-                        closed[idx] = false;
-                        message_counts[idx] = 0;
-                    }
-                    Ok(CreateStreamResult::AlreadyExists) => {
-                        assert!(created[idx], "AlreadyExists but not tracked as created");
-                    }
-                    Err(_) => {}
+            Op::Create { .. } => match storage.create_stream(name, plain_config()) {
+                Ok(CreateStreamResult::Created) => {
+                    created[idx] = true;
+                    closed[idx] = false;
+                    message_counts[idx] = 0;
                 }
-            }
+                Ok(CreateStreamResult::AlreadyExists) => {
+                    assert!(created[idx], "AlreadyExists but not tracked as created");
+                }
+                Err(_) => {}
+            },
             Op::Append { data, .. } => {
                 match storage.append(name, Bytes::from(data), "text/plain") {
                     Ok(offset) => {
@@ -172,44 +186,38 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
                     Err(e) => panic!("unexpected read error: {e:?}"),
                 }
             }
-            Op::Close { .. } => {
-                match storage.close_stream(name) {
-                    Ok(()) => {
-                        assert!(created[idx]);
-                        closed[idx] = true;
-                    }
-                    Err(Error::NotFound(_) | Error::StreamExpired) => {}
-                    Err(e) => panic!("unexpected close error: {e:?}"),
+            Op::Close { .. } => match storage.close_stream(name) {
+                Ok(()) => {
+                    assert!(created[idx]);
+                    closed[idx] = true;
                 }
-            }
-            Op::Delete { .. } => {
-                match storage.delete(name) {
-                    Ok(()) => {
-                        created[idx] = false;
-                        closed[idx] = false;
-                        message_counts[idx] = 0;
-                    }
-                    Err(Error::NotFound(_)) => {}
-                    Err(e) => panic!("unexpected delete error: {e:?}"),
+                Err(Error::NotFound(_) | Error::StreamExpired) => {}
+                Err(e) => panic!("unexpected close error: {e:?}"),
+            },
+            Op::Delete { .. } => match storage.delete(name) {
+                Ok(()) => {
+                    created[idx] = false;
+                    closed[idx] = false;
+                    message_counts[idx] = 0;
                 }
-            }
-            Op::Head { .. } => {
-                match storage.head(name) {
-                    Ok(meta) => {
-                        assert!(created[idx]);
-                        assert_eq!(
-                            meta.closed, closed[idx],
-                            "head.closed doesn't match tracked state"
-                        );
-                        assert_eq!(
-                            meta.message_count, message_counts[idx],
-                            "head.message_count doesn't match tracked state"
-                        );
-                    }
-                    Err(Error::NotFound(_) | Error::StreamExpired) => {}
-                    Err(e) => panic!("unexpected head error: {e:?}"),
+                Err(Error::NotFound(_)) => {}
+                Err(e) => panic!("unexpected delete error: {e:?}"),
+            },
+            Op::Head { .. } => match storage.head(name) {
+                Ok(meta) => {
+                    assert!(created[idx]);
+                    assert_eq!(
+                        meta.closed, closed[idx],
+                        "head.closed doesn't match tracked state"
+                    );
+                    assert_eq!(
+                        meta.message_count, message_counts[idx],
+                        "head.message_count doesn't match tracked state"
+                    );
                 }
-            }
+                Err(Error::NotFound(_) | Error::StreamExpired) => {}
+                Err(e) => panic!("unexpected head error: {e:?}"),
+            },
         }
     }
 
@@ -218,7 +226,9 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
     let total = handle.storage.total_bytes();
     let mut observable_bytes = 0u64;
     for (idx, name) in stream_names.iter().enumerate() {
-        if created[idx] && let Ok(meta) = storage.head(name) {
+        if created[idx]
+            && let Ok(meta) = storage.head(name)
+        {
             observable_bytes += meta.total_bytes;
         }
     }
@@ -431,7 +441,9 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
             ProducerOp::NextSeq => {
                 // Should be accepted (or duplicate if it was the first and we replayed)
                 match &result {
-                    Ok(durable_streams_server::storage::ProducerAppendResult::Accepted { .. }) => {
+                    Ok(durable_streams_server::storage::ProducerAppendResult::Accepted {
+                        ..
+                    }) => {
                         current_epoch = epoch;
                         current_seq = seq;
                         accepted_count += 1;
@@ -448,9 +460,9 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
             ProducerOp::Duplicate => {
                 if first_append {
                     // Was converted to a normal append
-                    if let Ok(
-                        durable_streams_server::storage::ProducerAppendResult::Accepted { .. },
-                    ) = &result
+                    if let Ok(durable_streams_server::storage::ProducerAppendResult::Accepted {
+                        ..
+                    }) = &result
                     {
                         current_epoch = epoch;
                         current_seq = seq;
@@ -462,26 +474,24 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
                     assert!(
                         matches!(
                             result,
-                            Ok(durable_streams_server::storage::ProducerAppendResult::Duplicate {
-                                ..
-                            })
+                            Ok(
+                                durable_streams_server::storage::ProducerAppendResult::Duplicate { .. }
+                            )
                         ),
                         "Duplicate should return Duplicate, got {result:?}"
                     );
                 }
             }
-            ProducerOp::BumpEpoch => {
-                match &result {
-                    Ok(durable_streams_server::storage::ProducerAppendResult::Accepted { .. }) => {
-                        current_epoch = epoch;
-                        current_seq = seq;
-                        accepted_count += 1;
-                        first_append = false;
-                    }
-                    Err(e) => panic!("BumpEpoch with seq=0 should succeed, got {e:?}"),
-                    _ => panic!("BumpEpoch unexpected result: {result:?}"),
+            ProducerOp::BumpEpoch => match &result {
+                Ok(durable_streams_server::storage::ProducerAppendResult::Accepted { .. }) => {
+                    current_epoch = epoch;
+                    current_seq = seq;
+                    accepted_count += 1;
+                    first_append = false;
                 }
-            }
+                Err(e) => panic!("BumpEpoch with seq=0 should succeed, got {e:?}"),
+                _ => panic!("BumpEpoch unexpected result: {result:?}"),
+            },
             ProducerOp::SkipSeq => {
                 if first_append && seq == 5 {
                     // seq=5 when expected=0 → SequenceGap

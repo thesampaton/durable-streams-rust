@@ -1,8 +1,8 @@
 use crate::protocol::error::{Error, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use serde_json::Value;
 #[cfg(test)]
 use std::iter;
-use serde_json::Value;
 
 /// Process JSON data for append: validate and flatten arrays
 ///

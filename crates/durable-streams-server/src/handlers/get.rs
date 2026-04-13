@@ -175,7 +175,12 @@ async fn read_long_poll<S: Storage>(
     // Data available → return immediately (like catch-up + cursor)
     if !read_result.messages.is_empty() {
         let cursor_val = cursor::generate(&read_result.next_offset);
-        return Ok(build_data_response(&read_result, content_type, &etag, Some(&cursor_val)));
+        return Ok(build_data_response(
+            &read_result,
+            content_type,
+            &etag,
+            Some(&cursor_val),
+        ));
     }
 
     // At tail + closed → immediate 204 (MUST NOT wait)
@@ -411,7 +416,12 @@ fn handle_long_poll_wake<S: Storage>(
 
     let etag = generate_etag(raw_offset, &read_result);
     let cursor_val = cursor::generate(&read_result.next_offset);
-    Ok(build_data_response(&read_result, content_type, &etag, Some(&cursor_val)))
+    Ok(build_data_response(
+        &read_result,
+        content_type,
+        &etag,
+        Some(&cursor_val),
+    ))
 }
 
 /// Generate `ETag` from read result.

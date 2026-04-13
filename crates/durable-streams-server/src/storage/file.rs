@@ -586,7 +586,8 @@ impl FileStorage {
             // and byte offsets. If meta.json is stale (e.g. crash before
             // metadata flush), log a warning so operators can investigate.
             let log_msg_count = index.len() as u64;
-            let meta_has_data = meta.closed || !meta.producers.is_empty() || meta.last_seq.is_some();
+            let meta_has_data =
+                meta.closed || !meta.producers.is_empty() || meta.last_seq.is_some();
             if log_msg_count == 0 && meta_has_data {
                 warn!(
                     stream = meta.name,

@@ -90,12 +90,8 @@ impl AcidStorage {
         Self::validate_shard_count(shard_count)?;
 
         let shards = match backend {
-            AcidBackend::File => {
-                Self::create_file_shards(&root_dir.into(), shard_count)?
-            }
-            AcidBackend::InMemory => {
-                Self::create_in_memory_shards(shard_count)?
-            }
+            AcidBackend::File => Self::create_file_shards(&root_dir.into(), shard_count)?,
+            AcidBackend::InMemory => Self::create_in_memory_shards(shard_count)?,
         };
 
         let storage = Self {
@@ -150,9 +146,7 @@ impl AcidStorage {
         for _ in 0..shard_count {
             let db = Database::builder()
                 .create_with_backend(InMemoryBackend::new())
-                .map_err(|e| {
-                    Self::storage_err("failed to create in-memory shard database", e)
-                })?;
+                .map_err(|e| Self::storage_err("failed to create in-memory shard database", e))?;
             Self::ensure_schema(&db)?;
             shards.push(AcidShard { db });
         }
@@ -1155,8 +1149,14 @@ mod tests {
     }
 
     fn test_storage() -> AcidStorage {
-        AcidStorage::new(test_storage_dir(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
-            .expect("acid storage should initialize")
+        AcidStorage::new(
+            test_storage_dir(),
+            16,
+            1024 * 1024,
+            100 * 1024,
+            AcidBackend::File,
+        )
+        .expect("acid storage should initialize")
     }
 
     fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
@@ -1173,7 +1173,9 @@ mod tests {
         let cfg = StreamConfig::new("text/plain".to_string());
 
         {
-            let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+            let storage =
+                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
+                    .unwrap();
             storage.create_stream("events", cfg.clone()).unwrap();
             storage
                 .append("events", Bytes::from("event-1"), "text/plain")
@@ -1183,7 +1185,8 @@ mod tests {
                 .unwrap();
         }
 
-        let restored = AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let restored =
+            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         let read = restored.read("events", &Offset::start()).unwrap();
 
         assert_eq!(read.messages.len(), 2);
@@ -1197,7 +1200,9 @@ mod tests {
         let cfg = StreamConfig::new("text/plain".to_string());
 
         {
-            let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+            let storage =
+                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
+                    .unwrap();
             storage.create_stream("s", cfg.clone()).unwrap();
             storage
                 .append("s", Bytes::from("data"), "text/plain")
@@ -1205,7 +1210,8 @@ mod tests {
             storage.close_stream("s").unwrap();
         }
 
-        let restored = AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let restored =
+            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         let meta = restored.head("s").unwrap();
         assert!(meta.closed);
         assert_eq!(meta.message_count, 1);
@@ -1221,7 +1227,9 @@ mod tests {
         let root = test_storage_dir();
 
         {
-            let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+            let storage =
+                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
+                    .unwrap();
             storage
                 .create_stream("s", StreamConfig::new("text/plain".to_string()))
                 .unwrap();
@@ -1238,7 +1246,8 @@ mod tests {
             assert!(matches!(result, ProducerAppendResult::Accepted { .. }));
         }
 
-        let restored = AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let restored =
+            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         let dup = restored
             .append_with_producer(
                 "s",
@@ -1274,7 +1283,9 @@ mod tests {
     fn test_startup_purges_expired_streams() {
         let root = test_storage_dir();
         {
-            let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+            let storage =
+                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
+                    .unwrap();
             let expires = Utc::now() + Duration::milliseconds(50);
             let cfg = StreamConfig::new("text/plain".to_string()).with_expires_at(expires);
             storage.create_stream("expiring", cfg).unwrap();
@@ -1285,7 +1296,8 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let restored = AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let restored =
+            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         assert!(!restored.exists("expiring"));
         assert!(matches!(
             restored.read("expiring", &Offset::start()),
@@ -1295,7 +1307,9 @@ mod tests {
 
     #[test]
     fn test_global_cap_strict_under_concurrency() {
-        let storage = Arc::new(AcidStorage::new(test_storage_dir(), 16, 120, 120, AcidBackend::File).unwrap());
+        let storage = Arc::new(
+            AcidStorage::new(test_storage_dir(), 16, 120, 120, AcidBackend::File).unwrap(),
+        );
         let shard_count = (0..8)
             .map(|i| storage.shard_index(&format!("s-{i}")))
             .collect::<std::collections::HashSet<_>>()
@@ -1353,7 +1367,8 @@ mod tests {
     #[test]
     fn test_layout_manifest_hash_policy_mismatch_fails_fast() {
         let root = test_storage_dir();
-        let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let storage =
+            AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         drop(storage);
 
         let layout_path = root.join("acid").join("layout.json");
@@ -1369,7 +1384,8 @@ mod tests {
     #[test]
     fn test_corrupted_stream_metadata_fails_fast_on_startup() {
         let root = test_storage_dir();
-        let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let storage =
+            AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         storage
             .create_stream("s", StreamConfig::new("text/plain".to_string()))
             .unwrap();
@@ -1394,7 +1410,8 @@ mod tests {
     #[test]
     fn test_tampered_shard_file_fails_fast_on_startup() {
         let root = test_storage_dir();
-        let storage = AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
+        let storage =
+            AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         storage
             .create_stream("s", StreamConfig::new("text/plain".to_string()))
             .unwrap();
@@ -1416,13 +1433,22 @@ mod tests {
     #[test]
     fn test_in_memory_backend_create_append_read() {
         let storage = AcidStorage::new(
-            test_storage_dir(), 4, 1024 * 1024, 100 * 1024, AcidBackend::InMemory,
-        ).expect("in-memory acid storage should initialize");
+            test_storage_dir(),
+            4,
+            1024 * 1024,
+            100 * 1024,
+            AcidBackend::InMemory,
+        )
+        .expect("in-memory acid storage should initialize");
 
         let cfg = StreamConfig::new("text/plain".to_string());
         storage.create_stream("s", cfg).unwrap();
-        storage.append("s", Bytes::from("hello"), "text/plain").unwrap();
-        storage.append("s", Bytes::from("world"), "text/plain").unwrap();
+        storage
+            .append("s", Bytes::from("hello"), "text/plain")
+            .unwrap();
+        storage
+            .append("s", Bytes::from("world"), "text/plain")
+            .unwrap();
 
         let read = storage.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 2);
@@ -1436,13 +1462,14 @@ mod tests {
 
     #[test]
     fn test_in_memory_backend_global_cap() {
-        let storage = AcidStorage::new(
-            test_storage_dir(), 4, 50, 50, AcidBackend::InMemory,
-        ).expect("in-memory acid storage should initialize");
+        let storage = AcidStorage::new(test_storage_dir(), 4, 50, 50, AcidBackend::InMemory)
+            .expect("in-memory acid storage should initialize");
 
         let cfg = StreamConfig::new("text/plain".to_string());
         storage.create_stream("s", cfg).unwrap();
-        storage.append("s", Bytes::from(vec![0_u8; 40]), "text/plain").unwrap();
+        storage
+            .append("s", Bytes::from(vec![0_u8; 40]), "text/plain")
+            .unwrap();
 
         let result = storage.append("s", Bytes::from(vec![0_u8; 20]), "text/plain");
         assert!(result.is_err());

@@ -351,7 +351,7 @@ pub(crate) fn check_producer(
 #[allow(clippy::missing_errors_doc)]
 pub trait Storage: Send + Sync {
     /// Create a stream entry with immutable configuration.
-///
+    ///
     /// Returns whether the stream was newly created or already existed with
     /// matching configuration.
     ///
@@ -359,7 +359,7 @@ pub trait Storage: Send + Sync {
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult>;
 
     /// Append one message to an existing stream.
-///
+    ///
     /// Generates and returns the offset assigned to the appended message.
     /// Offsets must remain monotonically increasing within a stream.
     ///
@@ -368,7 +368,7 @@ pub trait Storage: Send + Sync {
     fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<Offset>;
 
     /// Append a batch of messages as one atomic operation.
-///
+    ///
     /// All messages are validated and committed as a single atomic operation.
     /// Either all messages are appended successfully, or none are.
     /// Returns the next offset (the offset that will be assigned to the
@@ -390,7 +390,7 @@ pub trait Storage: Send + Sync {
     ) -> Result<Offset>;
 
     /// Read from a stream starting at `from_offset`.
-///
+    ///
     /// `Offset::start()` reads from the beginning of the stream.
     /// `Offset::now()` positions the caller at the current tail and returns
     /// an empty catch-up result.

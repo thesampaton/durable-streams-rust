@@ -195,7 +195,10 @@ fn meta_json_claims_closed_but_log_has_more_data() {
     // meta.json said closed, so closed should be true on recovery
     assert!(meta.closed, "closed flag from meta.json should be honored");
     // But all data from the log should still be present
-    assert_eq!(meta.message_count, 2, "both messages should be recovered from log");
+    assert_eq!(
+        meta.message_count, 2,
+        "both messages should be recovered from log"
+    );
 
     // Verify data integrity
     let read = restored.read("s", &Offset::start()).unwrap();
@@ -294,7 +297,10 @@ fn zero_length_data_log_after_truncation() {
 
     let restored = new_storage(&root);
     let meta = restored.head("s").unwrap();
-    assert_eq!(meta.message_count, 0, "truncated log should have zero messages");
+    assert_eq!(
+        meta.message_count, 0,
+        "truncated log should have zero messages"
+    );
     assert_eq!(meta.total_bytes, 0);
 }
 
@@ -344,7 +350,10 @@ fn missing_meta_json_skips_directory() {
 
     let restored = new_storage(&root);
     // Stream should not exist (no meta.json to load from)
-    assert!(!restored.exists("s"), "stream without meta.json should not be loaded");
+    assert!(
+        !restored.exists("s"),
+        "stream without meta.json should not be loaded"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -429,12 +438,19 @@ fn recovery_with_many_streams() {
     for i in 0..20 {
         let name = format!("stream-{i}");
         let read = restored.read(&name, &Offset::start()).unwrap();
-        assert_eq!(read.messages.len(), 1, "stream {name} should have 1 message");
+        assert_eq!(
+            read.messages.len(),
+            1,
+            "stream {name} should have 1 message"
+        );
         assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
     }
 
     let total = restored.total_bytes();
-    assert!(total > 0, "total_bytes should be restored across all streams");
+    assert!(
+        total > 0,
+        "total_bytes should be restored across all streams"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -488,7 +504,11 @@ fn partial_record_mid_batch_recovery() {
 
     let restored = new_storage(&root);
     let read = restored.read("s", &Offset::start()).unwrap();
-    assert_eq!(read.messages.len(), 3, "partial record at end should be truncated");
+    assert_eq!(
+        read.messages.len(),
+        3,
+        "partial record at end should be truncated"
+    );
     assert_eq!(read.messages[0], Bytes::from("one"));
     assert_eq!(read.messages[1], Bytes::from("two"));
     assert_eq!(read.messages[2], Bytes::from("three"));

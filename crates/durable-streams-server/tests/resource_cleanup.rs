@@ -199,7 +199,8 @@ fn cleanup_expired_streams_removes_expired() {
 
         let removed = storage.cleanup_expired_streams();
         assert_eq!(
-            removed, 2,
+            removed,
+            2,
             "backend={}: should have removed 2 expired streams",
             backend.as_str()
         );
@@ -240,7 +241,8 @@ fn cleanup_expired_streams_returns_zero_when_none_expired() {
 
         let removed = storage.cleanup_expired_streams();
         assert_eq!(
-            removed, 0,
+            removed,
+            0,
             "backend={}: no streams should be expired",
             backend.as_str()
         );
@@ -273,7 +275,8 @@ fn cleanup_expired_streams_reclaims_bytes() {
 
         let after = handle.storage.total_bytes();
         assert_eq!(
-            after, 0,
+            after,
+            0,
             "backend={}: total_bytes should be 0 after cleanup, got {after}",
             backend.as_str()
         );
@@ -309,7 +312,8 @@ fn memory_limit_rollback_on_failed_append() {
         // total_bytes should be unchanged
         let after = handle.storage.total_bytes();
         assert_eq!(
-            after, before,
+            after,
+            before,
             "backend={}: total_bytes should be unchanged after failed append",
             backend.as_str()
         );
@@ -339,7 +343,8 @@ fn global_memory_limit_rollback_on_failed_append() {
         // total_bytes should still be 60
         let after = handle.storage.total_bytes();
         assert_eq!(
-            after, 60,
+            after,
+            60,
             "backend={}: total_bytes should be unchanged after failed global limit",
             backend.as_str()
         );
@@ -466,7 +471,8 @@ fn cleanup_expired_streams_is_idempotent() {
         // Second call should find nothing to clean
         let second = storage.cleanup_expired_streams();
         assert_eq!(
-            second, 0,
+            second,
+            0,
             "backend={}: second cleanup should find nothing",
             backend.as_str()
         );

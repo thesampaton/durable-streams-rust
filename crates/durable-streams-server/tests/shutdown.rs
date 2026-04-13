@@ -50,13 +50,10 @@ async fn long_poll_returns_204_on_shutdown() {
     shutdown.cancel();
 
     // The long-poll should complete with 204 (no content), not a connection error
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        poll_handle,
-    )
-    .await
-    .expect("long-poll should complete within timeout")
-    .expect("task should not panic");
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), poll_handle)
+        .await
+        .expect("long-poll should complete within timeout")
+        .expect("task should not panic");
 
     let resp = result.expect("request should not fail with connection error");
     assert_eq!(
@@ -92,16 +89,17 @@ async fn sse_stream_ends_cleanly_on_shutdown() {
     shutdown.cancel();
 
     // The SSE response should complete (stream ends) rather than error
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(5),
-        sse_handle,
-    )
-    .await
-    .expect("SSE should complete within timeout")
-    .expect("task should not panic");
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), sse_handle)
+        .await
+        .expect("SSE should complete within timeout")
+        .expect("task should not panic");
 
     let resp = result.expect("SSE request should not fail with connection error");
-    assert_eq!(resp.status(), StatusCode::OK, "SSE should have returned 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "SSE should have returned 200"
+    );
 
     // The body should be readable (not a broken pipe)
     let body = resp.text().await.expect("should be able to read SSE body");
@@ -175,13 +173,10 @@ async fn multiple_long_polls_drain_on_shutdown() {
 
     // All should complete with 204
     for (i, handle) in handles.into_iter().enumerate() {
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            handle,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("long-poll {i} should complete within timeout"))
-        .unwrap_or_else(|_| panic!("task {i} should not panic"));
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle)
+            .await
+            .unwrap_or_else(|_| panic!("long-poll {i} should complete within timeout"))
+            .unwrap_or_else(|_| panic!("task {i} should not panic"));
 
         let resp = result.unwrap_or_else(|e| panic!("long-poll {i} should not fail: {e}"));
         assert_eq!(

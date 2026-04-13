@@ -365,8 +365,9 @@ impl Config {
         }
 
         if let Some(acid_backend) = get("DS_STORAGE__ACID_BACKEND") {
-            self.acid_backend = Self::parse_acid_backend_value(&acid_backend)
-                .ok_or_else(|| format!("invalid DS_STORAGE__ACID_BACKEND value: '{acid_backend}'"))?;
+            self.acid_backend = Self::parse_acid_backend_value(&acid_backend).ok_or_else(|| {
+                format!("invalid DS_STORAGE__ACID_BACKEND value: '{acid_backend}'")
+            })?;
         }
 
         if let Some(cert_path) = get("DS_TLS__CERT_PATH") {

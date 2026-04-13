@@ -118,7 +118,11 @@ fn idempotent_recovery_acid() {
     for i in 0..5 {
         let restored = new_acid(&root);
         let read = restored.read("s", &Offset::start()).unwrap();
-        assert_eq!(read.messages.len(), 2, "restart {i}: should have 2 messages");
+        assert_eq!(
+            read.messages.len(),
+            2,
+            "restart {i}: should have 2 messages"
+        );
         assert_eq!(read.messages[0], Bytes::from("one"));
         assert_eq!(read.messages[1], Bytes::from("two"));
     }
@@ -162,7 +166,10 @@ fn shard_count_same_succeeds() {
 
     // Reopen with same shard count -- should succeed
     let result = AcidStorage::new(&root, 4, 1024 * 1024, 100 * 1024, AcidBackend::File);
-    assert!(result.is_ok(), "reopening with same shard count should work");
+    assert!(
+        result.is_ok(),
+        "reopening with same shard count should work"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +211,11 @@ fn recovery_with_many_streams_across_shards() {
     for i in 0..50 {
         let name = format!("stream-{i}");
         let read = restored.read(&name, &Offset::start()).unwrap();
-        assert_eq!(read.messages.len(), 1, "stream {name} should have 1 message");
+        assert_eq!(
+            read.messages.len(),
+            1,
+            "stream {name} should have 1 message"
+        );
         assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
     }
 }

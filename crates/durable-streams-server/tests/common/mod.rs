@@ -246,8 +246,14 @@ pub fn create_test_storage_with_limits(
         }
         StorageTestBackend::Acid => {
             let storage_dir = unique_storage_dir("acid");
-            let storage = AcidStorage::new(&storage_dir, 16, max_total_bytes, max_stream_bytes, AcidBackend::File)
-                .expect("failed to initialize test acid storage");
+            let storage = AcidStorage::new(
+                &storage_dir,
+                16,
+                max_total_bytes,
+                max_stream_bytes,
+                AcidBackend::File,
+            )
+            .expect("failed to initialize test acid storage");
             TestStorageHandle {
                 storage: TestStorage::Acid(storage),
                 _storage_dir: Some(storage_dir),
@@ -403,8 +409,8 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
 /// Spawn a test server with a shutdown token for graceful drain testing.
 ///
 /// Returns `(base_url, port, shutdown_token)`.
-pub async fn spawn_test_server_with_shutdown(
-) -> (String, u16, tokio_util::sync::CancellationToken) {
+pub async fn spawn_test_server_with_shutdown() -> (String, u16, tokio_util::sync::CancellationToken)
+{
     let shutdown = tokio_util::sync::CancellationToken::new();
     let config = Config {
         long_poll_timeout: Duration::from_secs(30),
