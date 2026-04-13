@@ -9,6 +9,7 @@ max_stream_bytes = 268435456
 
 [http]
 cors_origins = "https://app.example.com"
+stream_base_path = "/v1/stream"
 
 [storage]
 mode = "file-durable"

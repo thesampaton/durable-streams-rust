@@ -13,6 +13,8 @@ cargo run -p durable-streams-server
 ```
 
 The server listens on `http://localhost:4437` with streams at `/v1/stream/`.
+Set `http.stream_base_path` or `DS_HTTP__STREAM_BASE_PATH` to mount the
+protocol at another path.
 
 ## Storage backends
 
@@ -62,6 +64,7 @@ Common variables:
 - `DS_SERVER__LONG_POLL_TIMEOUT_SECS`
 - `DS_SERVER__SSE_RECONNECT_INTERVAL_SECS`
 - `DS_HTTP__CORS_ORIGINS`
+- `DS_HTTP__STREAM_BASE_PATH`
 - `DS_LIMITS__MAX_MEMORY_BYTES`
 - `DS_LIMITS__MAX_STREAM_BYTES`
 - `DS_STORAGE__MODE`
