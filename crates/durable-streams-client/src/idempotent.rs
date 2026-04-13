@@ -19,7 +19,6 @@ struct ProducerState {
     next_seq: i64,
     closed: bool,
     acked_server_offset: Option<String>,
-    acked_local_seq: Option<u64>,
 }
 
 /// Idempotent producer configuration.
@@ -118,7 +117,6 @@ impl IdempotentProducer {
                 next_seq: 0,
                 closed: false,
                 acked_server_offset: None,
-                acked_local_seq: None,
             }),
             config,
         })
@@ -268,7 +266,7 @@ impl IdempotentProducer {
             epoch: state.epoch,
             next_seq: state.next_seq,
             acked_server_offset: state.acked_server_offset.clone(),
-            acked_local_seq: state.acked_local_seq,
+            acked_local_seq: None,
         }
     }
 

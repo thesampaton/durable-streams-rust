@@ -34,6 +34,7 @@ pub enum StorageTestBackend {
     Memory,
     FileDurable,
     Acid,
+    AcidInMemory,
 }
 
 impl StorageTestBackend {
@@ -43,6 +44,7 @@ impl StorageTestBackend {
             Self::Memory => "memory",
             Self::FileDurable => "file-durable",
             Self::Acid => "acid",
+            Self::AcidInMemory => "acid-in-memory",
         }
     }
 }
@@ -254,6 +256,21 @@ pub fn create_test_storage_with_limits(
                 AcidBackend::File,
             )
             .expect("failed to initialize test acid storage");
+            TestStorageHandle {
+                storage: TestStorage::Acid(storage),
+                _storage_dir: Some(storage_dir),
+            }
+        }
+        StorageTestBackend::AcidInMemory => {
+            let storage_dir = unique_storage_dir("acid-mem");
+            let storage = AcidStorage::new(
+                &storage_dir,
+                16,
+                max_total_bytes,
+                max_stream_bytes,
+                AcidBackend::InMemory,
+            )
+            .expect("failed to initialize test acid in-memory storage");
             TestStorageHandle {
                 storage: TestStorage::Acid(storage),
                 _storage_dir: Some(storage_dir),

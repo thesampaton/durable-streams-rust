@@ -208,13 +208,14 @@ async fn send(command: SendCommand) -> Result<(), Box<dyn Error>> {
     )?;
 
     let response = producer.append_json_values(input.values()).await?;
+    let progress = producer.progress().await;
     if let Some(journal_path) = command.journal {
         let mut journal = JsonJournal::open(journal_path, stream)?;
         journal.append_values(
             JournalDirection::Outbound,
             input.into_values(),
             response.next_offset.clone(),
-            Some(producer.progress().await),
+            Some(progress.clone()),
         )?;
     }
 
@@ -225,7 +226,7 @@ async fn send(command: SendCommand) -> Result<(), Box<dyn Error>> {
             "status": response.status,
             "nextOffset": response.next_offset,
             "streamClosed": response.stream_closed,
-            "producer": producer.progress().await,
+            "producer": progress,
         })
     );
     Ok(())

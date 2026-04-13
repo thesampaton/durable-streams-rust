@@ -22,10 +22,11 @@ use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
 use proptest::prelude::*;
 
-const BACKENDS: [StorageTestBackend; 3] = [
+const BACKENDS: [StorageTestBackend; 4] = [
     StorageTestBackend::Memory,
     StorageTestBackend::FileDurable,
     StorageTestBackend::Acid,
+    StorageTestBackend::AcidInMemory,
 ];
 
 fn plain_config() -> StreamConfig {
@@ -41,6 +42,11 @@ enum Op {
     Create {
         stream_idx: usize,
     },
+    CreateWithData {
+        stream_idx: usize,
+        messages: Vec<Vec<u8>>,
+        should_close: bool,
+    },
     Append {
         stream_idx: usize,
         data: Vec<u8>,
@@ -50,6 +56,9 @@ enum Op {
         messages: Vec<Vec<u8>>,
     },
     Read {
+        stream_idx: usize,
+    },
+    Subscribe {
         stream_idx: usize,
     },
     Close {
@@ -67,6 +76,17 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         // Create
         (0..4usize).prop_map(|stream_idx| Op::Create { stream_idx }),
+        // CreateWithData (1-5 messages, optionally closed)
+        (
+            0..4usize,
+            prop::collection::vec(prop::collection::vec(any::<u8>(), 1..100), 1..5),
+            any::<bool>()
+        )
+            .prop_map(|(stream_idx, messages, should_close)| Op::CreateWithData {
+                stream_idx,
+                messages,
+                should_close,
+            }),
         // Append with small payloads
         (0..4usize, prop::collection::vec(any::<u8>(), 0..200))
             .prop_map(|(stream_idx, data)| Op::Append { stream_idx, data }),
@@ -81,6 +101,8 @@ fn op_strategy() -> impl Strategy<Value = Op> {
             }),
         // Read
         (0..4usize).prop_map(|stream_idx| Op::Read { stream_idx }),
+        // Subscribe
+        (0..4usize).prop_map(|stream_idx| Op::Subscribe { stream_idx }),
         // Close
         (0..4usize).prop_map(|stream_idx| Op::Close { stream_idx }),
         // Delete
@@ -107,9 +129,11 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
     for op in ops {
         let idx = match &op {
             Op::Create { stream_idx }
+            | Op::CreateWithData { stream_idx, .. }
             | Op::Append { stream_idx, .. }
             | Op::BatchAppend { stream_idx, .. }
             | Op::Read { stream_idx }
+            | Op::Subscribe { stream_idx }
             | Op::Close { stream_idx }
             | Op::Delete { stream_idx }
             | Op::Head { stream_idx } => *stream_idx,
@@ -128,6 +152,28 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
                 }
                 Err(_) => {}
             },
+            Op::CreateWithData {
+                messages,
+                should_close,
+                ..
+            } => {
+                let msgs: Vec<Bytes> = messages.into_iter().map(Bytes::from).collect();
+                let count = msgs.len() as u64;
+                match storage.create_stream_with_data(name, plain_config(), msgs, should_close) {
+                    Ok(result) => match result.status {
+                        CreateStreamResult::Created => {
+                            created[idx] = true;
+                            closed[idx] = should_close;
+                            message_counts[idx] = count;
+                        }
+                        CreateStreamResult::AlreadyExists => {
+                            assert!(created[idx], "AlreadyExists but not tracked as created");
+                        }
+                    },
+                    Err(Error::MemoryLimitExceeded | Error::StreamSizeLimitExceeded) => {}
+                    Err(e) => panic!("unexpected create_stream_with_data error: {e:?}"),
+                }
+            }
             Op::Append { data, .. } => {
                 match storage.append(name, Bytes::from(data), "text/plain") {
                     Ok(offset) => {
@@ -184,6 +230,20 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
                     }
                     Err(Error::NotFound(_) | Error::StreamExpired) => {}
                     Err(e) => panic!("unexpected read error: {e:?}"),
+                }
+            }
+            Op::Subscribe { .. } => {
+                let receiver = storage.subscribe(name);
+                if created[idx] {
+                    assert!(
+                        receiver.is_some(),
+                        "subscribe returned None for existing stream"
+                    );
+                } else {
+                    assert!(
+                        receiver.is_none(),
+                        "subscribe returned Some for non-existent stream"
+                    );
                 }
             }
             Op::Close { .. } => match storage.close_stream(name) {
@@ -254,6 +314,11 @@ proptest! {
     #[test]
     fn random_ops_acid(ops in prop::collection::vec(op_strategy(), 1..80)) {
         run_random_ops(StorageTestBackend::Acid, ops);
+    }
+
+    #[test]
+    fn random_ops_acid_in_memory(ops in prop::collection::vec(op_strategy(), 1..80)) {
+        run_random_ops(StorageTestBackend::AcidInMemory, ops);
     }
 }
 
@@ -355,25 +420,46 @@ fn offset_max_values() {
 #[derive(Debug, Clone)]
 enum ProducerOp {
     /// Normal next-seq append
-    NextSeq,
+    NextSeq { producer_idx: usize },
     /// Duplicate of last seq
-    Duplicate,
+    Duplicate { producer_idx: usize },
     /// Bump epoch (reset to seq 0)
-    BumpEpoch,
+    BumpEpoch { producer_idx: usize },
     /// Skip a sequence number (should cause SequenceGap)
-    SkipSeq,
+    SkipSeq { producer_idx: usize },
     /// Use an old epoch (should cause EpochFenced)
-    OldEpoch,
+    OldEpoch { producer_idx: usize },
 }
 
+const NUM_PRODUCERS: usize = 3;
+
 fn producer_op_strategy() -> impl Strategy<Value = ProducerOp> {
+    let pidx = 0..NUM_PRODUCERS;
     prop_oneof![
-        3 => Just(ProducerOp::NextSeq),
-        2 => Just(ProducerOp::Duplicate),
-        1 => Just(ProducerOp::BumpEpoch),
-        1 => Just(ProducerOp::SkipSeq),
-        1 => Just(ProducerOp::OldEpoch),
+        3 => pidx.clone().prop_map(|producer_idx| ProducerOp::NextSeq { producer_idx }),
+        2 => pidx.clone().prop_map(|producer_idx| ProducerOp::Duplicate { producer_idx }),
+        1 => pidx.clone().prop_map(|producer_idx| ProducerOp::BumpEpoch { producer_idx }),
+        1 => pidx.clone().prop_map(|producer_idx| ProducerOp::SkipSeq { producer_idx }),
+        1 => pidx.prop_map(|producer_idx| ProducerOp::OldEpoch { producer_idx }),
     ]
+}
+
+/// Per-producer tracking for the multi-producer state machine.
+#[derive(Debug, Clone)]
+struct ProducerTracker {
+    current_epoch: u64,
+    current_seq: u64,
+    first_append: bool,
+}
+
+impl ProducerTracker {
+    fn new() -> Self {
+        Self {
+            current_epoch: 0,
+            current_seq: 0,
+            first_append: true,
+        }
+    }
 }
 
 fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>) {
@@ -382,48 +468,55 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
 
     storage.create_stream("s", plain_config()).unwrap();
 
-    let mut current_epoch: u64 = 0;
-    let mut current_seq: u64 = 0;
+    let producer_ids: Vec<String> = (0..NUM_PRODUCERS).map(|i| format!("p{i}")).collect();
+    let mut trackers: Vec<ProducerTracker> =
+        (0..NUM_PRODUCERS).map(|_| ProducerTracker::new()).collect();
     let mut accepted_count: u64 = 0;
-    let mut first_append = true;
 
     for op in ops {
+        let pidx = match &op {
+            ProducerOp::NextSeq { producer_idx }
+            | ProducerOp::Duplicate { producer_idx }
+            | ProducerOp::BumpEpoch { producer_idx }
+            | ProducerOp::SkipSeq { producer_idx }
+            | ProducerOp::OldEpoch { producer_idx } => *producer_idx,
+        };
+        let t = &trackers[pidx];
+
         let (epoch, seq) = match op {
-            ProducerOp::NextSeq => {
-                if first_append {
+            ProducerOp::NextSeq { .. } => {
+                if t.first_append {
                     (0, 0)
                 } else {
-                    (current_epoch, current_seq + 1)
+                    (t.current_epoch, t.current_seq + 1)
                 }
             }
-            ProducerOp::Duplicate => {
-                if first_append {
-                    // Can't duplicate before first append; do a normal one
+            ProducerOp::Duplicate { .. } => {
+                if t.first_append {
                     (0, 0)
                 } else {
-                    (current_epoch, current_seq)
+                    (t.current_epoch, t.current_seq)
                 }
             }
-            ProducerOp::BumpEpoch => (current_epoch + 1, 0),
-            ProducerOp::SkipSeq => {
-                if first_append {
-                    (0, 5) // Skip from expected 0
+            ProducerOp::BumpEpoch { .. } => (t.current_epoch + 1, 0),
+            ProducerOp::SkipSeq { .. } => {
+                if t.first_append {
+                    (0, 5)
                 } else {
-                    (current_epoch, current_seq + 5)
+                    (t.current_epoch, t.current_seq + 5)
                 }
             }
-            ProducerOp::OldEpoch => {
-                if current_epoch == 0 {
-                    // Can't go below 0; skip this op
+            ProducerOp::OldEpoch { .. } => {
+                if t.current_epoch == 0 {
                     continue;
                 } else {
-                    (current_epoch - 1, 0)
+                    (t.current_epoch - 1, 0)
                 }
             }
         };
 
         let producer = ProducerHeaders {
-            id: "p1".to_string(),
+            id: producer_ids[pidx].clone(),
             epoch,
             seq,
         };
@@ -438,16 +531,16 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
         );
 
         match &op {
-            ProducerOp::NextSeq => {
-                // Should be accepted (or duplicate if it was the first and we replayed)
+            ProducerOp::NextSeq { .. } => {
                 match &result {
                     Ok(durable_streams_server::storage::ProducerAppendResult::Accepted {
                         ..
                     }) => {
-                        current_epoch = epoch;
-                        current_seq = seq;
+                        let t = &mut trackers[pidx];
+                        t.current_epoch = epoch;
+                        t.current_seq = seq;
                         accepted_count += 1;
-                        first_append = false;
+                        t.first_append = false;
                     }
                     Ok(durable_streams_server::storage::ProducerAppendResult::Duplicate {
                         ..
@@ -457,20 +550,19 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
                     Err(e) => panic!("NextSeq should succeed, got {e:?}"),
                 }
             }
-            ProducerOp::Duplicate => {
-                if first_append {
-                    // Was converted to a normal append
+            ProducerOp::Duplicate { .. } => {
+                if trackers[pidx].first_append {
                     if let Ok(durable_streams_server::storage::ProducerAppendResult::Accepted {
                         ..
                     }) = &result
                     {
-                        current_epoch = epoch;
-                        current_seq = seq;
+                        let t = &mut trackers[pidx];
+                        t.current_epoch = epoch;
+                        t.current_seq = seq;
                         accepted_count += 1;
-                        first_append = false;
+                        t.first_append = false;
                     }
                 } else {
-                    // Should be duplicate
                     assert!(
                         matches!(
                             result,
@@ -482,31 +574,31 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
                     );
                 }
             }
-            ProducerOp::BumpEpoch => match &result {
+            ProducerOp::BumpEpoch { .. } => match &result {
                 Ok(durable_streams_server::storage::ProducerAppendResult::Accepted { .. }) => {
-                    current_epoch = epoch;
-                    current_seq = seq;
+                    let t = &mut trackers[pidx];
+                    t.current_epoch = epoch;
+                    t.current_seq = seq;
                     accepted_count += 1;
-                    first_append = false;
+                    t.first_append = false;
                 }
                 Err(e) => panic!("BumpEpoch with seq=0 should succeed, got {e:?}"),
                 _ => panic!("BumpEpoch unexpected result: {result:?}"),
             },
-            ProducerOp::SkipSeq => {
-                if first_append && seq == 5 {
-                    // seq=5 when expected=0 → SequenceGap
+            ProducerOp::SkipSeq { .. } => {
+                if trackers[pidx].first_append && seq == 5 {
                     assert!(
                         matches!(result, Err(Error::SequenceGap { .. })),
                         "SkipSeq should return SequenceGap, got {result:?}"
                     );
-                } else if !first_append {
+                } else if !trackers[pidx].first_append {
                     assert!(
                         matches!(result, Err(Error::SequenceGap { .. })),
                         "SkipSeq should return SequenceGap, got {result:?}"
                     );
                 }
             }
-            ProducerOp::OldEpoch => {
+            ProducerOp::OldEpoch { .. } => {
                 assert!(
                     matches!(result, Err(Error::EpochFenced { .. })),
                     "OldEpoch should return EpochFenced, got {result:?}"
@@ -545,6 +637,13 @@ proptest! {
         ops in prop::collection::vec(producer_op_strategy(), 1..40)
     ) {
         run_producer_state_machine(StorageTestBackend::Acid, ops);
+    }
+
+    #[test]
+    fn producer_state_machine_acid_in_memory(
+        ops in prop::collection::vec(producer_op_strategy(), 1..40)
+    ) {
+        run_producer_state_machine(StorageTestBackend::AcidInMemory, ops);
     }
 }
 
