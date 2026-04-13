@@ -2,17 +2,16 @@
 
 Canonical Rust workspace for Durable Streams components.
 
-This repository now contains the Rust client, the migrated Rust server, and the
-workspace plumbing around them.
+This repository contains the Rust client, the Rust server, and the workspace
+plumbing around them.
 
 Current focus:
 
 - a clean, explicit Rust client library
-- the existing Rust server migrated into the workspace with minimal behavioural change
+- a production-oriented Rust server with multiple storage backends
 - upstream client-conformance integration
 - upstream server-conformance integration
 - explicit protocol and standards alignment
-- a stable long-term workspace shape for both crates
 
 It does **not** vendor or wrap the upstream example Rust client.
 
@@ -41,12 +40,9 @@ It does **not** vendor or wrap the upstream example Rust client.
 - `crates/durable-streams-client` is the active client implementation. It
   provides a typed async API, config loader, auth model, retry policy, and
   idempotent producer support.
-- `crates/durable-streams-server` is the migrated production-oriented server
-  crate, carried into this workspace from the former standalone repository with
-  its existing runtime, storage, and protocol behaviour preserved as much as
-  practical.
-  The current in-tree server is intentionally a lift-and-shift of the published
-  `durable-streams-server` `0.1.3` codebase, not a redesign.
+- `crates/durable-streams-server` is the production-oriented server crate,
+  providing in-memory, file-backed, and ACID storage backends, structured
+  error responses, readiness probes, graceful shutdown, and request telemetry.
 - `tests/conformance` and `scripts/conformance` define where upstream Durable
   Streams conformance adapters and runners live.
 - `docs/architecture.md` describes the intended long-term shape.
@@ -74,18 +70,16 @@ the adapter, such as higher-level batching and retry-options validation.
 
 ## Server Status
 
-The Rust server now lives in this workspace as `crates/durable-streams-server`.
+The Rust server lives in this workspace as `crates/durable-streams-server`.
 
 - Binary crate and library crate name: `durable-streams-server`
-- Current migrated version: published crate `durable-streams-server` `0.1.3`
-- Existing integration and unit tests are crate-local under
+- Current version: `0.2.0`
+- Integration and unit tests are crate-local under
   `crates/durable-streams-server/tests`
 - Workspace launcher used by the upstream server suite:
   `tests/conformance/server/start-server.sh`
 
-The migration goal was continuity rather than redesign, so the server code and
-its operational semantics are intentionally kept close to the previous
-standalone repository.
+See `crates/durable-streams-server/README.md` for server-specific documentation.
 
 ## Client Usage
 
