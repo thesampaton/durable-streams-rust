@@ -415,7 +415,7 @@ impl Config {
         }?;
 
         Self::validate_cors_origins(&self.cors_origins)?;
-        Self::validate_stream_base_path(&self.stream_base_path)?;
+        Self::parse_stream_base_path_value(&self.stream_base_path).map(|_| ())?;
 
         Ok(())
     }
@@ -442,10 +442,6 @@ impl Config {
         }
 
         Ok(())
-    }
-
-    fn validate_stream_base_path(path: &str) -> Result<(), String> {
-        Self::parse_stream_base_path_value(path).map(|_| ())
     }
 
     fn parse_stream_base_path_value(raw: &str) -> Result<String, String> {

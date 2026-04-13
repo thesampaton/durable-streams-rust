@@ -7,7 +7,7 @@ use axum::{
     response::Response,
 };
 use std::time::Instant;
-use tracing::{Span, field, info_span};
+use tracing::{Instrument, Span, field, info_span};
 
 /// Record request/response telemetry using tracing field names that align with
 /// OpenTelemetry semantic conventions and ECS where practical.
@@ -26,8 +26,7 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
         .and_then(|query| query_param(query, "live"))
         .map(ToOwned::to_owned);
     let stream_id = route
-        .filter(|route| route.ends_with("/{name}"))
-        .and_then(|_| path.rsplit('/').next())
+        .and_then(|route| resource_id_from_path(route, &path))
         .filter(|stream_id| !stream_id.is_empty());
     let host = forwarded_or_host(&request);
     let client_address = forwarded_for(&request);
@@ -52,10 +51,9 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
         user_agent.as_deref(),
         http_version,
     );
-    let _guard = span.enter();
     let started = Instant::now();
 
-    let response = next.run(request).await;
+    let response = next.run(request).instrument(span.clone()).await;
     emit_response_event(&span, &response, started.elapsed());
 
     response
@@ -159,7 +157,7 @@ fn operation_name(method: &str, route: Option<&str>, live_mode: Option<&str>) ->
     if matches!(route, Some("/readyz")) {
         return "readiness";
     }
-    if !route.is_some_and(|route| route.ends_with("/{name}")) {
+    if !route.is_some_and(has_resource_segment) {
         return "request";
     }
 
@@ -173,6 +171,30 @@ fn operation_name(method: &str, route: Option<&str>, live_mode: Option<&str>) ->
         ("GET", _) => "read",
         _ => "request",
     }
+}
+
+fn has_resource_segment(route: &str) -> bool {
+    route
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .any(is_route_param_segment)
+}
+
+fn resource_id_from_path<'a>(route: &str, path: &'a str) -> Option<&'a str> {
+    let parameter_index = route
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .enumerate()
+        .filter_map(|(index, segment)| is_route_param_segment(segment).then_some(index))
+        .last()?;
+
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .nth(parameter_index)
+}
+
+fn is_route_param_segment(segment: &str) -> bool {
+    segment.starts_with('{') && segment.ends_with('}') && segment.len() > 2
 }
 
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
@@ -221,7 +243,7 @@ fn http_version(version: Version) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{operation_name, query_param};
+    use super::{operation_name, query_param, resource_id_from_path};
 
     #[test]
     fn operation_name_distinguishes_live_read_modes() {
@@ -234,6 +256,41 @@ mod tests {
             "subscribe"
         );
         assert_eq!(operation_name("GET", Some("/streams/{name}"), None), "read");
+        assert_eq!(
+            operation_name("GET", Some("/documents/{uuid}"), None),
+            "read"
+        );
+    }
+
+    #[test]
+    fn operation_name_handles_nested_subresources() {
+        assert_eq!(
+            operation_name("GET", Some("/documents/{uuid}/slides/{slide_id}"), None),
+            "read"
+        );
+        assert_eq!(
+            operation_name("POST", Some("/documents/{uuid}/ack"), None),
+            "append"
+        );
+    }
+
+    #[test]
+    fn resource_id_from_path_uses_last_parameter_segment() {
+        assert_eq!(
+            resource_id_from_path("/documents/{uuid}", "/documents/doc-1"),
+            Some("doc-1")
+        );
+        assert_eq!(
+            resource_id_from_path(
+                "/documents/{doc_id}/slides/{slide_id}",
+                "/documents/doc-1/slides/slide-2"
+            ),
+            Some("slide-2")
+        );
+        assert_eq!(
+            resource_id_from_path("/documents/{uuid}/ack", "/documents/doc-1/ack"),
+            Some("doc-1")
+        );
     }
 
     #[test]

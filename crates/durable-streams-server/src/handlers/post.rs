@@ -146,7 +146,7 @@ fn handle_non_producer_append<S: Storage>(
         match storage.batch_append(name, messages, content_type, seq) {
             Ok(next_offset) => next_offset,
             Err(Error::StreamClosed) => {
-                return Err(stream_closed_response(storage, name)?);
+                return Err(stream_closed_response(storage, name));
             }
             Err(e) => return Err(e.into()),
         }
@@ -223,15 +223,7 @@ fn handle_producer_append<S: Storage>(
 
             Ok((status, response_headers).into_response())
         }
-        Err(Error::StreamClosed) => {
-            let metadata = storage.head(name)?;
-            Err(ProblemResponse::from(Error::StreamClosed)
-                .with_header(names::STREAM_CLOSED, "true".parse().unwrap())
-                .with_header(
-                    names::STREAM_NEXT_OFFSET,
-                    HeaderValue::from_bytes(metadata.next_offset.as_str().as_bytes()).unwrap(),
-                ))
-        }
+        Err(Error::StreamClosed) => Err(stream_closed_response(storage, name)),
         Err(Error::EpochFenced { current, .. }) => Err(ProblemResponse::from(Error::EpochFenced {
             current,
             received: producer.epoch,
@@ -253,12 +245,16 @@ fn handle_producer_append<S: Storage>(
 }
 
 /// Build the 409 Conflict response for a closed stream.
-fn stream_closed_response<S: Storage>(storage: &Arc<S>, name: &str) -> Result<ProblemResponse> {
-    let metadata = storage.head(name)?;
-    Ok(ProblemResponse::from(Error::StreamClosed)
-        .with_header(names::STREAM_CLOSED, "true".parse().unwrap())
-        .with_header(
+fn stream_closed_response<S: Storage>(storage: &Arc<S>, name: &str) -> ProblemResponse {
+    let response = ProblemResponse::from(Error::StreamClosed)
+        .with_header(names::STREAM_CLOSED, "true".parse().unwrap());
+
+    if let Ok(metadata) = storage.head(name) {
+        response.with_header(
             names::STREAM_NEXT_OFFSET,
             HeaderValue::from_bytes(metadata.next_offset.as_str().as_bytes()).unwrap(),
-        ))
+        )
+    } else {
+        response
+    }
 }

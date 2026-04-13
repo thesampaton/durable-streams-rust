@@ -5,12 +5,12 @@
 use durable_streams_server::config::{AcidBackend, Config, StorageMode};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
+use durable_streams_server::protocol::problem::ProblemDetails;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
 };
-use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -479,18 +479,7 @@ pub fn test_client_with_timeout(timeout_secs: u64) -> reqwest::Client {
         .expect("Failed to build test client")
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ProblemBody {
-    #[serde(rename = "type")]
-    pub problem_type: String,
-    pub title: String,
-    pub status: u16,
-    pub code: String,
-    pub detail: Option<String>,
-    pub instance: Option<String>,
-}
-
-pub async fn read_problem(response: reqwest::Response) -> ProblemBody {
+pub async fn read_problem(response: reqwest::Response) -> ProblemDetails {
     let content_type = response
         .headers()
         .get("content-type")
@@ -506,5 +495,6 @@ pub async fn read_problem(response: reqwest::Response) -> ProblemBody {
         .text()
         .await
         .expect("failed to read problem details response");
-    serde_json::from_str::<ProblemBody>(&body).expect("failed to decode problem details response")
+    serde_json::from_str::<ProblemDetails>(&body)
+        .expect("failed to decode problem details response")
 }
