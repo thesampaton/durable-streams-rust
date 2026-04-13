@@ -1,5 +1,8 @@
+use crate::protocol::problem::{ProblemDetails, ProblemResponse};
 use axum::Extension;
+use axum::extract::OriginalUri;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -19,10 +22,21 @@ pub async fn health_check() -> (StatusCode, &'static str) {
 /// Useful for Kubernetes readiness probes and load balancer health checks.
 pub async fn readiness_check(
     Extension(ready): Extension<Arc<AtomicBool>>,
-) -> (StatusCode, &'static str) {
+    original_uri: OriginalUri,
+) -> impl IntoResponse {
     if ready.load(Ordering::Acquire) {
-        (StatusCode::OK, "ready")
+        (StatusCode::OK, "ready").into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+        ProblemResponse::new(
+            ProblemDetails::new(
+                "/errors/unavailable",
+                "Service Unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "UNAVAILABLE",
+            )
+            .with_detail("The server is not ready to accept traffic.")
+            .with_instance(crate::protocol::problem::request_instance(&original_uri)),
+        )
+        .into_response()
     }
 }

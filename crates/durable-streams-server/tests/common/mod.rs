@@ -5,6 +5,7 @@
 use durable_streams_server::config::{AcidBackend, Config, StorageMode};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
+use durable_streams_server::protocol::problem::ProblemDetails;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
@@ -360,7 +361,7 @@ pub async fn spawn_test_server_acid() -> (String, u16) {
     spawn_test_server_with_storage(storage, config).await
 }
 
-async fn spawn_test_server_with_storage<S>(storage: Arc<S>, config: Config) -> (String, u16)
+pub async fn spawn_test_server_with_storage<S>(storage: Arc<S>, config: Config) -> (String, u16)
 where
     S: Storage + 'static,
 {
@@ -476,4 +477,24 @@ pub fn test_client_with_timeout(timeout_secs: u64) -> reqwest::Client {
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .expect("Failed to build test client")
+}
+
+pub async fn read_problem(response: reqwest::Response) -> ProblemDetails {
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.starts_with("application/problem+json"),
+        "expected application/problem+json, got {content_type}"
+    );
+
+    let body = response
+        .text()
+        .await
+        .expect("failed to read problem details response");
+    serde_json::from_str::<ProblemDetails>(&body)
+        .expect("failed to decode problem details response")
 }

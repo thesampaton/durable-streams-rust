@@ -1,11 +1,12 @@
-use crate::protocol::error::{Error, Result};
+use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
+use crate::protocol::problem::{ProblemResponse, Result, request_instance};
 use crate::protocol::producer;
 use crate::storage::{ProducerAppendResult, Storage};
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{OriginalUri, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -30,100 +31,102 @@ use std::sync::Arc;
 pub async fn append_data<S: Storage>(
     State(storage): State<Arc<S>>,
     Path(name): Path<String>,
+    original_uri: OriginalUri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response> {
-    // Read body
-    let body_bytes =
-        axum::body::to_bytes(body, usize::MAX)
-            .await
-            .map_err(|e| Error::InvalidHeader {
-                header: "Content-Length".to_string(),
-                reason: format!("Failed to read body: {e}"),
+    let instance = request_instance(&original_uri);
+    let result = async {
+        // Read body
+        let body_bytes =
+            axum::body::to_bytes(body, usize::MAX)
+                .await
+                .map_err(|e| Error::InvalidHeader {
+                    header: "Content-Length".to_string(),
+                    reason: format!("Failed to read body: {e}"),
+                })?;
+
+        // Parse optional Stream-Closed (checked before Content-Type for close-only)
+        let should_close = headers
+            .get(names::STREAM_CLOSED)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(headers::parse_bool);
+
+        let is_close_only = body_bytes.is_empty() && should_close;
+
+        // Content-Type: required when body is present, optional for close-only
+        let content_type_raw = headers.get("content-type").and_then(|v| v.to_str().ok());
+
+        let normalized_ct = if is_close_only {
+            // Close-only: CT is optional. If provided, normalize it; otherwise
+            // use empty placeholder (never passed to storage for validation).
+            content_type_raw
+                .map(headers::normalize_content_type)
+                .unwrap_or_default()
+        } else {
+            let ct = content_type_raw.ok_or_else(|| Error::InvalidHeader {
+                header: "Content-Type".to_string(),
+                reason: "missing required header".to_string(),
             })?;
+            headers::normalize_content_type(ct)
+        };
 
-    // Parse optional Stream-Closed (checked before Content-Type for close-only)
-    let should_close = headers
-        .get(names::STREAM_CLOSED)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(headers::parse_bool);
+        // Parse optional producer headers
+        let producer_headers = producer::parse_producer_headers(&headers)?;
 
-    let is_close_only = body_bytes.is_empty() && should_close;
+        // Parse optional Stream-Seq header
+        let stream_seq = headers
+            .get(names::STREAM_SEQ)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
 
-    // Content-Type: required when body is present, optional for close-only
-    let content_type_raw = headers.get("content-type").and_then(|v| v.to_str().ok());
-
-    let normalized_ct = if is_close_only {
-        // Close-only: CT is optional. If provided, normalize it; otherwise
-        // use empty placeholder (never passed to storage for validation).
-        content_type_raw
-            .map(headers::normalize_content_type)
-            .unwrap_or_default()
-    } else {
-        let ct = content_type_raw.ok_or_else(|| Error::InvalidHeader {
-            header: "Content-Type".to_string(),
-            reason: "missing required header".to_string(),
-        })?;
-        headers::normalize_content_type(ct)
-    };
-
-    // Parse optional producer headers
-    let producer_headers = producer::parse_producer_headers(&headers)?;
-
-    // Parse optional Stream-Seq header
-    let stream_seq = headers
-        .get(names::STREAM_SEQ)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    // Validate body (empty body requires Stream-Closed)
-    if body_bytes.is_empty() && !should_close {
-        return Err(Error::InvalidHeader {
-            header: "Content-Length".to_string(),
-            reason: "empty body requires Stream-Closed header".to_string(),
-        });
-    }
-
-    // Prepare messages for append
-    let messages = if body_bytes.is_empty() {
-        vec![]
-    } else if json_mode::is_json_content_type(&normalized_ct) {
-        let parsed = json_mode::process_append(&body_bytes)?;
-        // POST rejects empty JSON arrays (unlike PUT initial data)
-        if parsed.is_empty() && !should_close {
-            return Err(Error::InvalidJson(
-                "empty arrays are not permitted".to_string(),
-            ));
+        // Validate body (empty body requires Stream-Closed)
+        if body_bytes.is_empty() && !should_close {
+            return Err(ProblemResponse::from(Error::EmptyBody));
         }
-        parsed
-    } else {
-        vec![body_bytes]
-    };
 
-    let seq_ref = stream_seq.as_deref();
+        // Prepare messages for append
+        let messages = if body_bytes.is_empty() {
+            vec![]
+        } else if json_mode::is_json_content_type(&normalized_ct) {
+            let parsed = json_mode::process_append(&body_bytes)?;
+            // POST rejects empty JSON arrays (unlike PUT initial data)
+            if parsed.is_empty() && !should_close {
+                return Err(ProblemResponse::from(Error::EmptyArray));
+            }
+            parsed
+        } else {
+            vec![body_bytes]
+        };
 
-    // Route to producer or non-producer append path
-    if let Some(ref prod) = producer_headers {
-        handle_producer_append(
-            &storage,
-            &name,
-            messages,
-            &normalized_ct,
-            prod,
-            should_close,
-            is_close_only,
-            seq_ref,
-        )
-    } else {
-        handle_non_producer_append(
-            &storage,
-            &name,
-            messages,
-            &normalized_ct,
-            should_close,
-            seq_ref,
-        )
+        let seq_ref = stream_seq.as_deref();
+
+        // Route to producer or non-producer append path
+        if let Some(ref prod) = producer_headers {
+            handle_producer_append(
+                &storage,
+                &name,
+                messages,
+                &normalized_ct,
+                prod,
+                should_close,
+                is_close_only,
+                seq_ref,
+            )
+        } else {
+            handle_non_producer_append(
+                &storage,
+                &name,
+                messages,
+                &normalized_ct,
+                should_close,
+                seq_ref,
+            )
+        }
     }
+    .await;
+
+    result.map_err(|problem| problem.with_instance(instance))
 }
 
 /// Non-producer append path.
@@ -143,9 +146,9 @@ fn handle_non_producer_append<S: Storage>(
         match storage.batch_append(name, messages, content_type, seq) {
             Ok(next_offset) => next_offset,
             Err(Error::StreamClosed) => {
-                return stream_closed_response(storage, name);
+                return Err(stream_closed_response(storage, name));
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     };
 
@@ -220,50 +223,38 @@ fn handle_producer_append<S: Storage>(
 
             Ok((status, response_headers).into_response())
         }
-        Err(Error::StreamClosed) => {
-            let metadata = storage.head(name)?;
-            let mut error_headers = HeaderMap::new();
-            error_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
-            error_headers.insert(
-                names::STREAM_NEXT_OFFSET,
-                HeaderValue::from_bytes(metadata.next_offset.as_str().as_bytes()).unwrap(),
-            );
-            Ok((StatusCode::CONFLICT, error_headers, "Stream is closed").into_response())
-        }
-        Err(Error::EpochFenced { current, .. }) => {
-            let mut error_headers = HeaderMap::new();
-            error_headers.insert(names::PRODUCER_EPOCH, current.to_string().parse().unwrap());
-            Ok((
-                StatusCode::FORBIDDEN,
-                error_headers,
-                "Producer epoch fenced",
-            )
-                .into_response())
-        }
-        Err(Error::SequenceGap { expected, actual }) => {
-            let mut error_headers = HeaderMap::new();
-            error_headers.insert(
-                names::PRODUCER_EXPECTED_SEQ,
-                expected.to_string().parse().unwrap(),
-            );
-            error_headers.insert(
-                names::PRODUCER_RECEIVED_SEQ,
-                actual.to_string().parse().unwrap(),
-            );
-            Ok((StatusCode::CONFLICT, error_headers, "Producer sequence gap").into_response())
-        }
-        Err(e) => Err(e),
+        Err(Error::StreamClosed) => Err(stream_closed_response(storage, name)),
+        Err(Error::EpochFenced { current, .. }) => Err(ProblemResponse::from(Error::EpochFenced {
+            current,
+            received: producer.epoch,
+        })
+        .with_header(names::PRODUCER_EPOCH, current.to_string().parse().unwrap())),
+        Err(Error::SequenceGap { expected, actual }) => Err(ProblemResponse::from(
+            Error::SequenceGap { expected, actual },
+        )
+        .with_header(
+            names::PRODUCER_EXPECTED_SEQ,
+            expected.to_string().parse().unwrap(),
+        )
+        .with_header(
+            names::PRODUCER_RECEIVED_SEQ,
+            actual.to_string().parse().unwrap(),
+        )),
+        Err(e) => Err(e.into()),
     }
 }
 
 /// Build the 409 Conflict response for a closed stream.
-fn stream_closed_response<S: Storage>(storage: &Arc<S>, name: &str) -> Result<Response> {
-    let metadata = storage.head(name)?;
-    let mut error_headers = HeaderMap::new();
-    error_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
-    error_headers.insert(
-        names::STREAM_NEXT_OFFSET,
-        HeaderValue::from_bytes(metadata.next_offset.as_str().as_bytes()).unwrap(),
-    );
-    Ok((StatusCode::CONFLICT, error_headers, "Stream is closed").into_response())
+fn stream_closed_response<S: Storage>(storage: &Arc<S>, name: &str) -> ProblemResponse {
+    let response = ProblemResponse::from(Error::StreamClosed)
+        .with_header(names::STREAM_CLOSED, "true".parse().unwrap());
+
+    if let Ok(metadata) = storage.head(name) {
+        response.with_header(
+            names::STREAM_NEXT_OFFSET,
+            HeaderValue::from_bytes(metadata.next_offset.as_str().as_bytes()).unwrap(),
+        )
+    } else {
+        response
+    }
 }

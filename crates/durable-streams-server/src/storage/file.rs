@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -28,6 +28,24 @@ use tracing::warn;
 const RECORD_HEADER_BYTES: usize = 4;
 const INITIAL_INDEX_CAPACITY: usize = 256;
 const INITIAL_PRODUCERS_CAPACITY: usize = 8;
+
+/// Re-issue a syscall when interrupted by a signal (`EINTR`).
+///
+/// Rust's standard library does not retry `fsync`, `rename`, or `mkdir` on
+/// `EINTR`, so this wrapper handles the standard POSIX retry contract.
+/// Unlike the previous `retry_on_eintr`, this never sleeps — `EINTR`
+/// retries are immediate by convention. Other transient errors (`WouldBlock`,
+/// `TimedOut`) propagate immediately and become 503 via error classification.
+fn retry_on_eintr<T>(
+    mut op: impl FnMut() -> std::result::Result<T, io::Error>,
+) -> std::result::Result<T, io::Error> {
+    loop {
+        match op() {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            result => return result,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct MessageIndex {
@@ -123,11 +141,16 @@ impl FileStorage {
         sync_on_append: bool,
     ) -> Result<Self> {
         let root_dir = root_dir.into();
-        fs::create_dir_all(&root_dir).map_err(|e| {
-            Error::Storage(format!(
-                "failed to create storage directory {}: {e}",
-                root_dir.display()
-            ))
+        retry_on_eintr(|| fs::create_dir_all(&root_dir)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "create storage directory",
+                format!(
+                    "failed to create storage directory {}: {e}",
+                    root_dir.display()
+                ),
+                &e,
+            )
         })?;
 
         let root_dir_canonical = fs::canonicalize(&root_dir).map_err(|e| {
@@ -273,18 +296,28 @@ impl FileStorage {
         let payload = serde_json::to_vec(&meta)
             .map_err(|e| Error::Storage(format!("failed to serialize stream metadata: {e}")))?;
 
-        fs::write(&tmp_path, payload).map_err(|e| {
-            Error::Storage(format!(
-                "failed to write metadata temp file {}: {e}",
-                tmp_path.display()
-            ))
+        retry_on_eintr(|| fs::write(&tmp_path, payload.as_slice())).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "write stream metadata temp file",
+                format!(
+                    "failed to write metadata temp file {}: {e}",
+                    tmp_path.display()
+                ),
+                &e,
+            )
         })?;
 
-        fs::rename(&tmp_path, &meta_path).map_err(|e| {
-            Error::Storage(format!(
-                "failed to atomically replace metadata {}: {e}",
-                meta_path.display()
-            ))
+        retry_on_eintr(|| fs::rename(&tmp_path, &meta_path)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "replace stream metadata",
+                format!(
+                    "failed to atomically replace metadata {}: {e}",
+                    meta_path.display()
+                ),
+                &e,
+            )
         })?;
 
         Ok(())
@@ -293,14 +326,21 @@ impl FileStorage {
     fn open_stream_file(&self, dir: &Path) -> Result<File> {
         self.validate_stream_dir(dir)?;
         let path = Self::data_log_path(dir);
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .read(true)
-            .open(&path)
-            .map_err(|e| {
-                Error::Storage(format!("failed to open stream log {}: {e}", path.display()))
-            })
+        retry_on_eintr(|| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .read(true)
+                .open(&path)
+        })
+        .map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "open stream log",
+                format!("failed to open stream log {}: {e}", path.display()),
+                &e,
+            )
+        })
     }
 
     fn rebuild_index(file: &mut File) -> Result<(Vec<MessageIndex>, u64, u64)> {
@@ -434,7 +474,7 @@ impl FileStorage {
 
         let before_len = stream.file_len;
 
-        if let Err(e) = stream.file.write_all(&write_buf) {
+        if let Err(e) = retry_on_eintr(|| stream.file.write_all(&write_buf)) {
             // Write errors may still leave partial bytes on disk; refresh cached length.
             if let Ok(m) = stream.file.metadata() {
                 stream.file_len = m.len();
@@ -446,16 +486,19 @@ impl FileStorage {
         }
 
         if self.sync_on_append
-            && let Err(e) = stream.file.sync_data()
+            && let Err(e) = retry_on_eintr(|| stream.file.sync_data())
         {
             // Data may be written even if fsync fails; refresh cached length.
             if let Ok(m) = stream.file.metadata() {
                 stream.file_len = m.len();
             }
             self.rollback_total_bytes(total_batch_bytes);
-            return Err(Error::Storage(format!(
-                "failed to sync stream log for {name}: {e}"
-            )));
+            return Err(Error::classify_io_failure(
+                "file",
+                "sync stream log",
+                format!("failed to sync stream log for {name}: {e}"),
+                &e,
+            ));
         }
 
         let mut cursor = before_len;
@@ -532,11 +575,13 @@ impl FileStorage {
 
     fn remove_stream_dir(&self, dir: &Path) -> Result<()> {
         self.validate_stream_dir(dir)?;
-        fs::remove_dir_all(dir).map_err(|e| {
-            Error::Storage(format!(
-                "failed to remove stream directory {}: {e}",
-                dir.display()
-            ))
+        retry_on_eintr(|| fs::remove_dir_all(dir)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "remove stream directory",
+                format!("failed to remove stream directory {}: {e}", dir.display()),
+                &e,
+            )
         })
     }
 
@@ -659,9 +704,8 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                self.rollback_total_bytes(stream_bytes);
-
                 self.remove_stream_dir(&dir)?;
+                self.rollback_total_bytes(stream_bytes);
             } else if stream.config == config {
                 return Ok(CreateStreamResult::AlreadyExists);
             } else {
@@ -670,18 +714,25 @@ impl Storage for FileStorage {
         }
 
         let dir = self.stream_dir_for_name(name)?;
-        fs::create_dir_all(&dir).map_err(|e| {
-            Error::Storage(format!(
-                "failed to create stream directory {}: {e}",
-                dir.display()
-            ))
+        retry_on_eintr(|| fs::create_dir_all(&dir)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "create stream directory",
+                format!("failed to create stream directory {}: {e}", dir.display()),
+                &e,
+            )
         })?;
 
         self.validate_stream_dir(&dir)?;
         let file = self.open_stream_file(&dir)?;
-        let entry = StreamEntry::new(config, file, dir);
+        let entry = StreamEntry::new(config, file, dir.clone());
 
-        self.write_metadata_for(name, &entry)?;
+        if let Err(e) = self.write_metadata_for(name, &entry) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
+        }
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
 
         Ok(CreateStreamResult::Created)
@@ -802,9 +853,12 @@ impl Storage for FileStorage {
             let stream_bytes = stream.total_bytes;
             drop(stream);
 
+            if let Err(e) = self.remove_stream_dir(&dir) {
+                // Re-insert into map — the stream still exists on disk.
+                streams.insert(name.to_string(), stream_arc);
+                return Err(e);
+            }
             self.rollback_total_bytes(stream_bytes);
-
-            self.remove_stream_dir(&dir)?;
             Ok(())
         } else {
             Err(Error::NotFound(name.to_string()))
@@ -943,9 +997,8 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                self.rollback_total_bytes(stream_bytes);
-
                 self.remove_stream_dir(&dir)?;
+                self.rollback_total_bytes(stream_bytes);
             } else if stream.config == config {
                 return Ok(CreateWithDataResult {
                     status: CreateStreamResult::AlreadyExists,
@@ -958,19 +1011,26 @@ impl Storage for FileStorage {
         }
 
         let dir = self.stream_dir_for_name(name)?;
-        fs::create_dir_all(&dir).map_err(|e| {
-            Error::Storage(format!(
-                "failed to create stream directory {}: {e}",
-                dir.display()
-            ))
+        retry_on_eintr(|| fs::create_dir_all(&dir)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "create stream directory",
+                format!("failed to create stream directory {}: {e}", dir.display()),
+                &e,
+            )
         })?;
 
         self.validate_stream_dir(&dir)?;
         let file = self.open_stream_file(&dir)?;
-        let mut entry = StreamEntry::new(config, file, dir);
+        let mut entry = StreamEntry::new(config, file, dir.clone());
 
-        if !messages.is_empty() {
-            self.append_records(name, &mut entry, &messages)?;
+        if !messages.is_empty()
+            && let Err(e) = self.append_records(name, &mut entry, &messages)
+        {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
         }
         if should_close {
             entry.closed = true;
@@ -979,7 +1039,12 @@ impl Storage for FileStorage {
         let next_offset = Offset::new(entry.next_read_seq, entry.next_byte_offset);
         let closed = entry.closed;
 
-        self.write_metadata_for(name, &entry)?;
+        if let Err(e) = self.write_metadata_for(name, &entry) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
+        }
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
 
         Ok(CreateWithDataResult {
@@ -1024,9 +1089,10 @@ impl Storage for FileStorage {
         let count = expired.len();
         for (name, bytes, dir) in &expired {
             streams.remove(name);
-            self.rollback_total_bytes(*bytes);
             if let Err(e) = self.remove_stream_dir(dir) {
                 warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+            } else {
+                self.rollback_total_bytes(*bytes);
             }
         }
 

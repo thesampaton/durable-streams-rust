@@ -234,11 +234,19 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
     if runtime.config.tls_enabled() {
         tracing::info!("Health check: https://{}/healthz", runtime.addr);
         tracing::info!("Readiness:    https://{}/readyz", runtime.addr);
-        tracing::info!("Protocol base: https://{}/v1/stream/", runtime.addr);
+        tracing::info!(
+            "Protocol base: https://{}{}/",
+            runtime.addr,
+            runtime.config.stream_base_path
+        );
     } else {
         tracing::info!("Health check: http://{}/healthz", runtime.addr);
         tracing::info!("Readiness:    http://{}/readyz", runtime.addr);
-        tracing::info!("Protocol base: http://{}/v1/stream/", runtime.addr);
+        tracing::info!(
+            "Protocol base: http://{}{}/",
+            runtime.addr,
+            runtime.config.stream_base_path
+        );
     }
 
     let shutdown_handle = handle.clone();

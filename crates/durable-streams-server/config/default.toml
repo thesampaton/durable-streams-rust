@@ -9,6 +9,7 @@ max_stream_bytes = 10485760
 
 [http]
 cors_origins = "*"
+stream_base_path = "/v1/stream"
 
 [storage]
 mode = "memory"

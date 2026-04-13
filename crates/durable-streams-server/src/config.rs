@@ -4,6 +4,7 @@
 //! layered TOML plus environment-variable flow used by the binary, or
 //! [`Config::from_env`] when tests only need the `DS_*` override surface.
 
+use crate::router::DEFAULT_STREAM_BASE_PATH;
 use axum::http::HeaderValue;
 use figment::{
     Figment,
@@ -87,6 +88,8 @@ pub struct Config {
     /// Matches Caddy's `sse_reconnect_interval`. Connections are closed after
     /// this many idle seconds to enable CDN request collapsing.
     pub sse_reconnect_interval_secs: u64,
+    /// Mount path for the protocol HTTP surface.
+    pub stream_base_path: String,
     /// Selected persistence backend.
     pub storage_mode: StorageMode,
     /// Root directory for file-backed and acid-backed storage.
@@ -155,6 +158,7 @@ struct LimitsSettingsFile {
 #[serde(default)]
 struct HttpSettingsFile {
     cors_origins: Option<String>,
+    stream_base_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -276,6 +280,10 @@ impl Config {
         if let Some(cors_origins) = settings.http.cors_origins {
             config.cors_origins = cors_origins;
         }
+        if let Some(stream_base_path) = settings.http.stream_base_path {
+            config.stream_base_path = Self::parse_stream_base_path_value(&stream_base_path)
+                .map_err(|reason| format!("invalid http.stream_base_path value: {reason}"))?;
+        }
 
         if let Some(mode) = settings.storage.mode {
             config.storage_mode = Self::parse_storage_mode_value(&mode)
@@ -342,6 +350,10 @@ impl Config {
         if let Some(cors_origins) = get("DS_HTTP__CORS_ORIGINS") {
             self.cors_origins = cors_origins;
         }
+        if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
+            self.stream_base_path = Self::parse_stream_base_path_value(&stream_base_path)
+                .map_err(|reason| format!("invalid DS_HTTP__STREAM_BASE_PATH value: {reason}"))?;
+        }
 
         if let Some(storage_mode) = get("DS_STORAGE__MODE") {
             self.storage_mode = Self::parse_storage_mode_value(&storage_mode)
@@ -403,6 +415,7 @@ impl Config {
         }?;
 
         Self::validate_cors_origins(&self.cors_origins)?;
+        Self::parse_stream_base_path_value(&self.stream_base_path).map(|_| ())?;
 
         Ok(())
     }
@@ -429,6 +442,27 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    fn parse_stream_base_path_value(raw: &str) -> Result<String, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err("must be a non-empty absolute path".to_string());
+        }
+        if !trimmed.starts_with('/') {
+            return Err(format!("'{trimmed}' (must start with '/')"));
+        }
+
+        if trimmed == "/" {
+            return Ok("/".to_string());
+        }
+
+        let normalized = trimmed.trim_end_matches('/');
+        if normalized.is_empty() {
+            return Err("must be a non-empty absolute path".to_string());
+        }
+
+        Ok(normalized.to_string())
     }
 
     /// True when direct TLS termination is enabled on this server.
@@ -469,6 +503,7 @@ impl Default for Config {
             cors_origins: "*".to_string(),
             long_poll_timeout: Duration::from_secs(30),
             sse_reconnect_interval_secs: 60,
+            stream_base_path: DEFAULT_STREAM_BASE_PATH.to_string(),
             storage_mode: StorageMode::Memory,
             data_dir: "./data/streams".to_string(),
             acid_shard_count: 16,
@@ -524,6 +559,7 @@ mod tests {
         assert_eq!(config.cors_origins, "*");
         assert_eq!(config.long_poll_timeout, Duration::from_secs(30));
         assert_eq!(config.sse_reconnect_interval_secs, 60);
+        assert_eq!(config.stream_base_path, DEFAULT_STREAM_BASE_PATH);
         assert_eq!(config.storage_mode, StorageMode::Memory);
         assert_eq!(config.data_dir, "./data/streams");
         assert_eq!(config.acid_shard_count, 16);
@@ -552,6 +588,7 @@ mod tests {
             ("DS_HTTP__CORS_ORIGINS", "https://example.com"),
             ("DS_SERVER__LONG_POLL_TIMEOUT_SECS", "5"),
             ("DS_SERVER__SSE_RECONNECT_INTERVAL_SECS", "120"),
+            ("DS_HTTP__STREAM_BASE_PATH", "/streams"),
             ("DS_STORAGE__MODE", "file-fast"),
             ("DS_STORAGE__DATA_DIR", "/tmp/ds-store"),
             ("DS_STORAGE__ACID_SHARD_COUNT", "32"),
@@ -568,6 +605,7 @@ mod tests {
         assert_eq!(config.cors_origins, "https://example.com");
         assert_eq!(config.long_poll_timeout, Duration::from_secs(5));
         assert_eq!(config.sse_reconnect_interval_secs, 120);
+        assert_eq!(config.stream_base_path, "/streams");
         assert_eq!(config.storage_mode, StorageMode::FileFast);
         assert_eq!(config.data_dir, "/tmp/ds-store");
         assert_eq!(config.acid_shard_count, 32);
@@ -614,6 +652,8 @@ mod tests {
             r#"
                 [server]
                 port = 4437
+                [http]
+                stream_base_path = "/v1/stream"
                 [storage]
                 mode = "memory"
                 [log]
@@ -627,6 +667,8 @@ mod tests {
             r#"
                 [server]
                 port = 7777
+                [http]
+                stream_base_path = "/streams"
                 [storage]
                 mode = "file-fast"
                 data_dir = "/tmp/dev-store"
@@ -654,6 +696,7 @@ mod tests {
         let config = Config::from_sources_with_lookup(&options, &env).expect("config from sources");
 
         assert_eq!(config.port, 9999);
+        assert_eq!(config.stream_base_path, "/streams");
         assert_eq!(config.storage_mode, StorageMode::FileFast);
         assert_eq!(config.data_dir, "/tmp/dev-store");
         assert_eq!(config.rust_log, "debug");
@@ -833,6 +876,41 @@ mod tests {
                 .validate()
                 .expect_err("invalid cors origins should fail"),
             "http.cors_origins contains an empty origin entry"
+        );
+    }
+
+    #[test]
+    fn test_stream_base_path_normalizes_trailing_slash() {
+        let mut config = Config::default();
+        config
+            .apply_env_overrides(&lookup(&[("DS_HTTP__STREAM_BASE_PATH", "/streams/")]))
+            .expect("apply env overrides");
+        assert_eq!(config.stream_base_path, "/streams");
+    }
+
+    #[test]
+    fn test_stream_base_path_rejects_relative_path() {
+        let mut config = Config::default();
+        let err = config
+            .apply_env_overrides(&lookup(&[("DS_HTTP__STREAM_BASE_PATH", "streams")]))
+            .expect_err("relative base path should fail");
+        assert_eq!(
+            err,
+            "invalid DS_HTTP__STREAM_BASE_PATH value: 'streams' (must start with '/')"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_stream_base_path() {
+        let config = Config {
+            stream_base_path: "streams".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config
+                .validate()
+                .expect_err("invalid stream base path should fail"),
+            "'streams' (must start with '/')"
         );
     }
 

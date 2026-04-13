@@ -18,11 +18,19 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 #[derive(Clone)]
 pub struct ShutdownToken(pub CancellationToken);
 
+/// Default mount path for the Durable Streams protocol routes.
+pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
+
+/// Wrapper around the configured stream route mount path.
+#[derive(Clone)]
+pub(crate) struct StreamBasePath(pub Arc<str>);
+
 /// Build the application router with storage state.
 ///
 /// Routes:
-/// - `GET /healthz`  – Liveness probe (always 200)
-/// - `/v1/stream/*`  – Protocol routes
+/// - `GET /healthz`        – Liveness probe (always 200)
+/// - `GET/PUT/... <path>`  – Protocol routes mounted at the configured
+///   `config.stream_base_path` (default [`DEFAULT_STREAM_BASE_PATH`])
 ///
 /// Uses a no-op cancellation token (never cancelled). For production
 /// use with graceful shutdown, prefer [`build_router_with_ready`].
@@ -44,9 +52,13 @@ pub fn build_router_with_ready<S: Storage + 'static>(
     ready: Option<Arc<AtomicBool>>,
     shutdown: CancellationToken,
 ) -> Router {
+    let stream_base_path = Arc::<str>::from(config.stream_base_path.as_str());
     let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))
-        .nest("/v1/stream", protocol_routes(storage, config, shutdown));
+        .nest(
+            stream_base_path.as_ref(),
+            protocol_routes(storage, config, shutdown, Arc::clone(&stream_base_path)),
+        );
 
     if let Some(flag) = ready {
         app = app
@@ -54,7 +66,10 @@ pub fn build_router_with_ready<S: Storage + 'static>(
             .layer(Extension(flag));
     }
 
-    app.layer(cors_layer(&config.cors_origins))
+    app.layer(axum_middleware::from_fn(
+        middleware::telemetry::track_requests,
+    ))
+    .layer(cors_layer(&config.cors_origins))
 }
 
 /// Build a CORS layer from the configured origins string.
@@ -86,6 +101,7 @@ fn protocol_routes<S: Storage + 'static>(
     storage: Arc<S>,
     config: &Config,
     shutdown: CancellationToken,
+    stream_base_path: Arc<str>,
 ) -> Router {
     Router::new()
         .route(
@@ -101,6 +117,7 @@ fn protocol_routes<S: Storage + 'static>(
             config.sse_reconnect_interval_secs,
         )))
         .layer(Extension(LongPollTimeout(config.long_poll_timeout)))
+        .layer(Extension(StreamBasePath(stream_base_path)))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
         ))

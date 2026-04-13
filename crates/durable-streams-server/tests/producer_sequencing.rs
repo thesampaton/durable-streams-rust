@@ -1,6 +1,6 @@
 mod common;
 
-use common::{spawn_test_server, test_client, unique_stream_name};
+use common::{read_problem, spawn_test_server, test_client, unique_stream_name};
 
 /// Helper: create a stream and return its URL
 async fn setup_stream(base_url: &str, client: &reqwest::Client) -> String {
@@ -209,6 +209,14 @@ async fn test_producer_sequence_gap_returns_409() {
         .to_str()
         .unwrap();
     assert_eq!(received, "5");
+
+    let problem = read_problem(response).await;
+    let instance = format!("/v1/stream/{name}");
+    assert_eq!(problem.problem_type, "/errors/sequence-conflict");
+    assert_eq!(problem.title, "Sequence Conflict");
+    assert_eq!(problem.status, 409);
+    assert_eq!(problem.code, "SEQUENCE_CONFLICT");
+    assert_eq!(problem.instance.as_deref(), Some(instance.as_str()));
 }
 
 /// Validates spec: 05-producer-sequencing.md#epoch-validation
@@ -253,6 +261,14 @@ async fn test_producer_epoch_fencing_returns_403() {
         .to_str()
         .unwrap();
     assert_eq!(epoch, "2", "Should return server's current epoch");
+
+    let problem = read_problem(response).await;
+    let instance = format!("/v1/stream/{name}");
+    assert_eq!(problem.problem_type, "/errors/producer-epoch-fenced");
+    assert_eq!(problem.title, "Producer Epoch Fenced");
+    assert_eq!(problem.status, 403);
+    assert_eq!(problem.code, "PRODUCER_EPOCH_FENCED");
+    assert_eq!(problem.instance.as_deref(), Some(instance.as_str()));
 }
 
 /// Validates spec: 05-producer-sequencing.md#epoch-validation
