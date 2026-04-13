@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -97,7 +98,7 @@ impl StreamEntry {
 #[allow(clippy::module_name_repetitions)]
 pub struct FileStorage {
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
-    total_bytes: RwLock<u64>,
+    total_bytes: AtomicU64,
     max_total_bytes: u64,
     max_stream_bytes: u64,
     root_dir: PathBuf,
@@ -138,7 +139,7 @@ impl FileStorage {
 
         let storage = Self {
             streams: RwLock::new(HashMap::new()),
-            total_bytes: RwLock::new(0),
+            total_bytes: AtomicU64::new(0),
             max_total_bytes,
             max_stream_bytes,
             root_dir,
@@ -150,13 +151,9 @@ impl FileStorage {
     }
 
     /// Return the currently tracked total payload bytes across all streams.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `total_bytes` lock is poisoned.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
-        *self.total_bytes.read().expect("total_bytes lock poisoned")
+        self.total_bytes.load(Ordering::Acquire)
     }
 
     /// Map a stream name to a directory path inside `root_dir`.
@@ -366,8 +363,11 @@ impl FileStorage {
     }
 
     fn rollback_total_bytes(&self, bytes: u64) {
-        let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-        *total = total.saturating_sub(bytes);
+        self.total_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(current.saturating_sub(bytes))
+            })
+            .ok();
     }
 
     fn get_stream(&self, name: &str) -> Option<Arc<RwLock<StreamEntry>>> {
@@ -402,18 +402,25 @@ impl FileStorage {
             sizes.push(len);
         }
 
-        // Check-and-reserve global limit atomically under a single write lock
-        // to prevent concurrent appends on different streams from exceeding it.
-        // Global check comes first to preserve error precedence.
+        // Reserve global capacity first (preserves error precedence: global
+        // limit takes priority over per-stream limit). Uses a CAS loop so
+        // concurrent appends on different streams cannot exceed the cap.
+        if self
+            .total_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current
+                    .checked_add(total_batch_bytes)
+                    .filter(|next| *next <= self.max_total_bytes)
+            })
+            .is_err()
         {
-            let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-            if *total + total_batch_bytes > self.max_total_bytes {
-                return Err(Error::MemoryLimitExceeded);
-            }
-            if stream.total_bytes + total_batch_bytes > self.max_stream_bytes {
-                return Err(Error::StreamSizeLimitExceeded);
-            }
-            *total += total_batch_bytes;
+            return Err(Error::MemoryLimitExceeded);
+        }
+
+        // Check per-stream limit; rollback global reservation on failure.
+        if stream.total_bytes + total_batch_bytes > self.max_stream_bytes {
+            self.rollback_total_bytes(total_batch_bytes);
+            return Err(Error::StreamSizeLimitExceeded);
         }
 
         let wire_overhead = RECORD_HEADER_BYTES.saturating_mul(messages.len());
@@ -475,10 +482,6 @@ impl FileStorage {
             return Ok(Vec::new());
         }
 
-        let mut reader = file
-            .try_clone()
-            .map_err(|e| Error::Storage(format!("failed to clone stream file handle: {e}")))?;
-
         let first_pos = index_slice[0].file_pos;
         let last = index_slice
             .last()
@@ -486,14 +489,34 @@ impl FileStorage {
         let read_end = last.file_pos + last.byte_len;
         let read_len = read_end.saturating_sub(first_pos);
 
-        reader
-            .seek(SeekFrom::Start(first_pos))
-            .map_err(|e| Error::Storage(format!("failed to seek message data: {e}")))?;
-
+        // Use positional read (pread) to avoid the shared file-offset race
+        // that occurs when multiple readers `try_clone()` the same file
+        // descriptor and `seek()` concurrently.
         let mut raw = vec![0u8; usize::try_from(read_len).unwrap_or(usize::MAX)];
-        reader
-            .read_exact(&mut raw)
-            .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            file.read_exact_at(&mut raw, first_pos)
+                .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            file.seek_read(&mut raw, first_pos)
+                .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let mut reader = file
+                .try_clone()
+                .map_err(|e| Error::Storage(format!("failed to clone stream file handle: {e}")))?;
+            reader
+                .seek(SeekFrom::Start(first_pos))
+                .map_err(|e| Error::Storage(format!("failed to seek message data: {e}")))?;
+            reader
+                .read_exact(&mut raw)
+                .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
+        }
 
         let shared = Bytes::from(raw);
         let mut messages = Vec::with_capacity(index_slice.len());
@@ -565,8 +588,22 @@ impl FileStorage {
                 .map_err(|e| Error::Storage(format!("failed to stat stream log: {e}")))?
                 .len();
 
+            // Reconcile: data.log is the source of truth for message count
+            // and byte offsets. If meta.json is stale (e.g. crash before
+            // metadata flush), log a warning so operators can investigate.
+            let log_msg_count = index.len() as u64;
+            let meta_has_data =
+                meta.closed || !meta.producers.is_empty() || meta.last_seq.is_some();
+            if log_msg_count == 0 && meta_has_data {
+                warn!(
+                    stream = meta.name,
+                    "meta.json indicates activity but data.log has 0 messages; \
+                     data.log is authoritative"
+                );
+            }
+
             let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
-            let entry = StreamEntry {
+            let mut entry = StreamEntry {
                 config: meta.config,
                 index,
                 closed: meta.closed,
@@ -587,12 +624,23 @@ impl FileStorage {
                 continue;
             }
 
+            super::cleanup_stale_producers(&mut entry.producers);
+
+            // Re-persist metadata if the on-disk copy may be stale so that
+            // future restarts see a consistent snapshot. Best-effort: a
+            // failure here is non-fatal since the data.log remains correct.
+            if let Err(e) = self.write_metadata_for(&meta.name, &entry) {
+                warn!(
+                    %e,
+                    stream = meta.name,
+                    "failed to re-persist reconciled metadata during recovery"
+                );
+            }
             restored_total = restored_total.saturating_add(entry.total_bytes);
             streams_map.insert(meta.name, Arc::new(RwLock::new(entry)));
         }
 
-        let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-        *total = restored_total;
+        self.total_bytes.store(restored_total, Ordering::Release);
 
         Ok(())
     }
@@ -611,9 +659,7 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-                *total = total.saturating_sub(stream_bytes);
-                drop(total);
+                self.rollback_total_bytes(stream_bytes);
 
                 self.remove_stream_dir(&dir)?;
             } else if stream.config == config {
@@ -756,9 +802,7 @@ impl Storage for FileStorage {
             let stream_bytes = stream.total_bytes;
             drop(stream);
 
-            let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-            *total = total.saturating_sub(stream_bytes);
-            drop(total);
+            self.rollback_total_bytes(stream_bytes);
 
             self.remove_stream_dir(&dir)?;
             Ok(())
@@ -899,9 +943,7 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                let mut total = self.total_bytes.write().expect("total_bytes lock poisoned");
-                *total = total.saturating_sub(stream_bytes);
-                drop(total);
+                self.rollback_total_bytes(stream_bytes);
 
                 self.remove_stream_dir(&dir)?;
             } else if stream.config == config {
@@ -966,6 +1008,29 @@ impl Storage for FileStorage {
         }
 
         Some(stream.notify.subscribe())
+    }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        let mut streams = self.streams.write().expect("streams lock poisoned");
+        let mut expired = Vec::new();
+
+        for (name, stream_arc) in streams.iter() {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&stream.config) {
+                expired.push((name.clone(), stream.total_bytes, stream.dir.clone()));
+            }
+        }
+
+        let count = expired.len();
+        for (name, bytes, dir) in &expired {
+            streams.remove(name);
+            self.rollback_total_bytes(*bytes);
+            if let Err(e) = self.remove_stream_dir(dir) {
+                warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+            }
+        }
+
+        count
     }
 }
 

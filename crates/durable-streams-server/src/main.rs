@@ -7,7 +7,9 @@ use durable_streams_server::{
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct CliArgs {
@@ -191,7 +193,8 @@ async fn run(config: Config) -> Result<(), String> {
         }
         StorageMode::Acid => {
             tracing::info!(
-                "Acid storage dir: {}, shards: {}",
+                "Acid storage backend: {}, dir: {}, shards: {}",
+                runtime.config.acid_backend.as_str(),
                 runtime.config.data_dir,
                 runtime.config.acid_shard_count
             );
@@ -201,6 +204,7 @@ async fn run(config: Config) -> Result<(), String> {
                     runtime.config.acid_shard_count,
                     runtime.config.max_memory_bytes,
                     runtime.config.max_stream_bytes,
+                    runtime.config.acid_backend,
                 )
                 .map_err(|e| format!("Failed to initialize acid storage: {e}"))?,
             );
@@ -213,15 +217,27 @@ async fn run(config: Config) -> Result<(), String> {
 }
 
 async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> Result<(), String> {
-    let app = router::build_router(storage, &runtime.config);
+    let ready = Arc::new(AtomicBool::new(false));
+    let shutdown = CancellationToken::new();
+    let app = router::build_router_with_ready(
+        storage,
+        &runtime.config,
+        Some(Arc::clone(&ready)),
+        shutdown.clone(),
+    );
     let handle = Handle::new();
+
+    // Storage is already initialised (new() is synchronous); mark ready.
+    ready.store(true, Ordering::Release);
 
     tracing::info!("Server listening on {}", runtime.addr);
     if runtime.config.tls_enabled() {
         tracing::info!("Health check: https://{}/healthz", runtime.addr);
+        tracing::info!("Readiness:    https://{}/readyz", runtime.addr);
         tracing::info!("Protocol base: https://{}/v1/stream/", runtime.addr);
     } else {
         tracing::info!("Health check: http://{}/healthz", runtime.addr);
+        tracing::info!("Readiness:    http://{}/readyz", runtime.addr);
         tracing::info!("Protocol base: http://{}/v1/stream/", runtime.addr);
     }
 
@@ -229,6 +245,9 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("Shutdown signal received, beginning graceful drain");
+        // Cancel the token first so long-poll/SSE handlers drain cleanly,
+        // then trigger the HTTP server graceful shutdown.
+        shutdown.cancel();
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 

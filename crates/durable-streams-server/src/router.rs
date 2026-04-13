@@ -7,18 +7,54 @@ use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;
 use axum::{Extension, Router, middleware as axum_middleware, routing::get};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-/// Build the application router with storage state
+/// Wrapper around [`CancellationToken`] for axum `Extension` extraction.
+///
+/// Long-poll and SSE handlers observe this token so they can drain cleanly
+/// when the server begins a graceful shutdown.
+#[derive(Clone)]
+pub struct ShutdownToken(pub CancellationToken);
+
+/// Build the application router with storage state.
 ///
 /// Routes:
-/// - GET /healthz - Health check (outside protocol namespace)
-/// - /v1/stream/* - Protocol routes
+/// - `GET /healthz`  – Liveness probe (always 200)
+/// - `/v1/stream/*`  – Protocol routes
+///
+/// Uses a no-op cancellation token (never cancelled). For production
+/// use with graceful shutdown, prefer [`build_router_with_ready`].
 pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> Router {
-    Router::new()
+    build_router_with_ready(storage, config, None, CancellationToken::new())
+}
+
+/// Build the router with readiness flag and shutdown token.
+///
+/// When `ready` is `Some`, the `/readyz` endpoint is registered and returns
+/// 200 only after the flag is set to `true`. When `None`, the endpoint is
+/// not registered (backwards-compatible).
+///
+/// The `shutdown` token is propagated to long-poll and SSE handlers so they
+/// can observe server shutdown and drain in-flight connections cleanly.
+pub fn build_router_with_ready<S: Storage + 'static>(
+    storage: Arc<S>,
+    config: &Config,
+    ready: Option<Arc<AtomicBool>>,
+    shutdown: CancellationToken,
+) -> Router {
+    let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))
-        .nest("/v1/stream", protocol_routes(storage, config))
-        .layer(cors_layer(&config.cors_origins))
+        .nest("/v1/stream", protocol_routes(storage, config, shutdown));
+
+    if let Some(flag) = ready {
+        app = app
+            .route("/readyz", get(handlers::health::readiness_check))
+            .layer(Extension(flag));
+    }
+
+    app.layer(cors_layer(&config.cors_origins))
 }
 
 /// Build a CORS layer from the configured origins string.
@@ -46,7 +82,11 @@ fn cors_layer(origins: &str) -> CorsLayer {
 /// Protocol routes under /v1/stream
 ///
 /// All protocol routes have security headers applied via middleware.
-fn protocol_routes<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> Router {
+fn protocol_routes<S: Storage + 'static>(
+    storage: Arc<S>,
+    config: &Config,
+    shutdown: CancellationToken,
+) -> Router {
     Router::new()
         .route(
             "/{name}",
@@ -56,6 +96,7 @@ fn protocol_routes<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> Ro
                 .post(handlers::post::append_data::<S>)
                 .delete(handlers::delete::delete_stream::<S>),
         )
+        .layer(Extension(ShutdownToken(shutdown)))
         .layer(Extension(SseReconnectInterval(
             config.sse_reconnect_interval_secs,
         )))

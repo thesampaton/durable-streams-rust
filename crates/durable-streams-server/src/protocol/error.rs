@@ -14,17 +14,9 @@ pub enum Error {
     #[error("Stream already exists with different configuration")]
     ConfigMismatch,
 
-    /// Stream already exists (used for idempotent operations)
-    #[error("Stream already exists: {0}")]
-    AlreadyExists(String),
-
     /// Invalid offset format (400)
     #[error("Invalid offset format: {0}")]
     InvalidOffset(String),
-
-    /// Invalid stream name (400)
-    #[error("Invalid stream name: {0}")]
-    InvalidStreamName(String),
 
     /// Content type mismatch (409)
     #[error("Content type mismatch: expected {expected}, got {actual}")]
@@ -33,10 +25,6 @@ pub enum Error {
     /// Stream is closed (409)
     #[error("Stream is closed")]
     StreamClosed,
-
-    /// Producer sequence regression (409)
-    #[error("Producer sequence regression: expected > {expected}, got {actual}")]
-    SequenceRegression { expected: u64, actual: u64 },
 
     /// Producer sequence gap (409)
     #[error("Producer sequence gap: expected {expected}, got {actual}")]
@@ -74,10 +62,6 @@ pub enum Error {
     #[error("Invalid JSON: {0}")]
     InvalidJson(String),
 
-    /// Empty request body when data expected (400)
-    #[error("Empty request body")]
-    EmptyBody,
-
     /// Invalid header value (400)
     #[error("Invalid header value for {header}: {reason}")]
     InvalidHeader { header: String, reason: String },
@@ -103,19 +87,15 @@ impl Error {
             Self::ConfigMismatch
             | Self::ContentTypeMismatch { .. }
             | Self::StreamClosed
-            | Self::SequenceRegression { .. }
             | Self::SequenceGap { .. }
             | Self::SeqOrderingViolation { .. } => 409,
             Self::EpochFenced { .. } => 403,
             Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => 413,
-            Self::AlreadyExists(_)
-            | Self::InvalidOffset(_)
-            | Self::InvalidStreamName(_)
+            Self::InvalidOffset(_)
             | Self::InvalidProducerState(_)
             | Self::InvalidTtl(_)
             | Self::ConflictingExpiration
             | Self::InvalidJson(_)
-            | Self::EmptyBody
             | Self::InvalidHeader { .. } => 400,
             Self::Storage(_) => 500,
         }

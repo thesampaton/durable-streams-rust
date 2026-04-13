@@ -2,7 +2,7 @@
 // Shared across many independent integration-test crates; each crate only uses
 // a subset of helpers, so items appear unused when compiled per-test target.
 
-use durable_streams_server::config::{Config, StorageMode};
+use durable_streams_server::config::{AcidBackend, Config, StorageMode};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
@@ -34,6 +34,7 @@ pub enum StorageTestBackend {
     Memory,
     FileDurable,
     Acid,
+    AcidInMemory,
 }
 
 impl StorageTestBackend {
@@ -43,6 +44,7 @@ impl StorageTestBackend {
             Self::Memory => "memory",
             Self::FileDurable => "file-durable",
             Self::Acid => "acid",
+            Self::AcidInMemory => "acid-in-memory",
         }
     }
 }
@@ -193,6 +195,14 @@ impl Storage for TestStorage {
             Self::Acid(inner) => inner.subscribe(name),
         }
     }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        match self {
+            Self::Memory(inner) => inner.cleanup_expired_streams(),
+            Self::File(inner) => inner.cleanup_expired_streams(),
+            Self::Acid(inner) => inner.cleanup_expired_streams(),
+        }
+    }
 }
 
 impl TestStorage {
@@ -238,8 +248,29 @@ pub fn create_test_storage_with_limits(
         }
         StorageTestBackend::Acid => {
             let storage_dir = unique_storage_dir("acid");
-            let storage = AcidStorage::new(&storage_dir, 16, max_total_bytes, max_stream_bytes)
-                .expect("failed to initialize test acid storage");
+            let storage = AcidStorage::new(
+                &storage_dir,
+                16,
+                max_total_bytes,
+                max_stream_bytes,
+                AcidBackend::File,
+            )
+            .expect("failed to initialize test acid storage");
+            TestStorageHandle {
+                storage: TestStorage::Acid(storage),
+                _storage_dir: Some(storage_dir),
+            }
+        }
+        StorageTestBackend::AcidInMemory => {
+            let storage_dir = unique_storage_dir("acid-mem");
+            let storage = AcidStorage::new(
+                &storage_dir,
+                16,
+                max_total_bytes,
+                max_stream_bytes,
+                AcidBackend::InMemory,
+            )
+            .expect("failed to initialize test acid in-memory storage");
             TestStorageHandle {
                 storage: TestStorage::Acid(storage),
                 _storage_dir: Some(storage_dir),
@@ -322,6 +353,7 @@ pub async fn spawn_test_server_acid() -> (String, u16) {
             config.acid_shard_count,
             config.max_memory_bytes,
             config.max_stream_bytes,
+            AcidBackend::File,
         )
         .expect("Failed to initialize acid test storage"),
     );
@@ -353,6 +385,81 @@ where
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     (format!("http://127.0.0.1:{port}"), port)
+}
+
+/// Spawn a test server with a readiness flag.
+///
+/// Returns `(base_url, port, ready_flag)`. The ready flag starts `false`;
+/// callers can flip it to `true` to make `/readyz` return 200.
+pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::atomic::AtomicBool>) {
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let config = Config::default();
+    let storage = Arc::new(InMemoryStorage::new(
+        config.max_memory_bytes,
+        config.max_stream_bytes,
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().expect("Failed to get local addr");
+    let port = addr.port();
+
+    let app = durable_streams_server::router::build_router_with_ready(
+        storage,
+        &config,
+        Some(Arc::clone(&ready)),
+        tokio_util::sync::CancellationToken::new(),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("Test server failed");
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    (format!("http://127.0.0.1:{port}"), port, ready)
+}
+
+/// Spawn a test server with a shutdown token for graceful drain testing.
+///
+/// Returns `(base_url, port, shutdown_token)`.
+pub async fn spawn_test_server_with_shutdown() -> (String, u16, tokio_util::sync::CancellationToken)
+{
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let config = Config {
+        long_poll_timeout: Duration::from_secs(30),
+        ..Config::default()
+    };
+    let storage = Arc::new(InMemoryStorage::new(
+        config.max_memory_bytes,
+        config.max_stream_bytes,
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().expect("Failed to get local addr");
+    let port = addr.port();
+
+    let app = durable_streams_server::router::build_router_with_ready(
+        storage,
+        &config,
+        None,
+        shutdown.clone(),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("Test server failed");
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    (format!("http://127.0.0.1:{port}"), port, shutdown)
 }
 
 /// Create an HTTP client for testing

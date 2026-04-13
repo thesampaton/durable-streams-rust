@@ -15,13 +15,13 @@ use tokio_rustls::TlsConnector;
 
 const CERT_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/e2e/fixtures/ds-server-cert.pem"
+    "/tests/fixtures/ds-server-cert.pem"
 );
 const KEY_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/e2e/fixtures/ds-server-key.pem"
+    "/tests/fixtures/ds-server-key.pem"
 );
-const CA_CERT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/e2e/fixtures/ds-ca-cert.pem");
+const CA_CERT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ds-ca-cert.pem");
 static TLS_PROVIDER: Once = Once::new();
 
 fn install_tls_provider() {

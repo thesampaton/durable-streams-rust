@@ -12,10 +12,11 @@ use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread;
 
-const BACKENDS: [StorageTestBackend; 3] = [
+const BACKENDS: [StorageTestBackend; 4] = [
     StorageTestBackend::Memory,
     StorageTestBackend::FileDurable,
     StorageTestBackend::Acid,
+    StorageTestBackend::AcidInMemory,
 ];
 
 fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {

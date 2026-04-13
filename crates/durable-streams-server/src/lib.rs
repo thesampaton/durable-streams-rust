@@ -20,10 +20,5 @@ pub mod router;
 pub mod storage;
 
 pub use config::{Config, ConfigLoadOptions, StorageMode};
-pub use router::build_router;
-pub use storage::{
-    Storage,
-    acid::AcidStorage,
-    file::FileStorage,
-    memory::InMemoryStorage,
-};
+pub use router::{ShutdownToken, build_router, build_router_with_ready};
+pub use storage::{Storage, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage};

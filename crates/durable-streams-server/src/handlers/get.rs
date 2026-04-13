@@ -5,6 +5,7 @@ use crate::protocol::headers::names;
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
 use crate::protocol::sse::{self, ControlPayload};
+use crate::router::ShutdownToken;
 use crate::storage::{ReadResult, Storage};
 use axum::{
     Extension,
@@ -19,6 +20,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 /// Query parameters for GET requests
 #[derive(Debug, Deserialize)]
@@ -56,6 +58,7 @@ pub async fn read_stream<S: Storage + 'static>(
     Query(query): Query<ReadQuery>,
     Extension(LongPollTimeout(timeout)): Extension<LongPollTimeout>,
     Extension(SseReconnectInterval(reconnect_interval_secs)): Extension<SseReconnectInterval>,
+    Extension(ShutdownToken(shutdown)): Extension<ShutdownToken>,
     headers: HeaderMap,
 ) -> Result<Response> {
     // Resolve offset: live modes require explicit offset, catch-up defaults to "-1"
@@ -89,6 +92,7 @@ pub async fn read_stream<S: Storage + 'static>(
                     if_none_match,
                     &content_type,
                     timeout,
+                    shutdown,
                 )
                 .await
             }
@@ -98,6 +102,7 @@ pub async fn read_stream<S: Storage + 'static>(
                 &offset,
                 &content_type,
                 reconnect_interval_secs,
+                shutdown,
             ),
             other => Err(Error::InvalidHeader {
                 header: "live".to_string(),
@@ -137,10 +142,11 @@ fn read_catch_up<S: Storage>(
         return Ok(build_304_response(&read_result));
     }
 
-    build_data_response(&read_result, content_type, &etag, None)
+    Ok(build_data_response(&read_result, content_type, &etag, None))
 }
 
 /// Long-poll mode: wait for new data at tail, return immediately if data exists.
+#[allow(clippy::too_many_arguments)]
 async fn read_long_poll<S: Storage>(
     storage: &Arc<S>,
     name: &str,
@@ -149,6 +155,7 @@ async fn read_long_poll<S: Storage>(
     if_none_match: Option<&str>,
     content_type: &str,
     timeout: Duration,
+    shutdown: CancellationToken,
 ) -> Result<Response> {
     // Subscribe BEFORE read to avoid missing notifications between read and subscribe
     let mut receiver = storage
@@ -168,7 +175,12 @@ async fn read_long_poll<S: Storage>(
     // Data available → return immediately (like catch-up + cursor)
     if !read_result.messages.is_empty() {
         let cursor_val = cursor::generate(&read_result.next_offset);
-        return build_data_response(&read_result, content_type, &etag, Some(&cursor_val));
+        return Ok(build_data_response(
+            &read_result,
+            content_type,
+            &etag,
+            Some(&cursor_val),
+        ));
     }
 
     // At tail + closed → immediate 204 (MUST NOT wait)
@@ -194,6 +206,12 @@ async fn read_long_poll<S: Storage>(
             let is_closed = read_result.closed && read_result.at_tail;
             Ok(build_204_response(&read_result.next_offset, is_closed))
         }
+        () = shutdown.cancelled() => {
+            // Graceful shutdown — return 204 so the client can reconnect
+            let read_result = storage.read(name, &tail_offset)?;
+            let is_closed = read_result.closed && read_result.at_tail;
+            Ok(build_204_response(&read_result.next_offset, is_closed))
+        }
     }
 }
 
@@ -209,6 +227,7 @@ fn read_sse<S: Storage + 'static>(
     offset: &Offset,
     content_type: &str,
     reconnect_interval_secs: u64,
+    shutdown: CancellationToken,
 ) -> Result<Response> {
     let is_binary = sse::is_binary_content_type(content_type);
     let is_json = json_mode::is_json_content_type(content_type);
@@ -229,6 +248,7 @@ fn read_sse<S: Storage + 'static>(
         is_binary,
         is_json,
         reconnect_interval_secs,
+        shutdown,
     );
 
     let body = Body::from_stream(byte_stream);
@@ -246,6 +266,7 @@ fn read_sse<S: Storage + 'static>(
 /// Build a byte stream that yields raw SSE frame strings.
 ///
 /// Manages keep-alive, idle timeout, and the subscribe-before-read pattern.
+#[allow(clippy::too_many_arguments)]
 fn build_sse_byte_stream<S: Storage + 'static>(
     storage: Arc<S>,
     name: String,
@@ -254,6 +275,7 @@ fn build_sse_byte_stream<S: Storage + 'static>(
     is_binary: bool,
     is_json: bool,
     reconnect_interval_secs: u64,
+    shutdown: CancellationToken,
 ) -> impl futures_util::stream::Stream<Item = std::result::Result<String, std::convert::Infallible>> + Send
 {
     async_stream::stream! {
@@ -317,6 +339,10 @@ fn build_sse_byte_stream<S: Storage + 'static>(
                     }
                 } => {
                     // Idle close per PROTOCOL.md §5.8
+                    return;
+                }
+                () = shutdown.cancelled() => {
+                    // Graceful shutdown — end the SSE stream cleanly
                     return;
                 }
             }
@@ -390,7 +416,12 @@ fn handle_long_poll_wake<S: Storage>(
 
     let etag = generate_etag(raw_offset, &read_result);
     let cursor_val = cursor::generate(&read_result.next_offset);
-    build_data_response(&read_result, content_type, &etag, Some(&cursor_val))
+    Ok(build_data_response(
+        &read_result,
+        content_type,
+        &etag,
+        Some(&cursor_val),
+    ))
 }
 
 /// Generate `ETag` from read result.
@@ -424,8 +455,8 @@ fn build_data_response(
     content_type: &str,
     etag: &str,
     cursor_val: Option<&str>,
-) -> Result<Response> {
-    let body = build_body(read_result, content_type)?;
+) -> Response {
+    let body = build_body(read_result, content_type);
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", content_type.parse().unwrap());
@@ -450,7 +481,7 @@ fn build_data_response(
         headers.insert(names::STREAM_CURSOR, c.parse().unwrap());
     }
 
-    Ok((StatusCode::OK, headers, body).into_response())
+    (StatusCode::OK, headers, body).into_response()
 }
 
 /// Build a 204 No Content response for long-poll timeout or closed stream.
@@ -473,17 +504,17 @@ fn build_204_response(next_offset: &Offset, is_closed: bool) -> Response {
 }
 
 /// Build response body from read result messages.
-fn build_body(read_result: &ReadResult, content_type: &str) -> Result<bytes::Bytes> {
+fn build_body(read_result: &ReadResult, content_type: &str) -> bytes::Bytes {
     if json_mode::is_json_content_type(content_type) {
         json_mode::wrap_read_iter(read_result.messages.iter())
     } else if read_result.messages.is_empty() {
-        Ok(bytes::Bytes::new())
+        bytes::Bytes::new()
     } else {
         let total_len: usize = read_result.messages.iter().map(bytes::Bytes::len).sum();
         let mut buf = BytesMut::with_capacity(total_len);
         for message in &read_result.messages {
             buf.put(message.clone());
         }
-        Ok(buf.freeze())
+        buf.freeze()
     }
 }

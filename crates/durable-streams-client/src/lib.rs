@@ -75,9 +75,12 @@ pub mod client;
 pub mod config;
 pub mod error;
 pub mod idempotent;
+pub mod ingest;
 mod instrumentation;
+pub mod journal;
 pub mod model;
 mod protocol;
+pub mod replica;
 pub mod retry;
 pub mod types;
 
@@ -105,7 +108,15 @@ pub use config::{
 };
 pub use error::{Error, ErrorCode, ErrorKind, HttpError};
 pub use idempotent::{IdempotentProducer, IdempotentProducerConfig};
-pub use model::{LiveMode, ReadPayload, RequestOptions, RetryOptions, SubscriptionEvent};
+pub use ingest::{JsonInput, JsonInputFormat, load_json_input, parse_json_input};
+pub use journal::{
+    JournalDirection, JournalRecord, JournalStreamIdentity, JsonJournal, ProducerJournalProgress,
+};
+pub use model::{
+    AppendRequest, CreateStreamRequest, LiveMode, ReadPayload, ReadRequest, RequestOptions,
+    RetryOptions, SubscriptionEvent,
+};
+pub use replica::{ReadReplica, ReadReplicaResult};
 pub use types::{
     AppendOutcome, CloseOutcome, CreateOutcome, Offset, ReadPage, StreamChunk, StreamInfo,
 };

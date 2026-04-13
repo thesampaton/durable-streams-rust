@@ -6,6 +6,7 @@
 use crate::client::{Client, ProducerHeaders};
 use crate::error::{Error, ErrorKind};
 use crate::instrumentation as trace;
+use crate::journal::ProducerJournalProgress;
 use crate::model::RequestOptions;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ struct ProducerState {
     epoch: i64,
     next_seq: i64,
     closed: bool,
+    acked_server_offset: Option<String>,
 }
 
 /// Idempotent producer configuration.
@@ -114,6 +116,7 @@ impl IdempotentProducer {
                 epoch: config.epoch,
                 next_seq: 0,
                 closed: false,
+                acked_server_offset: None,
             }),
             config,
         })
@@ -129,6 +132,7 @@ impl IdempotentProducer {
             let response = self
                 .append_with_state(&mut state, Bytes::from(body))
                 .await?;
+            state.acked_server_offset = response.next_offset.clone();
             state.next_seq += 1;
             debug!(
                 event = "producer.append_completed",
@@ -166,6 +170,24 @@ impl IdempotentProducer {
         };
 
         self.append(combined).await
+    }
+
+    /// Append multiple JSON values as one `application/json` batch.
+    ///
+    /// This is the producer-oriented counterpart to the shared JSON ingest
+    /// loader: callers can normalize input into `serde_json::Value` items and
+    /// then send them as one durable-streams JSON append.
+    pub async fn append_json_values(
+        &self,
+        values: &[serde_json::Value],
+    ) -> Result<crate::model::AppendResponse, Error> {
+        if !self.content_type.starts_with("application/json") {
+            return Err(Error::invalid_argument(
+                "append_json_values requires an application/json content type",
+            ));
+        }
+        let body = serde_json::to_vec(values)?;
+        self.append(body).await
     }
 
     /// Close the stream using the current producer state.
@@ -212,6 +234,7 @@ impl IdempotentProducer {
             }
 
             let response = self.close_with_state(&mut state, body).await?;
+            state.acked_server_offset = Some(response.final_offset.clone());
             state.closed = true;
             debug!(
                 event = "producer.close_completed",
@@ -229,6 +252,22 @@ impl IdempotentProducer {
     /// This currently exists as an explicit lifecycle no-op for API symmetry.
     pub async fn detach(&self) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// Snapshot the current in-memory producer progress for later persistence.
+    ///
+    /// The returned value matches the reserved producer fields in the JSONL
+    /// journal schema so a later phase can persist producer recovery state
+    /// without changing the format.
+    pub async fn progress(&self) -> ProducerJournalProgress {
+        let state = self.state.lock().await;
+        ProducerJournalProgress {
+            producer_id: self.config.producer_id.clone(),
+            epoch: state.epoch,
+            next_seq: state.next_seq,
+            acked_server_offset: state.acked_server_offset.clone(),
+            acked_local_seq: None,
+        }
     }
 
     async fn append_with_state(
