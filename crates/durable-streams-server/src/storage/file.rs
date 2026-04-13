@@ -474,7 +474,7 @@ impl FileStorage {
 
         let before_len = stream.file_len;
 
-        if let Err(e) = stream.file.write_all(&write_buf) {
+        if let Err(e) = retry_on_eintr(|| stream.file.write_all(&write_buf)) {
             // Write errors may still leave partial bytes on disk; refresh cached length.
             if let Ok(m) = stream.file.metadata() {
                 stream.file_len = m.len();
@@ -704,9 +704,8 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                self.rollback_total_bytes(stream_bytes);
-
                 self.remove_stream_dir(&dir)?;
+                self.rollback_total_bytes(stream_bytes);
             } else if stream.config == config {
                 return Ok(CreateStreamResult::AlreadyExists);
             } else {
@@ -726,9 +725,14 @@ impl Storage for FileStorage {
 
         self.validate_stream_dir(&dir)?;
         let file = self.open_stream_file(&dir)?;
-        let entry = StreamEntry::new(config, file, dir);
+        let entry = StreamEntry::new(config, file, dir.clone());
 
-        self.write_metadata_for(name, &entry)?;
+        if let Err(e) = self.write_metadata_for(name, &entry) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
+        }
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
 
         Ok(CreateStreamResult::Created)
@@ -849,9 +853,12 @@ impl Storage for FileStorage {
             let stream_bytes = stream.total_bytes;
             drop(stream);
 
+            if let Err(e) = self.remove_stream_dir(&dir) {
+                // Re-insert into map — the stream still exists on disk.
+                streams.insert(name.to_string(), stream_arc);
+                return Err(e);
+            }
             self.rollback_total_bytes(stream_bytes);
-
-            self.remove_stream_dir(&dir)?;
             Ok(())
         } else {
             Err(Error::NotFound(name.to_string()))
@@ -990,9 +997,8 @@ impl Storage for FileStorage {
                 drop(stream);
                 streams.remove(name);
 
-                self.rollback_total_bytes(stream_bytes);
-
                 self.remove_stream_dir(&dir)?;
+                self.rollback_total_bytes(stream_bytes);
             } else if stream.config == config {
                 return Ok(CreateWithDataResult {
                     status: CreateStreamResult::AlreadyExists,
@@ -1016,10 +1022,15 @@ impl Storage for FileStorage {
 
         self.validate_stream_dir(&dir)?;
         let file = self.open_stream_file(&dir)?;
-        let mut entry = StreamEntry::new(config, file, dir);
+        let mut entry = StreamEntry::new(config, file, dir.clone());
 
-        if !messages.is_empty() {
-            self.append_records(name, &mut entry, &messages)?;
+        if !messages.is_empty()
+            && let Err(e) = self.append_records(name, &mut entry, &messages)
+        {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
         }
         if should_close {
             entry.closed = true;
@@ -1028,7 +1039,12 @@ impl Storage for FileStorage {
         let next_offset = Offset::new(entry.next_read_seq, entry.next_byte_offset);
         let closed = entry.closed;
 
-        self.write_metadata_for(name, &entry)?;
+        if let Err(e) = self.write_metadata_for(name, &entry) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
+            }
+            return Err(e);
+        }
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
 
         Ok(CreateWithDataResult {
@@ -1073,9 +1089,10 @@ impl Storage for FileStorage {
         let count = expired.len();
         for (name, bytes, dir) in &expired {
             streams.remove(name);
-            self.rollback_total_bytes(*bytes);
             if let Err(e) = self.remove_stream_dir(dir) {
                 warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+            } else {
+                self.rollback_total_bytes(*bytes);
             }
         }
 
