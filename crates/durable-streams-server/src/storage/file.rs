@@ -1002,6 +1002,29 @@ impl Storage for FileStorage {
 
         Some(stream.notify.subscribe())
     }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        let mut streams = self.streams.write().expect("streams lock poisoned");
+        let mut expired = Vec::new();
+
+        for (name, stream_arc) in streams.iter() {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&stream.config) {
+                expired.push((name.clone(), stream.total_bytes, stream.dir.clone()));
+            }
+        }
+
+        let count = expired.len();
+        for (name, bytes, dir) in &expired {
+            streams.remove(name);
+            self.rollback_total_bytes(*bytes);
+            if let Err(e) = self.remove_stream_dir(dir) {
+                warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+            }
+        }
+
+        count
+    }
 }
 
 #[cfg(test)]

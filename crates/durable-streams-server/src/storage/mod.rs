@@ -465,4 +465,11 @@ pub trait Storage: Send + Sync {
     ///
     /// The method itself is sync; the handler awaits on the receiver.
     fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>>;
+
+    /// Proactively remove all expired streams, returning the count deleted.
+    ///
+    /// By default, expired streams are only cleaned up lazily when accessed.
+    /// This method sweeps all streams and deletes any that have expired,
+    /// reclaiming their resources immediately.
+    fn cleanup_expired_streams(&self) -> usize;
 }

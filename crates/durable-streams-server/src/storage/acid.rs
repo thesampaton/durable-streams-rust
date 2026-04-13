@@ -1072,6 +1072,76 @@ impl Storage for AcidStorage {
 
         Some(self.notifier_sender(name).subscribe())
     }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        let mut total_removed = 0;
+
+        for shard in &self.shards {
+            // Read pass: find expired stream names and their byte totals.
+            let expired = match shard.db.begin_read() {
+                Ok(txn) => {
+                    let streams = match txn.open_table(STREAMS) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let mut expired = Vec::new();
+                    let iter = match streams.iter() {
+                        Ok(it) => it,
+                        Err(_) => continue,
+                    };
+                    for item in iter {
+                        let (key, value) = match item {
+                            Ok(kv) => kv,
+                            Err(_) => continue,
+                        };
+                        let name = key.value().to_string();
+                        let meta: StoredStreamMeta = match serde_json::from_slice(value.value()) {
+                            Ok(m) => m,
+                            Err(_) => continue,
+                        };
+                        if super::is_stream_expired(&meta.config) {
+                            expired.push((name, meta.total_bytes));
+                        }
+                    }
+                    expired
+                }
+                Err(_) => continue,
+            };
+
+            if expired.is_empty() {
+                continue;
+            }
+
+            // Write pass: delete expired streams.
+            let txn = match Self::begin_write_txn(&shard.db) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut streams = match txn.open_table(STREAMS) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let mut messages = match txn.open_table(MESSAGES) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            for (name, bytes) in &expired {
+                let _ = Self::delete_stream_messages(&mut messages, name);
+                let _ = streams.remove(name.as_str());
+                self.rollback_total_bytes(*bytes);
+                self.drop_notifier(name);
+            }
+
+            drop(messages);
+            drop(streams);
+            let _ = txn.commit();
+
+            total_removed += expired.len();
+        }
+
+        total_removed
+    }
 }
 
 #[cfg(test)]

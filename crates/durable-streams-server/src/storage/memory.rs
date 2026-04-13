@@ -518,6 +518,25 @@ impl Storage for InMemoryStorage {
 
         Some(stream.notify.subscribe())
     }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        let mut streams = self.streams.write().expect("streams lock poisoned");
+        let mut expired = Vec::new();
+
+        for (name, stream_arc) in streams.iter() {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&stream.config) {
+                expired.push((name.clone(), stream.total_bytes));
+            }
+        }
+
+        for (name, bytes) in &expired {
+            streams.remove(name);
+            self.saturating_sub_total_bytes(*bytes);
+        }
+
+        expired.len()
+    }
 }
 
 #[cfg(test)]

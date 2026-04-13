@@ -193,6 +193,14 @@ impl Storage for TestStorage {
             Self::Acid(inner) => inner.subscribe(name),
         }
     }
+
+    fn cleanup_expired_streams(&self) -> usize {
+        match self {
+            Self::Memory(inner) => inner.cleanup_expired_streams(),
+            Self::File(inner) => inner.cleanup_expired_streams(),
+            Self::Acid(inner) => inner.cleanup_expired_streams(),
+        }
+    }
 }
 
 impl TestStorage {
