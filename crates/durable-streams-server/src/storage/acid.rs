@@ -1078,52 +1078,46 @@ impl Storage for AcidStorage {
 
         for shard in &self.shards {
             // Read pass: find expired stream names and their byte totals.
-            let expired = match shard.db.begin_read() {
-                Ok(txn) => {
-                    let streams = match txn.open_table(STREAMS) {
-                        Ok(t) => t,
-                        Err(_) => continue,
-                    };
-                    let mut expired = Vec::new();
-                    let iter = match streams.iter() {
-                        Ok(it) => it,
-                        Err(_) => continue,
-                    };
-                    for item in iter {
-                        let (key, value) = match item {
-                            Ok(kv) => kv,
-                            Err(_) => continue,
-                        };
-                        let name = key.value().to_string();
-                        let meta: StoredStreamMeta = match serde_json::from_slice(value.value()) {
-                            Ok(m) => m,
-                            Err(_) => continue,
-                        };
-                        if super::is_stream_expired(&meta.config) {
-                            expired.push((name, meta.total_bytes));
-                        }
-                    }
-                    expired
-                }
-                Err(_) => continue,
+            let Ok(read_txn) = shard.db.begin_read() else {
+                continue;
             };
+            let Ok(streams_table) = read_txn.open_table(STREAMS) else {
+                continue;
+            };
+            let Ok(iter) = streams_table.iter() else {
+                continue;
+            };
+
+            let mut expired = Vec::new();
+            for item in iter {
+                let Ok((key, value)) = item else {
+                    continue;
+                };
+                let name = key.value().to_string();
+                let Ok(meta) = serde_json::from_slice::<StoredStreamMeta>(value.value()) else {
+                    continue;
+                };
+                if super::is_stream_expired(&meta.config) {
+                    expired.push((name, meta.total_bytes));
+                }
+            }
+
+            drop(streams_table);
+            drop(read_txn);
 
             if expired.is_empty() {
                 continue;
             }
 
             // Write pass: delete expired streams.
-            let txn = match Self::begin_write_txn(&shard.db) {
-                Ok(t) => t,
-                Err(_) => continue,
+            let Ok(txn) = Self::begin_write_txn(&shard.db) else {
+                continue;
             };
-            let mut streams = match txn.open_table(STREAMS) {
-                Ok(t) => t,
-                Err(_) => continue,
+            let Ok(mut streams) = txn.open_table(STREAMS) else {
+                continue;
             };
-            let mut messages = match txn.open_table(MESSAGES) {
-                Ok(t) => t,
-                Err(_) => continue,
+            let Ok(mut messages) = txn.open_table(MESSAGES) else {
+                continue;
             };
 
             for (name, bytes) in &expired {
