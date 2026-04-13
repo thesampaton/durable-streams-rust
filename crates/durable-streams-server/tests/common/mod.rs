@@ -386,6 +386,7 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
         storage,
         &config,
         Some(Arc::clone(&ready)),
+        tokio_util::sync::CancellationToken::new(),
     );
 
     tokio::spawn(async move {
@@ -397,6 +398,45 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     (format!("http://127.0.0.1:{port}"), port, ready)
+}
+
+/// Spawn a test server with a shutdown token for graceful drain testing.
+///
+/// Returns `(base_url, port, shutdown_token)`.
+pub async fn spawn_test_server_with_shutdown(
+) -> (String, u16, tokio_util::sync::CancellationToken) {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let config = Config {
+        long_poll_timeout: Duration::from_secs(30),
+        ..Config::default()
+    };
+    let storage = Arc::new(InMemoryStorage::new(
+        config.max_memory_bytes,
+        config.max_stream_bytes,
+    ));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind test server");
+    let addr = listener.local_addr().expect("Failed to get local addr");
+    let port = addr.port();
+
+    let app = durable_streams_server::router::build_router_with_ready(
+        storage,
+        &config,
+        None,
+        shutdown.clone(),
+    );
+
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("Test server failed");
+    });
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    (format!("http://127.0.0.1:{port}"), port, shutdown)
 }
 
 /// Create an HTTP client for testing

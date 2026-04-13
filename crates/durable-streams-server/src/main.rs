@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct CliArgs {
@@ -217,7 +218,13 @@ async fn run(config: Config) -> Result<(), String> {
 
 async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> Result<(), String> {
     let ready = Arc::new(AtomicBool::new(false));
-    let app = router::build_router_with_ready(storage, &runtime.config, Some(Arc::clone(&ready)));
+    let shutdown = CancellationToken::new();
+    let app = router::build_router_with_ready(
+        storage,
+        &runtime.config,
+        Some(Arc::clone(&ready)),
+        shutdown.clone(),
+    );
     let handle = Handle::new();
 
     // Storage is already initialised (new() is synchronous); mark ready.
@@ -238,6 +245,9 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("Shutdown signal received, beginning graceful drain");
+        // Cancel the token first so long-poll/SSE handlers drain cleanly,
+        // then trigger the HTTP server graceful shutdown.
+        shutdown.cancel();
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
