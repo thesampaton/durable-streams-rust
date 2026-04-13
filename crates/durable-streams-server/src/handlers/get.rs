@@ -1,16 +1,17 @@
 use crate::config::{LongPollTimeout, SseReconnectInterval};
 use crate::protocol::cursor;
-use crate::protocol::error::{Error, Result};
+use crate::protocol::error::Error;
 use crate::protocol::headers::names;
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
+use crate::protocol::problem::{Result, request_instance};
 use crate::protocol::sse::{self, ControlPayload};
 use crate::router::ShutdownToken;
 use crate::storage::{ReadResult, Storage};
 use axum::{
     Extension,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{OriginalUri, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -55,71 +56,80 @@ pub struct ReadQuery {
 pub async fn read_stream<S: Storage + 'static>(
     State(storage): State<Arc<S>>,
     Path(name): Path<String>,
+    original_uri: OriginalUri,
     Query(query): Query<ReadQuery>,
     Extension(LongPollTimeout(timeout)): Extension<LongPollTimeout>,
     Extension(SseReconnectInterval(reconnect_interval_secs)): Extension<SseReconnectInterval>,
     Extension(ShutdownToken(shutdown)): Extension<ShutdownToken>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    // Resolve offset: live modes require explicit offset, catch-up defaults to "-1"
-    let raw_offset = if let Some(ref live) = query.live {
-        match query.offset {
-            Some(ref o) => o.clone(),
-            None => {
-                return Err(Error::InvalidHeader {
-                    header: "offset".to_string(),
-                    reason: format!("offset query parameter is required for live={live} mode"),
-                });
+    let instance = request_instance(&original_uri);
+    let result = async {
+        // Resolve offset: live modes require explicit offset, catch-up defaults to "-1"
+        let raw_offset = if let Some(ref live) = query.live {
+            match query.offset {
+                Some(ref o) => o.clone(),
+                None => {
+                    return Err(Error::InvalidHeader {
+                        header: "offset".to_string(),
+                        reason: format!("offset query parameter is required for live={live} mode"),
+                    }
+                    .into());
+                }
             }
-        }
-    } else {
-        query.offset.clone().unwrap_or_else(|| "-1".to_string())
-    };
+        } else {
+            query.offset.clone().unwrap_or_else(|| "-1".to_string())
+        };
 
-    let offset = Offset::from_str(&raw_offset)?;
-    let metadata = storage.head(&name)?;
-    let content_type = metadata.config.content_type.clone();
+        let offset = Offset::from_str(&raw_offset)?;
+        let metadata = storage.head(&name)?;
+        let content_type = metadata.config.content_type.clone();
 
-    if let Some(ref live) = query.live {
-        match live.as_str() {
-            "long-poll" => {
-                let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
-                read_long_poll(
-                    &storage,
-                    &name,
+        if let Some(ref live) = query.live {
+            match live.as_str() {
+                "long-poll" => {
+                    let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+                    read_long_poll(
+                        &storage,
+                        &name,
+                        &offset,
+                        &raw_offset,
+                        if_none_match,
+                        &content_type,
+                        timeout,
+                        shutdown,
+                    )
+                    .await
+                }
+                "sse" => read_sse(
+                    storage,
+                    name,
                     &offset,
-                    &raw_offset,
-                    if_none_match,
                     &content_type,
-                    timeout,
+                    reconnect_interval_secs,
                     shutdown,
-                )
-                .await
+                ),
+                other => Err(Error::InvalidHeader {
+                    header: "live".to_string(),
+                    reason: format!("unsupported live mode: {other}"),
+                }
+                .into()),
             }
-            "sse" => read_sse(
-                storage,
-                name,
+        } else {
+            let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+            read_catch_up(
+                &storage,
+                &name,
                 &offset,
+                &raw_offset,
+                if_none_match,
                 &content_type,
-                reconnect_interval_secs,
-                shutdown,
-            ),
-            other => Err(Error::InvalidHeader {
-                header: "live".to_string(),
-                reason: format!("unsupported live mode: {other}"),
-            }),
+            )
         }
-    } else {
-        let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
-        read_catch_up(
-            &storage,
-            &name,
-            &offset,
-            &raw_offset,
-            if_none_match,
-            &content_type,
-        )
     }
+    .await;
+
+    result.map_err(|problem| problem.with_instance(instance))
 }
 
 /// Catch-up mode: immediate read of all available data.

@@ -25,6 +25,13 @@ Likewise, the repository does not yet define shared-core extraction, release
 automation, or packaging policy beyond the minimum needed to make the workspace
 compile, test, and evolve cleanly.
 
+One concrete seam now exists: RFC 9457-style problem details and related error
+code mapping currently live in `durable-streams-server::protocol::problem`.
+That remains server-local for now because the client does not yet parse the
+same wire type directly, but it is the most likely candidate for future
+workspace extraction if shared problem serialization/deserialization becomes
+real code instead of anticipation.
+
 ## Planned Evolution
 
 1. Continue evolving the Rust client inside `crates/durable-streams-client`.

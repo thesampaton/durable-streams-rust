@@ -46,3 +46,16 @@ Verified on **2026-04-06**:
 - The in-tree server crate is currently a lift-and-shift of published
   `durable-streams-server` `0.1.3`, so server maintenance should distinguish
   between migration-preservation work and intentional semantic change.
+
+## Local Compatibility Notes
+
+- Server-side `4xx`/`5xx` responses use RFC 9457-style
+  `application/problem+json` payloads with machine-readable `code` values.
+- The shared upstream error-code table is not yet broad enough for every
+  Durable Streams server case, so the workspace currently uses local extension
+  codes for server-specific states such as `STREAM_CLOSED`,
+  `PRODUCER_EPOCH_FENCED`, and `INTERNAL_ERROR`.
+- Request telemetry field names intentionally mirror OpenTelemetry semantic
+  conventions and Elastic-style dotted keys through `tracing`, so they can be
+  mapped cleanly into a future OpenTelemetry exporter without renaming the
+  server-side instrumentation surface.

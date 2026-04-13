@@ -1,7 +1,7 @@
-use crate::protocol::error::Result;
+use crate::protocol::problem::{Result, request_instance};
 use crate::storage::Storage;
 use axum::{
-    extract::{Path, State},
+    extract::{OriginalUri, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -18,9 +18,15 @@ use std::sync::Arc;
 pub async fn delete_stream<S: Storage>(
     State(storage): State<Arc<S>>,
     Path(name): Path<String>,
+    original_uri: OriginalUri,
 ) -> Result<Response> {
-    // Delete stream (idempotent - no error if doesn't exist)
-    storage.delete(&name)?;
+    let instance = request_instance(&original_uri);
+    let result = (|| -> Result<Response> {
+        // Delete stream (idempotent - no error if doesn't exist)
+        storage.delete(&name)?;
 
-    Ok(StatusCode::NO_CONTENT.into_response())
+        Ok(StatusCode::NO_CONTENT.into_response())
+    })();
+
+    result.map_err(|problem| problem.with_instance(instance))
 }

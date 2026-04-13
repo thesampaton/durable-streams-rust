@@ -7,7 +7,7 @@
 mod common;
 
 use bytes::Bytes;
-use common::{spawn_test_server_with_readyz, test_client};
+use common::{read_problem, spawn_test_server_with_readyz, test_client};
 use durable_streams_server::config::AcidBackend;
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
@@ -252,8 +252,12 @@ async fn readyz_returns_503_when_not_ready() {
         503,
         "readyz should return 503 when not ready"
     );
-    let body = resp.text().await.unwrap();
-    assert_eq!(body, "not ready");
+    let problem = read_problem(resp).await;
+    assert_eq!(problem.problem_type, "/errors/unavailable");
+    assert_eq!(problem.title, "Service Unavailable");
+    assert_eq!(problem.status, 503);
+    assert_eq!(problem.code, "UNAVAILABLE");
+    assert_eq!(problem.instance.as_deref(), Some("/readyz"));
 }
 
 #[tokio::test]

@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when the server shuts down, returning 204 / ending the stream instead of
   resetting the connection. Controlled via a `CancellationToken` passed to
   `build_router_with_ready()`.
+- Request telemetry middleware that records `tracing` fields using
+  OpenTelemetry/ECS-style dotted names (`ds.*`, `http.*`, `server.address`,
+  `error.*`) so logs can map cleanly into a future OpenTelemetry pipeline.
+- Configurable protocol mount path via `http.stream_base_path` /
+  `DS_HTTP__STREAM_BASE_PATH`, while keeping `/v1/stream` as the default.
+
+### Changed
+
+- Server `4xx`/`5xx` responses now use RFC 9457-style
+  `application/problem+json` payloads with machine-readable error codes and
+  request `instance` paths.
+- Producer fencing, sequence-gap, readiness, and closed-stream failures retain
+  their protocol headers while now returning structured problem details bodies.
 
 ### Fixed
 

@@ -1,6 +1,6 @@
 mod common;
 
-use common::{spawn_test_server, test_client, unique_stream_name};
+use common::{read_problem, spawn_test_server, test_client, unique_stream_name};
 
 /// Validates spec: 02-append-semantics.md#append-data
 ///
@@ -368,6 +368,14 @@ async fn test_append_to_closed_stream_returns_409() {
         .to_str()
         .unwrap();
     assert_eq!(closed, "true");
+
+    let problem = read_problem(response).await;
+    let instance = format!("/v1/stream/{stream_name}");
+    assert_eq!(problem.problem_type, "/errors/stream-closed");
+    assert_eq!(problem.title, "Stream Closed");
+    assert_eq!(problem.status, 409);
+    assert_eq!(problem.code, "STREAM_CLOSED");
+    assert_eq!(problem.instance.as_deref(), Some(instance.as_str()));
 }
 
 /// Validates spec: 02-append-semantics.md#append-data
@@ -389,4 +397,12 @@ async fn test_append_to_nonexistent_stream_returns_404() {
         .unwrap();
 
     assert_eq!(response.status(), 404, "Expected 404 Not Found");
+
+    let problem = read_problem(response).await;
+    let instance = format!("/v1/stream/{stream_name}");
+    assert_eq!(problem.problem_type, "/errors/not-found");
+    assert_eq!(problem.title, "Stream Not Found");
+    assert_eq!(problem.status, 404);
+    assert_eq!(problem.code, "NOT_FOUND");
+    assert_eq!(problem.instance.as_deref(), Some(instance.as_str()));
 }
