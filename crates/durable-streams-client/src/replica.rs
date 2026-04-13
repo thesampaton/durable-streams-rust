@@ -87,7 +87,7 @@ impl ReadReplica {
 
         let response = self
             .client
-            .read(self.journal.stream().path.as_str(), &request)
+            .read_raw(self.journal.stream().path.as_str(), &request)
             .await?;
         let next_offset = response.next_offset.clone();
         let up_to_date = response.up_to_date;
