@@ -359,15 +359,9 @@ impl AcidStorage {
     }
 
     fn notifier_sender(&self, name: &str) -> broadcast::Sender<()> {
-        if let Some(sender) = self
-            .notifiers
-            .read()
-            .expect("notifiers lock poisoned")
-            .get(name)
-        {
-            return sender.clone();
-        }
-
+        // Use a single write lock with entry() to avoid a TOCTOU race where
+        // drop_notifier() could remove the sender between a read-lock miss
+        // and the subsequent write-lock acquire.
         let mut guard = self.notifiers.write().expect("notifiers lock poisoned");
         guard
             .entry(name.to_string())
