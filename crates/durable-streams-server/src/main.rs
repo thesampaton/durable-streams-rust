@@ -7,6 +7,7 @@ use durable_streams_server::{
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -215,15 +216,21 @@ async fn run(config: Config) -> Result<(), String> {
 }
 
 async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> Result<(), String> {
-    let app = router::build_router(storage, &runtime.config);
+    let ready = Arc::new(AtomicBool::new(false));
+    let app = router::build_router_with_ready(storage, &runtime.config, Some(Arc::clone(&ready)));
     let handle = Handle::new();
+
+    // Storage is already initialised (new() is synchronous); mark ready.
+    ready.store(true, Ordering::Release);
 
     tracing::info!("Server listening on {}", runtime.addr);
     if runtime.config.tls_enabled() {
         tracing::info!("Health check: https://{}/healthz", runtime.addr);
+        tracing::info!("Readiness:    https://{}/readyz", runtime.addr);
         tracing::info!("Protocol base: https://{}/v1/stream/", runtime.addr);
     } else {
         tracing::info!("Health check: http://{}/healthz", runtime.addr);
+        tracing::info!("Readiness:    http://{}/readyz", runtime.addr);
         tracing::info!("Protocol base: http://{}/v1/stream/", runtime.addr);
     }
 

@@ -7,18 +7,44 @@ use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;
 use axum::{Extension, Router, middleware as axum_middleware, routing::get};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-/// Build the application router with storage state
+/// Build the application router with storage state.
 ///
 /// Routes:
-/// - GET /healthz - Health check (outside protocol namespace)
-/// - /v1/stream/* - Protocol routes
+/// - `GET /healthz`  – Liveness probe (always 200)
+/// - `GET /readyz`   – Readiness probe (200 when `ready` is true, 503 otherwise)
+/// - `/v1/stream/*`  – Protocol routes
+///
+/// The `ready` flag is typically set to `true` after storage initialization
+/// completes. Pass `None` to omit the readiness endpoint entirely (the
+/// health endpoint is always present).
 pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> Router {
-    Router::new()
+    build_router_with_ready(storage, config, None)
+}
+
+/// Build the router with an explicit readiness flag.
+///
+/// When `ready` is `Some`, the `/readyz` endpoint is registered and returns
+/// 200 only after the flag is set to `true`. When `None`, the endpoint is
+/// not registered (backwards-compatible).
+pub fn build_router_with_ready<S: Storage + 'static>(
+    storage: Arc<S>,
+    config: &Config,
+    ready: Option<Arc<AtomicBool>>,
+) -> Router {
+    let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))
-        .nest("/v1/stream", protocol_routes(storage, config))
-        .layer(cors_layer(&config.cors_origins))
+        .nest("/v1/stream", protocol_routes(storage, config));
+
+    if let Some(flag) = ready {
+        app = app
+            .route("/readyz", get(handlers::health::readiness_check))
+            .layer(Extension(flag));
+    }
+
+    app.layer(cors_layer(&config.cors_origins))
 }
 
 /// Build a CORS layer from the configured origins string.
