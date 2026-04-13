@@ -1,10 +1,11 @@
 use crate::protocol::{
     headers::names,
     problem::{Result, request_instance},
+    stream_name::StreamName,
 };
 use crate::storage::Storage;
 use axum::{
-    extract::{OriginalUri, Path, State},
+    extract::{OriginalUri, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -25,7 +26,7 @@ use std::sync::Arc;
 /// which should never happen with valid inputs.
 pub async fn stream_metadata<S: Storage>(
     State(storage): State<Arc<S>>,
-    Path(name): Path<String>,
+    StreamName(name): StreamName,
     original_uri: OriginalUri,
 ) -> Result<Response> {
     let instance = request_instance(&original_uri);

@@ -113,6 +113,10 @@ pub enum Error {
     #[error("Invalid header value for {header}: {reason}")]
     InvalidHeader { header: String, reason: String },
 
+    /// Invalid stream name (400)
+    #[error("Invalid stream name: {0}")]
+    InvalidStreamName(String),
+
     /// Stream-Seq ordering violation (409)
     #[error("Stream-Seq ordering violation: last={last}, received={received}")]
     SeqOrderingViolation { last: String, received: String },
@@ -154,6 +158,7 @@ impl Error {
             | Self::ConflictingExpiration
             | Self::InvalidJson(_)
             | Self::InvalidHeader { .. }
+            | Self::InvalidStreamName(_)
             | Self::EmptyBody
             | Self::EmptyArray => StatusCode::BAD_REQUEST,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -224,6 +229,13 @@ impl Error {
                 "Bad Request",
                 self.status_code(),
                 "BAD_REQUEST",
+            )
+            .with_detail(self.to_string()),
+            Self::InvalidStreamName(_) => ProblemDetails::new(
+                "/errors/invalid-stream-name",
+                "Invalid Stream Name",
+                self.status_code(),
+                "INVALID_STREAM_NAME",
             )
             .with_detail(self.to_string()),
             Self::InvalidJson(_) => ProblemDetails::new(

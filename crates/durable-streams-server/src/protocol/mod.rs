@@ -12,3 +12,4 @@ pub mod offset;
 pub mod problem;
 pub mod producer;
 pub(crate) mod sse;
+pub(crate) mod stream_name;

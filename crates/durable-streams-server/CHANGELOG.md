@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.1] - 2026-04-13
+
+### Added
+
+- Hierarchical stream names — stream names containing `/` (e.g.
+  `slides/abc123`, `org/project/resource`) now work as expected, matching
+  the Node.js reference server behaviour.
+- Configurable stream name limits via `limits.max_stream_name_bytes` /
+  `DS_LIMITS__MAX_STREAM_NAME_BYTES` (default 1024) and
+  `limits.max_stream_name_segments` / `DS_LIMITS__MAX_STREAM_NAME_SEGMENTS`
+  (default 8) to bound name length and nesting depth.
+
+### Fixed
+
+- Stream names containing `/` no longer return 404. The route wildcard was
+  single-segment (`/{name}`) and now uses a catch-all (`/{*name}`).
+- Stream names with `.` or `..` segments, empty segments, or trailing
+  slashes are now rejected with a 400 `INVALID_STREAM_NAME` problem
+  response instead of being silently accepted.
+
 ## [0.2.0-beta.0] - 2026-04-13
 
 ### Added
@@ -109,6 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude non-essential files from crates.io package.
 - Add keywords and categories for crates.io discoverability.
 
+[0.2.0-beta.1]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0-beta.0...v0.2.0-beta.1
 [0.2.0-beta.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0...v0.2.0-beta.0
 [0.2.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.2...v0.1.3

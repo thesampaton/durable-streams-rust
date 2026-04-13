@@ -6,6 +6,8 @@ sse_reconnect_interval_secs = 60
 [limits]
 max_memory_bytes = 104857600
 max_stream_bytes = 10485760
+max_stream_name_bytes = 1024
+max_stream_name_segments = 8
 
 [http]
 cors_origins = "*"
