@@ -83,11 +83,7 @@ impl InMemoryStorage {
         }
     }
 
-    /// Get current total memory usage
-    ///
-    /// # Panics
-    ///
-    /// Panics if the `total_bytes` lock is poisoned (which indicates a panic while holding the lock).
+    /// Return the currently tracked total payload bytes across all streams.
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         self.total_bytes.load(Ordering::Acquire)
