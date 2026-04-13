@@ -54,7 +54,11 @@ Verified on **2026-04-06**:
 - The shared upstream error-code table is not yet broad enough for every
   Durable Streams server case, so the workspace currently uses local extension
   codes for server-specific states such as `STREAM_CLOSED`,
-  `PRODUCER_EPOCH_FENCED`, and `INTERNAL_ERROR`.
+  `PRODUCER_EPOCH_FENCED`, `INTERNAL_ERROR`, and `INSUFFICIENT_STORAGE` (507).
+- Storage-originated temporary failures may return HTTP `503 Service Unavailable`
+  with RFC 9457 problem code `UNAVAILABLE` plus `Retry-After`, even when the
+  upstream protocol text only standardises the problem shape rather than a full
+  storage-failure taxonomy.
 - Request telemetry field names intentionally mirror OpenTelemetry semantic
   conventions and Elastic-style dotted keys through `tracing`, so they can be
   mapped cleanly into a future OpenTelemetry exporter without renaming the

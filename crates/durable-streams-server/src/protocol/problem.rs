@@ -73,6 +73,11 @@ pub struct ProblemTelemetry {
     pub code: String,
     pub title: String,
     pub detail: Option<String>,
+    pub error_class: Option<String>,
+    pub storage_backend: Option<String>,
+    pub storage_operation: Option<String>,
+    pub internal_detail: Option<String>,
+    pub retry_after_secs: Option<u32>,
 }
 
 impl From<&ProblemDetails> for ProblemTelemetry {
@@ -82,6 +87,11 @@ impl From<&ProblemDetails> for ProblemTelemetry {
             code: problem.code.clone(),
             title: problem.title.clone(),
             detail: problem.detail.clone(),
+            error_class: None,
+            storage_backend: None,
+            storage_operation: None,
+            internal_detail: None,
+            retry_after_secs: None,
         }
     }
 }
@@ -91,6 +101,7 @@ impl From<&ProblemDetails> for ProblemTelemetry {
 pub struct ProblemResponse {
     problem: ProblemDetails,
     headers: HeaderMap,
+    telemetry: Option<ProblemTelemetry>,
 }
 
 /// Response result alias for handlers that emit structured problem details.
@@ -103,6 +114,7 @@ impl ProblemResponse {
         Self {
             problem,
             headers: HeaderMap::new(),
+            telemetry: None,
         }
     }
 
@@ -129,6 +141,13 @@ impl ProblemResponse {
         self.headers.insert(key, value);
         self
     }
+
+    /// Attach explicit telemetry metadata that differs from the public problem payload.
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: ProblemTelemetry) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
 }
 
 /// Convert the actual request target into a relative `instance` reference.
@@ -146,7 +165,9 @@ impl IntoResponse for ProblemResponse {
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let telemetry = ProblemTelemetry::from(&self.problem);
+        let telemetry = self
+            .telemetry
+            .unwrap_or_else(|| ProblemTelemetry::from(&self.problem));
         let body = match serde_json::to_vec(&self.problem) {
             Ok(body) => body,
             Err(_) => br#"{"type":"/errors/internal","title":"Internal Server Error","status":500,"code":"INTERNAL_ERROR"}"#.to_vec(),

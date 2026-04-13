@@ -361,7 +361,7 @@ pub async fn spawn_test_server_acid() -> (String, u16) {
     spawn_test_server_with_storage(storage, config).await
 }
 
-async fn spawn_test_server_with_storage<S>(storage: Arc<S>, config: Config) -> (String, u16)
+pub async fn spawn_test_server_with_storage<S>(storage: Arc<S>, config: Config) -> (String, u16)
 where
     S: Storage + 'static,
 {

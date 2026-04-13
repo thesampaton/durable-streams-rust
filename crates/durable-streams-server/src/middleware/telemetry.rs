@@ -78,9 +78,13 @@ fn request_span(
         "ds.live_mode" = field::Empty,
         "ds.stream_id" = field::Empty,
         "ds.error_code" = field::Empty,
+        "ds.error_class" = field::Empty,
+        "ds.storage.backend" = field::Empty,
+        "ds.storage.operation" = field::Empty,
         "http.request.method" = method,
         "http.route" = field::Empty,
         "http.response.status_code" = field::Empty,
+        "http.response.header.retry_after" = field::Empty,
         "url.path" = path,
         "url.query" = field::Empty,
         "server.address" = field::Empty,
@@ -129,10 +133,26 @@ fn emit_response_event(span: &Span, response: &Response, elapsed: std::time::Dur
 
     if let Some(problem) = response.extensions().get::<ProblemTelemetry>() {
         span.record("ds.error_code", problem.code.as_str());
+        if let Some(error_class) = &problem.error_class {
+            span.record("ds.error_class", error_class.as_str());
+        }
+        if let Some(storage_backend) = &problem.storage_backend {
+            span.record("ds.storage.backend", storage_backend.as_str());
+        }
+        if let Some(storage_operation) = &problem.storage_operation {
+            span.record("ds.storage.operation", storage_operation.as_str());
+        }
+        if let Some(retry_after_secs) = problem.retry_after_secs {
+            span.record("http.response.header.retry_after", retry_after_secs);
+        }
         span.record("error.type", problem.problem_type.as_str());
         span.record(
             "error.message",
-            problem.detail.as_deref().unwrap_or(problem.title.as_str()),
+            problem
+                .internal_detail
+                .as_deref()
+                .or(problem.detail.as_deref())
+                .unwrap_or(problem.title.as_str()),
         );
     } else if response.status().is_server_error() {
         span.record("error.type", "server_error");

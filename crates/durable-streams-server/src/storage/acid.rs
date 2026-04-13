@@ -15,7 +15,11 @@ use crate::protocol::producer::ProducerHeaders;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use redb::backends::InMemoryBackend;
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, Table, TableDefinition};
+use redb::{
+    CommitError, Database, DatabaseError, Durability, ReadableDatabase, ReadableTable,
+    SetDurabilityError, StorageError as RedbStorageError, Table, TableDefinition, TableError,
+    TransactionError,
+};
 use seahash::hash;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,6 +27,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -31,6 +36,9 @@ const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new(
 
 const LAYOUT_FORMAT_VERSION: u32 = 1;
 const HASH_POLICY: &str = "seahash-v1";
+/// Retry backoff for startup-only operations (shard database open).
+/// Not used on the request path — transient errors there propagate as 503.
+const STARTUP_RETRY_BACKOFF_MS: [u64; 3] = [10, 25, 50];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LayoutManifest {
@@ -129,12 +137,7 @@ impl AcidStorage {
         let mut shards = Vec::with_capacity(shard_count);
         for idx in 0..shard_count {
             let shard_path = acid_dir.join(format!("shard_{idx:02x}.redb"));
-            let db = Database::builder().create(&shard_path).map_err(|e| {
-                Self::storage_err(
-                    format!("failed to open shard database {}", shard_path.display()),
-                    e,
-                )
-            })?;
+            let db = Self::open_shard_database(&shard_path)?;
             Self::ensure_schema(&db)?;
             shards.push(AcidShard { db });
         }
@@ -174,8 +177,67 @@ impl AcidStorage {
         Ok(())
     }
 
-    fn storage_err(context: impl Into<String>, err: impl std::fmt::Display) -> Error {
-        Error::Storage(format!("{}: {err}", context.into()))
+    fn storage_err<E: ClassifyError>(context: impl Into<String>, err: E) -> Error {
+        let context = context.into();
+        let detail = format!("{context}: {err}");
+        err.into_storage_error(context, detail)
+    }
+
+    fn classify_redb_storage_error(
+        context: String,
+        err: &RedbStorageError,
+        detail: String,
+    ) -> Error {
+        match err {
+            RedbStorageError::Io(io_err) => {
+                Error::classify_io_failure("acid", context, detail, io_err)
+            }
+            RedbStorageError::DatabaseClosed | RedbStorageError::PreviousIo => {
+                Error::storage_unavailable("acid", context, detail)
+            }
+            RedbStorageError::ValueTooLarge(_) => {
+                Error::storage_insufficient("acid", context, detail)
+            }
+            RedbStorageError::Corrupted(_) | RedbStorageError::LockPoisoned(_) => {
+                Error::Storage(detail)
+            }
+            _ => {
+                warn!(error = %err, "unhandled redb StorageError variant");
+                Error::Storage(detail)
+            }
+        }
+    }
+
+    /// Open a shard database with retry. This is startup-only code — the
+    /// `thread::sleep` backoff is acceptable here since it runs once per shard
+    /// during initialization, never on the request path.
+    fn open_shard_database(shard_path: &Path) -> Result<Database> {
+        let context = format!("failed to open shard database {}", shard_path.display());
+        let mut delays = STARTUP_RETRY_BACKOFF_MS.into_iter();
+
+        loop {
+            match Database::builder().create(shard_path) {
+                Ok(db) => return Ok(db),
+                Err(err) if Self::is_retryable_database_open(&err) => {
+                    if let Some(delay_ms) = delays.next() {
+                        std::thread::sleep(Duration::from_millis(delay_ms));
+                        continue;
+                    }
+                    return Err(Self::storage_err(context, err));
+                }
+                Err(err) => return Err(Self::storage_err(context, err)),
+            }
+        }
+    }
+
+    fn is_retryable_database_open(err: &DatabaseError) -> bool {
+        match err {
+            DatabaseError::DatabaseAlreadyOpen => true,
+            DatabaseError::Storage(RedbStorageError::Io(io_err)) => {
+                Error::is_retryable_io_error(io_err)
+            }
+            _ => false,
+        }
     }
 
     fn acid_dir(root_dir: &Path) -> PathBuf {
@@ -496,6 +558,107 @@ impl AcidStorage {
             .map_err(|e| Self::storage_err("failed to commit startup cleanup", e))?;
 
         Ok(live_bytes)
+    }
+}
+
+/// Type-safe error classification trait for redb and IO error types.
+///
+/// Replaces the previous `Any`-based downcasting dispatcher with compile-time
+/// dispatch. Each implementation maps the concrete error type into the correct
+/// [`Error`] variant so that transient failures become 503, capacity failures
+/// become 507, and everything else maps to a generic 500.
+trait ClassifyError: std::fmt::Display {
+    fn into_storage_error(self, context: String, detail: String) -> Error;
+}
+
+impl ClassifyError for std::io::Error {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        Error::classify_io_failure("acid", context, detail, &self)
+    }
+}
+
+impl ClassifyError for DatabaseError {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        match &self {
+            DatabaseError::DatabaseAlreadyOpen => {
+                Error::storage_unavailable("acid", context, detail)
+            }
+            DatabaseError::Storage(storage_err) => {
+                AcidStorage::classify_redb_storage_error(context, storage_err, detail)
+            }
+            DatabaseError::RepairAborted | DatabaseError::UpgradeRequired(_) => {
+                Error::Storage(detail)
+            }
+            _ => {
+                warn!(error = %self, "unhandled redb DatabaseError variant");
+                Error::Storage(detail)
+            }
+        }
+    }
+}
+
+impl ClassifyError for TransactionError {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        match &self {
+            TransactionError::Storage(storage_err) => {
+                AcidStorage::classify_redb_storage_error(context, storage_err, detail)
+            }
+            TransactionError::ReadTransactionStillInUse(_) => Error::Storage(detail),
+            _ => {
+                warn!(error = %self, "unhandled redb TransactionError variant");
+                Error::Storage(detail)
+            }
+        }
+    }
+}
+
+impl ClassifyError for TableError {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        match &self {
+            TableError::Storage(storage_err) => {
+                AcidStorage::classify_redb_storage_error(context, storage_err, detail)
+            }
+            TableError::TableTypeMismatch { .. }
+            | TableError::TableIsMultimap(_)
+            | TableError::TableIsNotMultimap(_)
+            | TableError::TypeDefinitionChanged { .. }
+            | TableError::TableDoesNotExist(_)
+            | TableError::TableExists(_)
+            | TableError::TableAlreadyOpen(_, _) => Error::Storage(detail),
+            _ => {
+                warn!(error = %self, "unhandled redb TableError variant");
+                Error::Storage(detail)
+            }
+        }
+    }
+}
+
+impl ClassifyError for CommitError {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        if let CommitError::Storage(storage_err) = &self {
+            AcidStorage::classify_redb_storage_error(context, storage_err, detail)
+        } else {
+            warn!(error = %self, "unhandled redb CommitError variant");
+            Error::Storage(detail)
+        }
+    }
+}
+
+impl ClassifyError for RedbStorageError {
+    fn into_storage_error(self, context: String, detail: String) -> Error {
+        AcidStorage::classify_redb_storage_error(context, &self, detail)
+    }
+}
+
+impl ClassifyError for SetDurabilityError {
+    fn into_storage_error(self, _context: String, detail: String) -> Error {
+        Error::Storage(detail)
+    }
+}
+
+impl ClassifyError for serde_json::Error {
+    fn into_storage_error(self, _context: String, detail: String) -> Error {
+        Error::Storage(detail)
     }
 }
 
