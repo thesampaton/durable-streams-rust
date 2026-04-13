@@ -12,7 +12,7 @@ use common::{StorageTestBackend, create_test_storage, create_test_storage_with_l
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -86,14 +86,24 @@ fn concurrent_readers_and_writers_no_torn_reads() {
                     let result = s.read("s", &Offset::start());
                     match result {
                         Ok(read) => {
-                            // Every read must return a valid, consistent prefix
-                            // with messages in order.
-                            let mut prev_seq = None;
-                            for (idx, _msg) in read.messages.iter().enumerate() {
-                                if let Some(prev) = prev_seq {
-                                    assert!(idx > prev, "messages out of order at index {idx}");
+                            // Every read must return a valid, consistent
+                            // interleaving: each writer's messages appear in
+                            // their original order.
+                            let mut last_seq_per_writer: HashMap<String, u32> = HashMap::new();
+                            for msg in &read.messages {
+                                let text = std::str::from_utf8(msg).expect("valid utf-8");
+                                // Messages have the format "w{id}-m{seq}"
+                                let (writer, seq_str) = text
+                                    .split_once("-m")
+                                    .expect("message should match w{id}-m{seq}");
+                                let seq: u32 = seq_str.parse().expect("seq should be a u32");
+                                if let Some(&prev) = last_seq_per_writer.get(writer) {
+                                    assert!(
+                                        seq > prev,
+                                        "writer {writer} messages out of order: {prev} then {seq}"
+                                    );
                                 }
-                                prev_seq = Some(idx);
+                                last_seq_per_writer.insert(writer.to_string(), seq);
                             }
                         }
                         Err(e) => {

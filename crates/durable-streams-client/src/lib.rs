@@ -112,7 +112,10 @@ pub use ingest::{JsonInput, JsonInputFormat, load_json_input, parse_json_input};
 pub use journal::{
     JournalDirection, JournalRecord, JournalStreamIdentity, JsonJournal, ProducerJournalProgress,
 };
-pub use model::{LiveMode, ReadPayload, RequestOptions, RetryOptions, SubscriptionEvent};
+pub use model::{
+    AppendRequest, CreateStreamRequest, LiveMode, ReadPayload, ReadRequest, RequestOptions,
+    RetryOptions, SubscriptionEvent,
+};
 pub use replica::{ReadReplica, ReadReplicaResult};
 pub use types::{
     AppendOutcome, CloseOutcome, CreateOutcome, Offset, ReadPage, StreamChunk, StreamInfo,

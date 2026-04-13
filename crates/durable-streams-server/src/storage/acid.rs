@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
+use tracing::warn;
 
 const STREAMS: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new("messages");
@@ -1071,7 +1072,7 @@ impl Storage for AcidStorage {
         let mut total_removed = 0;
 
         for shard in &self.shards {
-            // Read pass: find expired stream names and their byte totals.
+            // Read pass: find candidate expired stream names.
             let Ok(read_txn) = shard.db.begin_read() else {
                 continue;
             };
@@ -1082,7 +1083,7 @@ impl Storage for AcidStorage {
                 continue;
             };
 
-            let mut expired = Vec::new();
+            let mut candidates: Vec<String> = Vec::new();
             for item in iter {
                 let Ok((key, value)) = item else {
                     continue;
@@ -1092,18 +1093,18 @@ impl Storage for AcidStorage {
                     continue;
                 };
                 if super::is_stream_expired(&meta.config) {
-                    expired.push((name, meta.total_bytes));
+                    candidates.push(name);
                 }
             }
 
             drop(streams_table);
             drop(read_txn);
 
-            if expired.is_empty() {
+            if candidates.is_empty() {
                 continue;
             }
 
-            // Write pass: delete expired streams.
+            // Write pass: re-verify expiration and delete confirmed streams.
             let Ok(txn) = Self::begin_write_txn(&shard.db) else {
                 continue;
             };
@@ -1114,18 +1115,40 @@ impl Storage for AcidStorage {
                 continue;
             };
 
-            for (name, bytes) in &expired {
+            let mut committed = Vec::new();
+            for name in &candidates {
+                // Re-check expiration inside the write transaction to avoid a
+                // TOCTOU race with concurrent creates.
+                let meta = streams
+                    .get(name.as_str())
+                    .ok()
+                    .flatten()
+                    .and_then(|v| serde_json::from_slice::<StoredStreamMeta>(v.value()).ok());
+                let Some(meta) = meta else { continue };
+                if !super::is_stream_expired(&meta.config) {
+                    continue;
+                }
+
                 let _ = Self::delete_stream_messages(&mut messages, name);
                 let _ = streams.remove(name.as_str());
-                self.rollback_total_bytes(*bytes);
-                self.drop_notifier(name);
+                committed.push((name.clone(), meta.total_bytes));
             }
 
             drop(messages);
             drop(streams);
-            let _ = txn.commit();
 
-            total_removed += expired.len();
+            match txn.commit() {
+                Ok(()) => {
+                    for (name, bytes) in &committed {
+                        self.rollback_total_bytes(*bytes);
+                        self.drop_notifier(name);
+                    }
+                    total_removed += committed.len();
+                }
+                Err(e) => {
+                    warn!(%e, "failed to commit expired stream cleanup");
+                }
+            }
         }
 
         total_removed
@@ -1473,6 +1496,6 @@ mod tests {
 
         let result = storage.append("s", Bytes::from(vec![0_u8; 20]), "text/plain");
         assert!(result.is_err());
-        assert!(storage.total_bytes() <= 50);
+        assert_eq!(storage.total_bytes(), 40);
     }
 }

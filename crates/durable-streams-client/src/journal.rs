@@ -141,6 +141,11 @@ impl JsonJournal {
             .read(true)
             .open(&path)?;
 
+        // Truncate any trailing partial writes so new appends start from a
+        // clean newline boundary. Without this, a partial record left by a
+        // crash would be concatenated with the next append, corrupting both.
+        file.set_len(replay.valid_bytes)?;
+
         Ok(Self {
             path,
             stream,
@@ -203,6 +208,11 @@ impl JsonJournal {
     ) -> Result<Vec<JournalRecord>, Error> {
         let values = values.into_iter().collect::<Vec<_>>();
         if values.is_empty() {
+            // Still advance the resume offset so the caller doesn't re-request
+            // the same position when the server returns an empty page.
+            if let Some(offset) = next_offset {
+                self.resume_offset = Some(offset);
+            }
             return Ok(Vec::new());
         }
 
@@ -256,6 +266,9 @@ struct ReplayState {
     resume_offset: Option<String>,
     next_local_seq: u64,
     next_batch_seq: u64,
+    /// Byte length of the validated file content. Trailing partial writes
+    /// beyond this point should be truncated before appending new data.
+    valid_bytes: u64,
 }
 
 fn replay_journal(path: &Path, stream: &JournalStreamIdentity) -> Result<ReplayState, Error> {
@@ -299,7 +312,9 @@ fn replay_journal(path: &Path, stream: &JournalStreamIdentity) -> Result<ReplayS
         parsed.push(record);
     }
 
-    commit_valid_prefix(parsed)
+    let mut state = commit_valid_prefix(parsed)?;
+    state.valid_bytes = u64::try_from(complete_len).unwrap_or(u64::MAX);
+    Ok(state)
 }
 
 fn commit_valid_prefix(records: Vec<JournalRecord>) -> Result<ReplayState, Error> {

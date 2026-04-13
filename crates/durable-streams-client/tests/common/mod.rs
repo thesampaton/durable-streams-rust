@@ -31,7 +31,7 @@ pub fn client(base_url: &str) -> Client {
 
 pub async fn create_json_stream(client: &Client, path: &str) {
     client
-        .create(
+        .create_raw(
             path,
             &CreateStreamRequest {
                 content_type: "application/json".to_string(),
@@ -52,7 +52,7 @@ pub async fn append_json_values(
     values: &[serde_json::Value],
 ) -> Option<String> {
     client
-        .append(
+        .append_raw(
             path,
             &AppendRequest {
                 body: serde_json::to_vec(values)

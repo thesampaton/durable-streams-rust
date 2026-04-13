@@ -499,7 +499,13 @@ impl FileStorage {
             file.read_exact_at(&mut raw, first_pos)
                 .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::FileExt;
+            file.seek_read(&mut raw, first_pos)
+                .map_err(|e| Error::Storage(format!("failed to read message data: {e}")))?;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let mut reader = file
                 .try_clone()
@@ -618,6 +624,8 @@ impl FileStorage {
                 continue;
             }
 
+            super::cleanup_stale_producers(&mut entry.producers);
+
             // Re-persist metadata if the on-disk copy may be stale so that
             // future restarts see a consistent snapshot. Best-effort: a
             // failure here is non-fatal since the data.log remains correct.
@@ -628,8 +636,6 @@ impl FileStorage {
                     "failed to re-persist reconciled metadata during recovery"
                 );
             }
-
-            super::cleanup_stale_producers(&mut entry.producers);
             restored_total = restored_total.saturating_add(entry.total_bytes);
             streams_map.insert(meta.name, Arc::new(RwLock::new(entry)));
         }
