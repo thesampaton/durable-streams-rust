@@ -12,6 +12,9 @@ This crate provides:
 - explicit auth configuration
 - async HTTP client built on `reqwest` and `tokio`
 - idempotent producer support
+- JSON and JSONL ingest helpers
+- file-backed JSONL journaling for local persistence
+- read-side replication that resumes from the persisted server offset
 
 ## Main Types
 
@@ -23,6 +26,9 @@ The main entry points are:
 - `ClientConfig` and `ClientConfigLoader` for config-first construction
 - `raw` for protocol-shaped request/response types
 - `IdempotentProducer` for producer fencing and sequence-aware writes
+- `JsonJournal` and `JournalStreamIdentity` for local JSONL persistence
+- `ReadReplica` for journal-backed read replication and restart recovery
+- `load_json_input` for shared JSON and JSONL ingest
 
 ## Example
 
@@ -271,3 +277,21 @@ Local verification:
 cargo test -p durable-streams-client
 ./scripts/conformance/run-client-suite.sh --fail-fast
 ```
+
+## CLI
+
+The crate also ships a thin binary for file-based JSON workflows:
+
+```bash
+cargo run -p durable-streams-client --bin durable-streams-json -- persist \
+  --journal ./orders.jsonl \
+  --stream /orders \
+  --content-type application/json \
+  --input ./orders-input.jsonl
+```
+
+Available commands:
+
+- `persist` to normalize JSON or JSONL input and append it to a local journal
+- `replicate` to resume from the journal's last persisted server offset
+- `send` to normalize JSON input and append it through the producer path
