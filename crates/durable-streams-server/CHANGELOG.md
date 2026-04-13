@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0-beta.1] - 2026-04-13
+## [0.2.0] - 2026-04-13
 
 ### Added
 
@@ -16,19 +16,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DS_LIMITS__MAX_STREAM_NAME_BYTES` (default 1024) and
   `limits.max_stream_name_segments` / `DS_LIMITS__MAX_STREAM_NAME_SEGMENTS`
   (default 8) to bound name length and nesting depth.
-
-### Fixed
-
-- Stream names containing `/` no longer return 404. The route wildcard was
-  single-segment (`/{name}`) and now uses a catch-all (`/{*name}`).
-- Stream names with `.` or `..` segments, empty segments, or trailing
-  slashes are now rejected with a 400 `INVALID_STREAM_NAME` problem
-  response instead of being silently accepted.
-
-## [0.2.0-beta.0] - 2026-04-13
-
-### Added
-
 - `/readyz` readiness endpoint — returns 503 until storage initialization
   completes, 200 thereafter. Use `build_router_with_ready()` to enable it.
 - `cleanup_expired_streams()` method on the `Storage` trait for proactive
@@ -42,27 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `error.*`) so logs can map cleanly into a future OpenTelemetry pipeline.
 - Configurable protocol mount path via `http.stream_base_path` /
   `DS_HTTP__STREAM_BASE_PATH`, while keeping `/v1/stream` as the default.
-
-### Changed
-
-- Server `4xx`/`5xx` responses now use RFC 9457-style
-  `application/problem+json` payloads with machine-readable error codes and
-  request `instance` paths.
-- Producer fencing, sequence-gap, readiness, and closed-stream failures retain
-  their protocol headers while now returning structured problem details bodies.
-
-### Fixed
-
-- Fix concurrent read corruption in `FileStorage` where multiple readers
-  could clobber each other's file positions via `dup()`'d descriptors.
-  Reads now use positional I/O (`pread`) on Unix.
-- Fix TOCTOU race in `AcidStorage` notifier management that could produce
-  disconnected broadcast senders under concurrent subscribe/unsubscribe.
-
-## [0.2.0] - 2026-04-11
-
-### Added
-
 - Configurable redb backend for the acid storage mode. The new `acid_backend`
   config field (`DS_STORAGE__ACID_BACKEND` env var) selects between the default
   file-backed redb and an in-memory redb backend. The in-memory variant provides
@@ -71,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Server `4xx`/`5xx` responses now use RFC 9457-style
+  `application/problem+json` payloads with machine-readable error codes and
+  request `instance` paths.
+- Producer fencing, sequence-gap, readiness, and closed-stream failures retain
+  their protocol headers while now returning structured problem details bodies.
 - Crate now lives in the [`durable-streams-rust`](https://github.com/thesampaton/durable-streams-rust)
   workspace alongside the client crate.
 - Overhaul rustdoc surface: add crate-level documentation, module-level
@@ -85,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stream names containing `/` no longer return 404. The route wildcard was
+  single-segment (`/{name}`) and now uses a catch-all (`/{*name}`).
+- Stream names with `.` or `..` segments, empty segments, or trailing
+  slashes are now rejected with a 400 `INVALID_STREAM_NAME` problem
+  response instead of being silently accepted.
+- Fix concurrent read corruption in `FileStorage` where multiple readers
+  could clobber each other's file positions via `dup()`'d descriptors.
+  Reads now use positional I/O (`pread`) on Unix.
+- Fix TOCTOU race in `AcidStorage` notifier management that could produce
+  disconnected broadcast senders under concurrent subscribe/unsubscribe.
 - Resolve clippy `unnecessary_wraps` and `dead_code` warnings that caused
   `cargo clippy -- -D warnings` to fail.
 
@@ -129,8 +110,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude non-essential files from crates.io package.
 - Add keywords and categories for crates.io discoverability.
 
-[0.2.0-beta.1]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0-beta.0...v0.2.0-beta.1
-[0.2.0-beta.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0...v0.2.0-beta.0
 [0.2.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.1...v0.1.2
