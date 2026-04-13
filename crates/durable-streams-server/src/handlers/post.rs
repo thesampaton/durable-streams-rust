@@ -3,10 +3,11 @@ use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
 use crate::protocol::problem::{ProblemResponse, Result, request_instance};
 use crate::protocol::producer;
+use crate::protocol::stream_name::StreamName;
 use crate::storage::{ProducerAppendResult, Storage};
 use axum::{
     body::Body,
-    extract::{OriginalUri, Path, State},
+    extract::{OriginalUri, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -30,7 +31,7 @@ use std::sync::Arc;
 /// which should never happen with valid inputs.
 pub async fn append_data<S: Storage>(
     State(storage): State<Arc<S>>,
-    Path(name): Path<String>,
+    StreamName(name): StreamName,
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Body,

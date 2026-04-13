@@ -2,12 +2,13 @@ use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
 use crate::protocol::problem::{ProblemResponse, Result, request_instance};
+use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
 use crate::storage::{CreateStreamResult, CreateWithDataResult, Storage, StreamConfig};
 use axum::{
     Extension,
     body::Body,
-    extract::{OriginalUri, Path, State},
+    extract::{OriginalUri, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -32,7 +33,7 @@ use std::sync::Arc;
 /// header values, which should never happen with valid inputs.
 pub async fn create_stream<S: Storage>(
     State(storage): State<Arc<S>>,
-    Path(name): Path<String>,
+    StreamName(name): StreamName,
     original_uri: OriginalUri,
     Extension(StreamBasePath(stream_base_path)): Extension<StreamBasePath>,
     headers: HeaderMap,

@@ -6,12 +6,13 @@ use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
 use crate::protocol::problem::{Result, request_instance};
 use crate::protocol::sse::{self, ControlPayload};
+use crate::protocol::stream_name::StreamName;
 use crate::router::ShutdownToken;
 use crate::storage::{ReadResult, Storage};
 use axum::{
     Extension,
     body::Body,
-    extract::{OriginalUri, Path, Query, State},
+    extract::{OriginalUri, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -55,7 +56,7 @@ pub struct ReadQuery {
 /// which should never happen with valid inputs.
 pub async fn read_stream<S: Storage + 'static>(
     State(storage): State<Arc<S>>,
-    Path(name): Path<String>,
+    StreamName(name): StreamName,
     original_uri: OriginalUri,
     Query(query): Query<ReadQuery>,
     Extension(LongPollTimeout(timeout)): Extension<LongPollTimeout>,

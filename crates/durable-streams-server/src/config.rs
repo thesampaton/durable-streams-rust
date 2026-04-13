@@ -79,6 +79,10 @@ pub struct Config {
     pub max_memory_bytes: u64,
     /// Maximum payload bytes retained for any single stream.
     pub max_stream_bytes: u64,
+    /// Maximum byte length of a stream name.
+    pub max_stream_name_bytes: usize,
+    /// Maximum number of `/`-separated segments in a stream name.
+    pub max_stream_name_segments: usize,
     /// CORS allowlist as `"*"` or a comma-separated origin list.
     pub cors_origins: String,
     /// Long-poll timeout used by `GET ?live=long-poll`.
@@ -149,9 +153,12 @@ struct ServerSettingsFile {
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
+#[allow(clippy::struct_field_names)]
 struct LimitsSettingsFile {
     max_memory_bytes: Option<u64>,
     max_stream_bytes: Option<u64>,
+    max_stream_name_bytes: Option<usize>,
+    max_stream_name_segments: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -276,6 +283,12 @@ impl Config {
         if let Some(max_stream_bytes) = settings.limits.max_stream_bytes {
             config.max_stream_bytes = max_stream_bytes;
         }
+        if let Some(max_stream_name_bytes) = settings.limits.max_stream_name_bytes {
+            config.max_stream_name_bytes = max_stream_name_bytes;
+        }
+        if let Some(max_stream_name_segments) = settings.limits.max_stream_name_segments {
+            config.max_stream_name_segments = max_stream_name_segments;
+        }
 
         if let Some(cors_origins) = settings.http.cors_origins {
             config.cors_origins = cors_origins;
@@ -344,6 +357,16 @@ impl Config {
         if let Some(max_stream_bytes) = get("DS_LIMITS__MAX_STREAM_BYTES") {
             self.max_stream_bytes = max_stream_bytes.parse().map_err(|_| {
                 format!("invalid DS_LIMITS__MAX_STREAM_BYTES value: '{max_stream_bytes}'")
+            })?;
+        }
+        if let Some(max_stream_name_bytes) = get("DS_LIMITS__MAX_STREAM_NAME_BYTES") {
+            self.max_stream_name_bytes = max_stream_name_bytes.parse().map_err(|_| {
+                format!("invalid DS_LIMITS__MAX_STREAM_NAME_BYTES value: '{max_stream_name_bytes}'")
+            })?;
+        }
+        if let Some(max_stream_name_segments) = get("DS_LIMITS__MAX_STREAM_NAME_SEGMENTS") {
+            self.max_stream_name_segments = max_stream_name_segments.parse().map_err(|_| {
+                format!("invalid DS_LIMITS__MAX_STREAM_NAME_SEGMENTS value: '{max_stream_name_segments}'")
             })?;
         }
 
@@ -500,6 +523,8 @@ impl Default for Config {
             port: 4437,
             max_memory_bytes: 100 * 1024 * 1024,
             max_stream_bytes: 10 * 1024 * 1024,
+            max_stream_name_bytes: 1024,
+            max_stream_name_segments: 8,
             cors_origins: "*".to_string(),
             long_poll_timeout: Duration::from_secs(30),
             sse_reconnect_interval_secs: 60,

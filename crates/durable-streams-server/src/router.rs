@@ -3,6 +3,7 @@
 //! [`build_router`] is the main embedding entry point for library consumers.
 
 use crate::config::{Config, LongPollTimeout, SseReconnectInterval};
+use crate::protocol::stream_name::StreamNameLimits;
 use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;
 use axum::{Extension, Router, middleware as axum_middleware, routing::get};
@@ -105,13 +106,17 @@ fn protocol_routes<S: Storage + 'static>(
 ) -> Router {
     Router::new()
         .route(
-            "/{name}",
+            "/{*name}",
             get(handlers::get::read_stream::<S>)
                 .put(handlers::put::create_stream::<S>)
                 .head(handlers::head::stream_metadata::<S>)
                 .post(handlers::post::append_data::<S>)
                 .delete(handlers::delete::delete_stream::<S>),
         )
+        .layer(Extension(StreamNameLimits {
+            max_bytes: config.max_stream_name_bytes,
+            max_segments: config.max_stream_name_segments,
+        }))
         .layer(Extension(ShutdownToken(shutdown)))
         .layer(Extension(SseReconnectInterval(
             config.sse_reconnect_interval_secs,
