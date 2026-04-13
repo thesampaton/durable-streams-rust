@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.0] - 2026-04-13
+
+### Added
+
+- `/readyz` readiness endpoint — returns 503 until storage initialization
+  completes, 200 thereafter. Use `build_router_with_ready()` to enable it.
+- `cleanup_expired_streams()` method on the `Storage` trait for proactive
+  removal of expired streams (previously only cleaned lazily on access).
+- Graceful shutdown support — long-poll and SSE connections now drain cleanly
+  when the server shuts down, returning 204 / ending the stream instead of
+  resetting the connection. Controlled via a `CancellationToken` passed to
+  `build_router_with_ready()`.
+
+### Fixed
+
+- Fix concurrent read corruption in `FileStorage` where multiple readers
+  could clobber each other's file positions via `dup()`'d descriptors.
+  Reads now use positional I/O (`pread`) on Unix.
+- Fix TOCTOU race in `AcidStorage` notifier management that could produce
+  disconnected broadcast senders under concurrent subscribe/unsubscribe.
+
 ## [0.2.0] - 2026-04-11
 
 ### Added
@@ -75,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude non-essential files from crates.io package.
 - Add keywords and categories for crates.io discoverability.
 
+[0.2.0-beta.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0...v0.2.0-beta.0
 [0.2.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.1...v0.1.2
