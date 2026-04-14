@@ -1,23 +1,16 @@
 mod common;
 
 use bytes::Bytes;
-use common::{StorageTestBackend, create_test_storage, create_test_storage_with_limits};
+use common::{ALL_BACKENDS, create_test_storage, create_test_storage_with_limits, with_each_backend};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, ProducerAppendResult, Storage, StreamConfig,
 };
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
+use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::thread;
-
-const BACKENDS: [StorageTestBackend; 4] = [
-    StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
-    StorageTestBackend::Acid,
-    StorageTestBackend::AcidInMemory,
-];
 
 fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
     ProducerHeaders {
@@ -31,24 +24,8 @@ fn plain_text_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    for backend in BACKENDS {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "backend contract failed for backend={}: {}",
-                backend.as_str(),
-                panic_msg
-            );
-        }
-    }
+fn for_all_backends(test: impl Fn(common::StorageTestBackend) + RefUnwindSafe) {
+    with_each_backend(&ALL_BACKENDS, "backend contract", test);
 }
 
 mod core {
@@ -56,7 +33,7 @@ mod core {
 
     #[test]
     fn create_idempotent_and_config_mismatch() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             let cfg = plain_text_config();
@@ -86,7 +63,7 @@ mod core {
 
     #[test]
     fn append_read_and_offset_monotonicity() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -103,7 +80,7 @@ mod core {
 
     #[test]
     fn read_from_offset_and_sentinels() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -132,7 +109,7 @@ mod core {
 
     #[test]
     fn close_and_content_type_rules() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -159,7 +136,7 @@ mod core {
 
     #[test]
     fn delete_and_exists() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -184,7 +161,7 @@ mod limits_atomicity {
 
     #[test]
     fn limits_and_not_found() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage_with_limits(backend, 100, 50);
             let storage = &handle.storage;
             let cfg = plain_text_config();
@@ -225,7 +202,7 @@ mod limits_atomicity {
 
     #[test]
     fn create_with_data_atomicity_and_idempotency() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let small = create_test_storage_with_limits(backend, 1024, 8);
             let cfg = plain_text_config();
             let oversized = vec![Bytes::from(vec![0_u8; 9])];
@@ -262,7 +239,7 @@ mod limits_atomicity {
 
     #[test]
     fn stream_seq_rollback_after_failed_commit() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let small = create_test_storage_with_limits(backend, 1024, 8);
             small
                 .storage
@@ -309,7 +286,7 @@ mod producer {
 
     #[test]
     fn duplicate_gap_fencing_and_epoch_reset_rules() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -396,7 +373,7 @@ mod producer {
 
     #[test]
     fn multi_producer_independence_and_closed_precedence() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -450,7 +427,7 @@ mod concurrency {
 
     #[test]
     fn concurrent_append_offsets_unique() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = Arc::new(handle.storage);
             storage.create_stream("s", plain_text_config()).unwrap();
