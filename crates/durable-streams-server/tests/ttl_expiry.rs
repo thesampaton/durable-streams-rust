@@ -194,6 +194,197 @@ async fn test_remaining_ttl_decreases() {
     );
 }
 
+/// Validates spec: 09-ttl-expiry.md#sliding-ttl
+///
+/// Successful GET requests renew the remaining TTL window.
+#[tokio::test]
+async fn test_get_renews_ttl() {
+    let (base_url, _port) = spawn_test_server().await;
+    let client = test_client();
+    let stream_name = unique_stream_name();
+
+    client
+        .put(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "text/plain")
+        .header("Stream-TTL", "4")
+        .send()
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    let get_response = client
+        .get(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), 200);
+
+    let head_response = client
+        .head(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    let ttl: u64 = head_response
+        .headers()
+        .get("Stream-TTL")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(
+        ttl >= 3,
+        "GET should renew TTL close to the configured window, got {ttl}"
+    );
+}
+
+/// Validates spec: 09-ttl-expiry.md#sliding-ttl
+///
+/// Successful POST requests renew the remaining TTL window.
+#[tokio::test]
+async fn test_post_renews_ttl() {
+    let (base_url, _port) = spawn_test_server().await;
+    let client = test_client();
+    let stream_name = unique_stream_name();
+
+    client
+        .put(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "text/plain")
+        .header("Stream-TTL", "4")
+        .send()
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    let post_response = client
+        .post(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "text/plain")
+        .body("payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_response.status(), 204);
+
+    let head_response = client
+        .head(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    let ttl: u64 = head_response
+        .headers()
+        .get("Stream-TTL")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(
+        ttl >= 3,
+        "POST should renew TTL close to the configured window, got {ttl}"
+    );
+}
+
+/// Validates spec: 09-ttl-expiry.md#sliding-ttl
+///
+/// Failed POST requests do not renew the remaining TTL window.
+#[tokio::test]
+async fn test_failed_post_does_not_renew_ttl() {
+    let (base_url, _port) = spawn_test_server().await;
+    let client = test_client();
+    let stream_name = unique_stream_name();
+
+    client
+        .put(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "text/plain")
+        .header("Stream-TTL", "4")
+        .send()
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    let post_response = client
+        .post(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "application/json")
+        .body("payload")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post_response.status(), 400);
+
+    let head_response = client
+        .head(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    let ttl: u64 = head_response
+        .headers()
+        .get("Stream-TTL")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(ttl <= 2, "failed POST should not renew TTL, got {ttl}");
+}
+
+/// Validates spec: 09-ttl-expiry.md#sliding-ttl
+///
+/// HEAD requests observe but do not renew the TTL window.
+#[tokio::test]
+async fn test_head_does_not_renew_ttl() {
+    let (base_url, _port) = spawn_test_server().await;
+    let client = test_client();
+    let stream_name = unique_stream_name();
+
+    client
+        .put(format!("{base_url}/v1/stream/{stream_name}"))
+        .header("Content-Type", "text/plain")
+        .header("Stream-TTL", "4")
+        .send()
+        .await
+        .unwrap();
+
+    sleep(Duration::from_secs(2)).await;
+
+    let response1 = client
+        .head(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    let ttl1: u64 = response1
+        .headers()
+        .get("Stream-TTL")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    sleep(Duration::from_secs(1)).await;
+
+    let response2 = client
+        .head(format!("{base_url}/v1/stream/{stream_name}"))
+        .send()
+        .await
+        .unwrap();
+    let ttl2: u64 = response2
+        .headers()
+        .get("Stream-TTL")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    assert!(ttl2 < ttl1, "HEAD should not renew TTL: {ttl1} -> {ttl2}");
+}
+
 /// Validates spec: 09-ttl-expiry.md#idempotent-create-with-ttl
 ///
 /// Creating the same stream after expiry creates a new stream (201).

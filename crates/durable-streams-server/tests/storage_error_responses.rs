@@ -2,12 +2,12 @@ mod common;
 
 use bytes::Bytes;
 use common::{read_problem, spawn_test_server_with_storage, test_client, unique_stream_name};
+use durable_streams_server::InMemoryStorage;
 use durable_streams_server::config::Config;
 use durable_streams_server::protocol::error::{Error, Result};
 use durable_streams_server::protocol::offset::Offset;
-use durable_streams_server::protocol::producer::ProducerHeaders;
-use durable_streams_server::InMemoryStorage;
 use durable_streams_server::protocol::offset::Offset as StorageOffset;
+use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata,
@@ -133,10 +133,6 @@ impl Storage for FailingAppendStorage {
     ) -> Result<CreateStreamResult> {
         self.inner
             .create_fork(name, source_name, fork_offset, config)
-    }
-
-    fn touch_ttl(&self, name: &str) -> Result<()> {
-        self.inner.touch_ttl(name)
     }
 }
 

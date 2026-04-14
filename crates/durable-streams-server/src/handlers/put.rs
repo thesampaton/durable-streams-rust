@@ -139,11 +139,7 @@ pub async fn create_stream<S: Storage>(
 
             let create_result = storage
                 .create_fork(&name, &source_name, fork_offset.as_ref(), config)
-                .map_err(|e| match e {
-                    // StreamGone from create_fork should be 409 Conflict, not 410
-                    Error::StreamGone(_) => ProblemResponse::from(Error::ConfigMismatch),
-                    other => ProblemResponse::from(other),
-                })?;
+                .map_err(ProblemResponse::from)?;
 
             // After fork creation, read the fork metadata for response headers
             let meta = storage.head(&name)?;
@@ -157,10 +153,7 @@ pub async fn create_stream<S: Storage>(
             let location = build_location_url(&headers, &stream_base_path, &name);
 
             let mut response_headers = HeaderMap::new();
-            response_headers.insert(
-                "content-type",
-                meta.config.content_type.parse().unwrap(),
-            );
+            response_headers.insert("content-type", meta.config.content_type.parse().unwrap());
             response_headers.insert(
                 names::STREAM_NEXT_OFFSET,
                 HeaderValue::from_bytes(meta.next_offset.as_str().as_bytes()).unwrap(),
@@ -192,11 +185,7 @@ pub async fn create_stream<S: Storage>(
         // the entry is closed before it becomes visible to other operations.
         let create_with_data_result = storage
             .create_stream_with_data(&name, config, messages, created_closed)
-            .map_err(|e| match e {
-                // StreamGone from create_stream_with_data should be 409 Conflict
-                Error::StreamGone(_) => ProblemResponse::from(Error::ConfigMismatch),
-                other => ProblemResponse::from(other),
-            })?;
+            .map_err(ProblemResponse::from)?;
 
         let CreateWithDataResult {
             status: create_status,

@@ -8,8 +8,8 @@
 
 pub mod acid;
 pub mod file;
-pub mod memory;
 pub(crate) mod fork;
+pub mod memory;
 pub(crate) mod shared;
 
 use crate::protocol::error::Result;
@@ -21,8 +21,8 @@ use tokio::sync::broadcast;
 
 // Re-export shared items so existing `super::` paths in backends still work.
 pub(crate) use shared::{
-    NOTIFY_CHANNEL_CAPACITY, ProducerCheck, ProducerState, check_producer,
-    cleanup_stale_producers, is_stream_expired, validate_content_type, validate_seq,
+    NOTIFY_CHANNEL_CAPACITY, ProducerCheck, ProducerState, check_producer, cleanup_stale_producers,
+    is_stream_expired, validate_content_type, validate_seq,
 };
 
 /// Immutable stream configuration captured at create time.
@@ -187,6 +187,15 @@ pub enum CreateStreamResult {
     AlreadyExists,
 }
 
+/// Immutable snapshot of a fork create request after source-derived fields
+/// have been resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ForkCreateSpec {
+    pub source_name: String,
+    pub fork_offset: Offset,
+    pub config: StreamConfig,
+}
+
 /// Outcome of [`Storage::create_stream_with_data`].
 ///
 /// Bundles creation status with a metadata snapshot taken under the
@@ -222,7 +231,6 @@ pub enum ProducerAppendResult {
         closed: bool,
     },
 }
-
 
 /// Persistence contract for Durable Streams server state.
 ///
@@ -392,14 +400,4 @@ pub trait Storage: Send + Sync {
         fork_offset: Option<&Offset>,
         config: StreamConfig,
     ) -> Result<CreateStreamResult>;
-
-    /// Reset the TTL sliding window for a stream.
-    ///
-    /// If the stream has `ttl_seconds` set, resets `expires_at` to
-    /// `now + ttl_seconds`. No-op for streams without a TTL or streams
-    /// using absolute `expires_at` only.
-    ///
-    /// Called on GET (read) and POST (append) to implement sliding window
-    /// renewal. HEAD and DELETE do NOT call this.
-    fn touch_ttl(&self, name: &str) -> Result<()>;
 }

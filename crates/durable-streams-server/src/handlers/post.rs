@@ -102,10 +102,6 @@ pub async fn append_data<S: Storage>(
 
         let seq_ref = stream_seq.as_deref();
 
-        // Reset TTL sliding window on append (no-op if stream has no TTL).
-        // Ignore errors — the actual append will surface the right error.
-        let _ = storage.touch_ttl(&name);
-
         // Route to producer or non-producer append path
         if let Some(ref prod) = producer_headers {
             handle_producer_append(

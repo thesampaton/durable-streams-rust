@@ -133,6 +133,10 @@ pub enum Error {
     #[error("Stream is gone: {0}")]
     StreamGone(String),
 
+    /// Stream path is blocked because a soft-deleted lineage still owns it (409)
+    #[error("Stream path is reserved by a soft-deleted lineage: {0}")]
+    StreamPathBlocked(String),
+
     /// Fork offset exceeds the source stream's tail (400)
     #[error("Fork offset is beyond the source stream's tail")]
     ForkOffsetBeyondTail,
@@ -156,6 +160,7 @@ impl Error {
         match self {
             Self::NotFound(_) | Self::StreamExpired => StatusCode::NOT_FOUND,
             Self::StreamGone(_) => StatusCode::GONE,
+            Self::StreamPathBlocked(_) => StatusCode::CONFLICT,
             Self::ForkOffsetBeyondTail => StatusCode::BAD_REQUEST,
             Self::ForkFromTombstone(_) => StatusCode::CONFLICT,
             Self::ConfigMismatch
@@ -304,13 +309,19 @@ impl Error {
                 "NOT_FOUND",
             )
             .with_detail(self.to_string()),
-            Self::StreamGone(name) => ProblemDetails::new(
-                "/errors/gone",
-                "Stream Gone",
+            Self::StreamGone(name) => {
+                ProblemDetails::new("/errors/gone", "Stream Gone", self.status_code(), "GONE")
+                    .with_detail(format!("Stream is gone: {name}"))
+            }
+            Self::StreamPathBlocked(name) => ProblemDetails::new(
+                "/errors/path-blocked",
+                "Stream Path Blocked",
                 self.status_code(),
-                "GONE",
+                "PATH_BLOCKED",
             )
-            .with_detail(format!("Stream is gone: {name}")),
+            .with_detail(format!(
+                "Stream path is reserved by a soft-deleted lineage: {name}"
+            )),
             Self::ForkOffsetBeyondTail => ProblemDetails::new(
                 "/errors/bad-request",
                 "Bad Request",

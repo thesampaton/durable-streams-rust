@@ -3,16 +3,16 @@
 // a subset of helpers, so items appear unused when compiled per-test target.
 
 use durable_streams_server::config::{AcidBackend, Config, StorageMode};
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
+use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use durable_streams_server::protocol::problem::ProblemDetails;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
 };
-use durable_streams_server::protocol::offset::Offset as StorageOffset;
+use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -77,7 +77,10 @@ pub fn with_each_backend(
             } else {
                 "non-string panic payload".to_string()
             };
-            panic!("{label} failed for backend={}: {panic_msg}", backend.as_str());
+            panic!(
+                "{label} failed for backend={}: {panic_msg}",
+                backend.as_str()
+            );
         }
     }
 }
@@ -256,14 +259,6 @@ impl Storage for TestStorage {
             Self::Memory(inner) => inner.create_fork(name, source_name, fork_offset, config),
             Self::File(inner) => inner.create_fork(name, source_name, fork_offset, config),
             Self::Acid(inner) => inner.create_fork(name, source_name, fork_offset, config),
-        }
-    }
-
-    fn touch_ttl(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Memory(inner) => inner.touch_ttl(name),
-            Self::File(inner) => inner.touch_ttl(name),
-            Self::Acid(inner) => inner.touch_ttl(name),
         }
     }
 }
