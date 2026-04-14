@@ -1,7 +1,10 @@
 mod common;
 
 use bytes::Bytes;
-use common::{ALL_BACKENDS, create_test_storage, create_test_storage_with_limits, with_each_backend};
+use chrono::Utc;
+use common::{
+    ALL_BACKENDS, create_test_storage, create_test_storage_with_limits, with_each_backend,
+};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
@@ -418,6 +421,132 @@ mod producer {
                 )
                 .unwrap_err();
             assert!(matches!(closed_precedence, Error::StreamClosed));
+        });
+    }
+}
+
+mod fork_lifecycle {
+    use super::*;
+
+    #[test]
+    fn fork_idempotency_requires_matching_source_and_offset() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            storage
+                .create_stream("source-a", plain_text_config())
+                .unwrap();
+            storage
+                .append("source-a", Bytes::from("a1"), "text/plain")
+                .unwrap();
+            storage
+                .create_stream("source-b", plain_text_config())
+                .unwrap();
+            storage
+                .append("source-b", Bytes::from("b1"), "text/plain")
+                .unwrap();
+
+            let created = storage
+                .create_fork("fork", "source-a", None, plain_text_config())
+                .unwrap();
+            assert_eq!(created, CreateStreamResult::Created);
+
+            let idempotent = storage
+                .create_fork("fork", "source-a", None, plain_text_config())
+                .unwrap();
+            assert_eq!(idempotent, CreateStreamResult::AlreadyExists);
+
+            let wrong_source = storage
+                .create_fork("fork", "source-b", None, plain_text_config())
+                .unwrap_err();
+            assert!(matches!(wrong_source, Error::ConfigMismatch));
+
+            let different_offset = storage
+                .create_fork(
+                    "fork",
+                    "source-a",
+                    Some(&Offset::start()),
+                    plain_text_config(),
+                )
+                .unwrap_err();
+            assert!(matches!(different_offset, Error::ConfigMismatch));
+        });
+    }
+
+    #[test]
+    fn expired_parent_with_descendants_becomes_tombstone_and_blocks_recreation() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            let expires_at = Utc::now() + chrono::Duration::milliseconds(300);
+            let config = plain_text_config().with_expires_at(expires_at);
+            storage.create_stream("source", config).unwrap();
+            storage
+                .append("source", Bytes::from("baseline"), "text/plain")
+                .unwrap();
+
+            let fork_created = storage
+                .create_fork("fork", "source", None, plain_text_config().with_ttl(10))
+                .unwrap();
+            assert_eq!(fork_created, CreateStreamResult::Created);
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let removed = storage.cleanup_expired_streams();
+            assert_eq!(
+                removed,
+                1,
+                "backend={} should process one expired source",
+                backend.as_str()
+            );
+
+            let source_head = storage.head("source").unwrap_err();
+            assert!(matches!(source_head, Error::StreamGone(_)));
+
+            let recreate = storage
+                .create_stream("source", plain_text_config())
+                .unwrap_err();
+            assert!(matches!(recreate, Error::StreamPathBlocked(_)));
+
+            let fork_read = storage.read("fork", &Offset::start()).unwrap();
+            assert_eq!(fork_read.messages, vec![Bytes::from("baseline")]);
+        });
+    }
+
+    #[test]
+    fn deleting_last_descendant_cascades_cleanup() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            storage
+                .create_stream("source", plain_text_config())
+                .unwrap();
+            storage
+                .append("source", Bytes::from("baseline"), "text/plain")
+                .unwrap();
+            storage
+                .create_fork("fork", "source", None, plain_text_config())
+                .unwrap();
+
+            storage.delete("source").unwrap();
+            assert!(matches!(storage.head("source"), Err(Error::StreamGone(_))));
+            assert!(matches!(
+                storage.create_stream("source", plain_text_config()),
+                Err(Error::StreamPathBlocked(_))
+            ));
+
+            storage.delete("fork").unwrap();
+            assert!(!storage.exists("fork"));
+
+            let recreated = storage
+                .create_stream("source", plain_text_config())
+                .unwrap();
+            assert_eq!(recreated, CreateStreamResult::Created);
+
+            let source_read = storage.read("source", &Offset::start()).unwrap();
+            assert!(source_read.messages.is_empty());
         });
     }
 }

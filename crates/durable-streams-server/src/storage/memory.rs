@@ -113,6 +113,27 @@ impl InMemoryStorage {
         streams.get(name).map(Arc::clone)
     }
 
+    fn hard_remove_stream(
+        &self,
+        streams: &mut HashMap<String, Arc<RwLock<StreamEntry>>>,
+        name: &str,
+    ) -> Option<ForkInfo> {
+        let stream_arc = streams.remove(name)?;
+        let stream = stream_arc.read().expect("stream lock poisoned");
+        self.saturating_sub_total_bytes(stream.total_bytes);
+        stream.fork_info.clone()
+    }
+
+    fn remove_for_recreate(
+        &self,
+        streams: &mut HashMap<String, Arc<RwLock<StreamEntry>>>,
+        name: &str,
+    ) {
+        if let Some(fork_info) = self.hard_remove_stream(streams, name) {
+            self.cascade_delete(streams, &fork_info.source_name);
+        }
+    }
+
     /// Read messages from a stream's local storage (no fork traversal).
     #[allow(clippy::unnecessary_wraps)]
     fn read_local_messages(
@@ -309,24 +330,23 @@ impl Storage for InMemoryStorage {
 
         if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-
-            if super::is_stream_expired(&stream.config) {
-                let stream_bytes = stream.total_bytes;
-                drop(stream);
-                streams.remove(name);
-
-                self.total_bytes
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                        Some(current.saturating_sub(stream_bytes))
-                    })
-                    .ok();
-            } else if stream.state == StreamState::Tombstone {
-                return Err(Error::StreamGone(name.to_string()));
-            } else {
-                if stream.config == config {
+            match super::fork::evaluate_root_create(
+                name,
+                &stream.config,
+                stream.state,
+                stream.ref_count,
+                &config,
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(stream);
+                    self.remove_for_recreate(&mut streams, name);
+                }
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
                     return Ok(CreateStreamResult::AlreadyExists);
                 }
-                return Err(Error::ConfigMismatch);
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
         }
 
@@ -379,6 +399,8 @@ impl Storage for InMemoryStorage {
         let message = Message::new(offset.clone(), data);
         stream.messages.push(message);
         stream.updated_at = Some(Utc::now());
+        super::fork::renew_ttl(&mut stream.config);
+        let _ = stream.notify.send(());
 
         Ok(offset)
     }
@@ -418,6 +440,7 @@ impl Storage for InMemoryStorage {
             stream.last_seq = Some(new_seq);
         }
         stream.updated_at = Some(Utc::now());
+        super::fork::renew_ttl(&mut stream.config);
 
         Ok(Offset::new(stream.next_read_seq, stream.next_byte_offset))
     }
@@ -427,71 +450,128 @@ impl Storage for InMemoryStorage {
             .get_stream(name)
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-        let stream = stream_arc.read().expect("stream lock poisoned");
+        let needs_ttl_renewal = {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            super::fork::check_stream_access(&stream.config, stream.state, name)?;
+            stream.config.ttl_seconds.is_some()
+        };
 
+        if !needs_ttl_renewal {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+
+            let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+            if from_offset.is_now() {
+                return Ok(ReadResult {
+                    messages: Vec::new(),
+                    next_offset,
+                    at_tail: true,
+                    closed: stream.closed,
+                });
+            }
+
+            if stream.fork_info.is_none() {
+                return Self::read_local_messages(&stream, from_offset, next_offset);
+            }
+
+            let fi = stream.fork_info.clone().expect("checked above");
+            let closed = stream.closed;
+            let fork_messages_data: Vec<Bytes> =
+                stream.messages.iter().map(|m| m.data.clone()).collect();
+            drop(stream);
+
+            let mut all_messages: Vec<Bytes> = Vec::new();
+            if from_offset.is_start() || *from_offset < fi.fork_offset {
+                let source_messages =
+                    self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
+                all_messages.extend(source_messages);
+            }
+
+            if from_offset.is_start() || *from_offset <= fi.fork_offset {
+                all_messages.extend(fork_messages_data);
+            } else {
+                let stream_arc2 = self
+                    .get_stream(name)
+                    .ok_or_else(|| Error::NotFound(name.to_string()))?;
+                let stream2 = stream_arc2.read().expect("stream lock poisoned");
+                let start_idx = match stream2
+                    .messages
+                    .binary_search_by(|m| m.offset.cmp(from_offset))
+                {
+                    Ok(idx) | Err(idx) => idx,
+                };
+                let msgs: Vec<Bytes> = stream2.messages[start_idx..]
+                    .iter()
+                    .map(|m| m.data.clone())
+                    .collect();
+                all_messages.extend(msgs);
+            }
+
+            return Ok(ReadResult {
+                messages: all_messages,
+                next_offset,
+                at_tail: true,
+                closed,
+            });
+        }
+
+        let mut stream = stream_arc.write().expect("stream lock poisoned");
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-
-        if from_offset.is_now() {
-            return Ok(ReadResult {
+        let result = if from_offset.is_now() {
+            ReadResult {
                 messages: Vec::new(),
                 next_offset,
                 at_tail: true,
                 closed: stream.closed,
-            });
-        }
-
-        // If stream has no fork lineage, use the fast path
-        if stream.fork_info.is_none() {
-            return Self::read_local_messages(&stream, from_offset, next_offset);
-        }
-
-        // Fork-aware read: stitch messages from source chain + fork's own data
-        let fi = stream.fork_info.clone().expect("checked above");
-        let closed = stream.closed;
-        let fork_messages_data: Vec<Bytes> =
-            stream.messages.iter().map(|m| m.data.clone()).collect();
-        drop(stream);
-
-        let mut all_messages: Vec<Bytes> = Vec::new();
-
-        // Read source data if from_offset is before the fork_offset
-        if from_offset.is_start() || *from_offset < fi.fork_offset {
-            let source_messages =
-                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
-            all_messages.extend(source_messages);
-        }
-
-        // Add fork's own messages
-        if from_offset.is_start() || *from_offset <= fi.fork_offset {
-            // All fork messages (from_offset is in ancestor range or at boundary)
-            all_messages.extend(fork_messages_data);
+            }
+        } else if stream.fork_info.is_none() {
+            Self::read_local_messages(&stream, from_offset, next_offset)?
         } else {
-            // from_offset is past fork_offset — binary search within fork messages
-            let stream_arc2 = self
-                .get_stream(name)
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-            let stream2 = stream_arc2.read().expect("stream lock poisoned");
-            let start_idx = match stream2
-                .messages
-                .binary_search_by(|m| m.offset.cmp(from_offset))
-            {
-                Ok(idx) | Err(idx) => idx,
-            };
-            let msgs: Vec<Bytes> = stream2.messages[start_idx..]
-                .iter()
-                .map(|m| m.data.clone())
-                .collect();
-            all_messages.extend(msgs);
-        }
+            let fi = stream.fork_info.clone().expect("checked above");
+            let closed = stream.closed;
+            let fork_messages_data: Vec<Bytes> =
+                stream.messages.iter().map(|m| m.data.clone()).collect();
+            drop(stream);
 
-        Ok(ReadResult {
-            messages: all_messages,
-            next_offset,
-            at_tail: true,
-            closed,
-        })
+            let mut all_messages: Vec<Bytes> = Vec::new();
+            if from_offset.is_start() || *from_offset < fi.fork_offset {
+                let source_messages =
+                    self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
+                all_messages.extend(source_messages);
+            }
+
+            if from_offset.is_start() || *from_offset <= fi.fork_offset {
+                all_messages.extend(fork_messages_data);
+            } else {
+                let stream_arc2 = self
+                    .get_stream(name)
+                    .ok_or_else(|| Error::NotFound(name.to_string()))?;
+                let stream2 = stream_arc2.read().expect("stream lock poisoned");
+                let start_idx = match stream2
+                    .messages
+                    .binary_search_by(|m| m.offset.cmp(from_offset))
+                {
+                    Ok(idx) | Err(idx) => idx,
+                };
+                let msgs: Vec<Bytes> = stream2.messages[start_idx..]
+                    .iter()
+                    .map(|m| m.data.clone())
+                    .collect();
+                all_messages.extend(msgs);
+            }
+
+            stream = stream_arc.write().expect("stream lock poisoned");
+            ReadResult {
+                messages: all_messages,
+                next_offset,
+                at_tail: true,
+                closed,
+            }
+        };
+
+        super::fork::renew_ttl(&mut stream.config);
+        Ok(result)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -505,36 +585,19 @@ impl Storage for InMemoryStorage {
         {
             let stream = stream_arc.read().expect("stream lock poisoned");
 
-            // Already tombstoned — treat as gone
-            if stream.state == StreamState::Tombstone {
-                return Err(Error::StreamGone(name.to_string()));
-            }
-
-            // Check expiry
-            if super::is_stream_expired(&stream.config) {
-                // Let it fall through to removal
-            }
-
-            if stream.ref_count > 0 {
-                // Has child forks — soft-delete (tombstone)
-                drop(stream);
-                let mut stream_w = stream_arc.write().expect("stream lock poisoned");
-                stream_w.state = StreamState::Tombstone;
-                return Ok(());
+            match super::fork::evaluate_delete(name, stream.state, stream.ref_count)? {
+                super::fork::DeleteDisposition::Tombstone => {
+                    drop(stream);
+                    let mut stream_w = stream_arc.write().expect("stream lock poisoned");
+                    stream_w.state = StreamState::Tombstone;
+                    return Ok(());
+                }
+                super::fork::DeleteDisposition::HardDelete => {}
             }
         }
 
-        // No child forks — hard delete
-        let fork_info = {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            let fi = stream.fork_info.clone();
-            self.saturating_sub_total_bytes(stream.total_bytes);
-            fi
-        };
-        streams.remove(name);
+        let fork_info = self.hard_remove_stream(&mut streams, name);
 
-        // Cascade: decrement parent ref_count, and if parent is tombstoned
-        // with ref_count reaching 0, hard-delete it too (walk up the chain).
         if let Some(fi) = fork_info {
             self.cascade_delete(&mut streams, &fi.source_name);
         }
@@ -573,6 +636,7 @@ impl Storage for InMemoryStorage {
 
         stream.closed = true;
         stream.updated_at = Some(Utc::now());
+        super::fork::renew_ttl(&mut stream.config);
 
         let _ = stream.notify.send(());
 
@@ -637,6 +701,7 @@ impl Storage for InMemoryStorage {
                 updated_at: now,
             },
         );
+        super::fork::renew_ttl(&mut stream.config);
 
         let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
         let closed = stream.closed;
@@ -660,24 +725,29 @@ impl Storage for InMemoryStorage {
 
         if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-
-            if super::is_stream_expired(&stream.config) {
-                let stream_bytes = stream.total_bytes;
-                drop(stream);
-                streams.remove(name);
-                self.saturating_sub_total_bytes(stream_bytes);
-            } else if stream.state == StreamState::Tombstone {
-                return Err(Error::StreamGone(name.to_string()));
-            } else if stream.config == config {
-                let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-                let closed = stream.closed;
-                return Ok(super::CreateWithDataResult {
-                    status: CreateStreamResult::AlreadyExists,
-                    next_offset,
-                    closed,
-                });
-            } else {
-                return Err(Error::ConfigMismatch);
+            match super::fork::evaluate_root_create(
+                name,
+                &stream.config,
+                stream.state,
+                stream.ref_count,
+                &config,
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(stream);
+                    self.remove_for_recreate(&mut streams, name);
+                }
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
+                    let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+                    let closed = stream.closed;
+                    return Ok(super::CreateWithDataResult {
+                        status: CreateStreamResult::AlreadyExists,
+                        next_offset,
+                        closed,
+                    });
+                }
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
         }
 
@@ -731,16 +801,26 @@ impl Storage for InMemoryStorage {
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
             if super::is_stream_expired(&stream.config) {
-                expired.push((name.clone(), stream.total_bytes));
+                expired.push((name.clone(), stream.ref_count));
             }
         }
 
-        for (name, bytes) in &expired {
-            streams.remove(name);
-            self.saturating_sub_total_bytes(*bytes);
+        let removed_count = expired.len();
+        for (name, ref_count) in expired {
+            match super::fork::evaluate_expired_cleanup(ref_count) {
+                super::fork::DeleteDisposition::Tombstone => {
+                    if let Some(stream_arc) = streams.get(&name) {
+                        let mut stream = stream_arc.write().expect("stream lock poisoned");
+                        stream.state = StreamState::Tombstone;
+                    }
+                }
+                super::fork::DeleteDisposition::HardDelete => {
+                    self.remove_for_recreate(&mut streams, &name);
+                }
+            }
         }
 
-        expired.len()
+        removed_count
     }
 
     fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
@@ -748,9 +828,7 @@ impl Storage for InMemoryStorage {
         let mut result = Vec::new();
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            if super::is_stream_expired(&stream.config)
-                || stream.state == StreamState::Tombstone
-            {
+            if super::is_stream_expired(&stream.config) || stream.state == StreamState::Tombstone {
                 continue;
             }
             result.push((
@@ -770,24 +848,6 @@ impl Storage for InMemoryStorage {
         Ok(result)
     }
 
-    fn touch_ttl(&self, name: &str) -> Result<()> {
-        let stream_arc = self
-            .get_stream(name)
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
-
-        super::fork::check_stream_access(&stream.config, stream.state, name)?;
-
-        if let Some(ttl) = stream.config.ttl_seconds {
-            stream.config.expires_at = Some(
-                Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)),
-            );
-        }
-
-        Ok(())
-    }
-
     fn create_fork(
         &self,
         name: &str,
@@ -805,90 +865,62 @@ impl Storage for InMemoryStorage {
 
         let source = source_arc.read().expect("stream lock poisoned");
 
-        // Validate source: not expired, not tombstoned
-        super::fork::check_stream_access(&source.config, source.state, source_name)?;
+        super::fork::check_fork_source_access(&source.config, source.state, source_name)?;
 
         // Resolve fork offset (defaults to source tail)
         let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
-        let resolved_offset =
-            super::fork::resolve_fork_offset(fork_offset, &source_next_offset)?;
+        let resolved_offset = super::fork::resolve_fork_offset(fork_offset, &source_next_offset)?;
 
-        // Validate content type: fork must match source
-        if !config.content_type.eq_ignore_ascii_case(&source.config.content_type) {
+        if !config
+            .content_type
+            .eq_ignore_ascii_case(&source.config.content_type)
+        {
             return Err(Error::ContentTypeMismatch {
                 expected: source.config.content_type.clone(),
                 actual: config.content_type.clone(),
             });
         }
-
-        // Inherit content type from source (use source's exact casing)
-        let fork_content_type = source.config.content_type.clone();
-
-        // Resolve TTL inheritance
-        let (fork_ttl, fork_expires_at) = super::fork::resolve_fork_ttl(
+        let fork_spec = super::fork::build_fork_create_spec(
+            source_name,
             &source.config,
-            config.ttl_seconds,
-            config.expires_at,
+            &config,
+            resolved_offset.clone(),
         );
-
-        // Whether fork should be closed: inherit source's closed state if
-        // the fork was requested closed, otherwise start open
-        let fork_closed = config.created_closed;
 
         drop(source);
 
-        // Check idempotent create — if fork already exists with matching config
         if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
-            if super::is_stream_expired(&existing.config) {
-                let existing_bytes = existing.total_bytes;
-                drop(existing);
-                streams.remove(name);
-                self.saturating_sub_total_bytes(existing_bytes);
-            } else if existing.state == StreamState::Tombstone {
-                return Err(Error::StreamGone(name.to_string()));
-            } else {
-                // Idempotent check: config must match
-                let mut expected_config = StreamConfig::new(fork_content_type.clone());
-                if let Some(ttl) = fork_ttl {
-                    expected_config = expected_config.with_ttl(ttl);
+            match super::fork::evaluate_fork_create(
+                name,
+                &existing.config,
+                existing.fork_info.as_ref(),
+                existing.state,
+                existing.ref_count,
+                &fork_spec,
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(existing);
+                    self.remove_for_recreate(&mut streams, name);
                 }
-                if let Some(ea) = fork_expires_at {
-                    expected_config = expected_config.with_expires_at(ea);
-                }
-                if fork_closed {
-                    expected_config = expected_config.with_created_closed(true);
-                }
-                if existing.config == expected_config {
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
                     return Ok(CreateStreamResult::AlreadyExists);
                 }
-                return Err(Error::ConfigMismatch);
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
         }
 
         // Extract fork offset components to initialize the fork entry
-        let (fork_read_seq, fork_byte_offset) = resolved_offset
-            .parse_components()
-            .unwrap_or((0, 0));
+        let (fork_read_seq, fork_byte_offset) =
+            resolved_offset.parse_components().unwrap_or((0, 0));
 
-        // Build fork config
-        let mut fork_config = StreamConfig::new(fork_content_type);
-        if let Some(ttl) = fork_ttl {
-            fork_config = fork_config.with_ttl(ttl);
-        }
-        if let Some(ea) = fork_expires_at {
-            fork_config = fork_config.with_expires_at(ea);
-        }
-        if fork_closed {
-            fork_config = fork_config.with_created_closed(true);
-        }
-
-        // Create fork entry
         let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
         let entry = StreamEntry {
-            config: fork_config,
+            config: fork_spec.config,
             messages: Vec::with_capacity(INITIAL_MESSAGES_CAPACITY),
-            closed: fork_closed,
+            closed: config.created_closed,
             next_read_seq: fork_read_seq,
             next_byte_offset: fork_byte_offset,
             total_bytes: 0,
@@ -898,7 +930,7 @@ impl Storage for InMemoryStorage {
             notify,
             last_seq: None,
             fork_info: Some(ForkInfo {
-                source_name: source_name.to_string(),
+                source_name: fork_spec.source_name,
                 fork_offset: resolved_offset,
             }),
             ref_count: 0,
