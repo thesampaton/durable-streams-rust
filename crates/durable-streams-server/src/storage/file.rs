@@ -5,8 +5,9 @@
 //! local persistence without introducing an external database.
 
 use super::{
-    CreateStreamResult, CreateWithDataResult, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
-    ProducerCheck, ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata,
+    CreateStreamResult, CreateWithDataResult, ForkInfo, NOTIFY_CHANNEL_CAPACITY,
+    ProducerAppendResult, ProducerCheck, ProducerState, ReadResult, Storage, StreamConfig,
+    StreamMetadata, StreamState,
 };
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
@@ -64,6 +65,12 @@ struct StreamMeta {
     updated_at: Option<DateTime<Utc>>,
     last_seq: Option<String>,
     producers: HashMap<String, ProducerState>,
+    #[serde(default)]
+    fork_info: Option<ForkInfo>,
+    #[serde(default)]
+    ref_count: u32,
+    #[serde(default)]
+    state: StreamState,
 }
 
 struct StreamEntry {
@@ -81,6 +88,9 @@ struct StreamEntry {
     file: File,
     file_len: u64,
     dir: PathBuf,
+    fork_info: Option<ForkInfo>,
+    ref_count: u32,
+    state: StreamState,
 }
 
 impl StreamEntry {
@@ -102,6 +112,9 @@ impl StreamEntry {
             file,
             file_len,
             dir,
+            fork_info: None,
+            ref_count: 0,
+            state: StreamState::Active,
         }
     }
 }
@@ -294,6 +307,9 @@ impl FileStorage {
             updated_at: entry.updated_at,
             last_seq: entry.last_seq.clone(),
             producers: entry.producers.clone(),
+            fork_info: entry.fork_info.clone(),
+            ref_count: entry.ref_count,
+            state: entry.state,
         };
 
         let meta_path = Self::meta_path(&entry.dir);
@@ -590,6 +606,135 @@ impl FileStorage {
         })
     }
 
+    /// Walk up the fork chain after a hard-delete, decrementing `ref_count`s
+    /// and garbage-collecting tombstoned ancestors with zero references.
+    ///
+    /// Must be called while holding the streams write lock.
+    fn cascade_delete(
+        &self,
+        streams: &mut HashMap<String, Arc<RwLock<StreamEntry>>>,
+        parent_name: &str,
+    ) {
+        let mut current_parent = parent_name.to_string();
+        loop {
+            let Some(parent_arc) = streams.get(&current_parent) else {
+                break;
+            };
+            let parent_arc = parent_arc.clone();
+            let mut parent = parent_arc.write().expect("stream lock poisoned");
+            parent.ref_count = parent.ref_count.saturating_sub(1);
+
+            if parent.state == StreamState::Tombstone && parent.ref_count == 0 {
+                // This parent can be garbage-collected
+                let fi = parent.fork_info.clone();
+                let dir = parent.dir.clone();
+                let total = parent.total_bytes;
+                // Persist updated ref_count before removing
+                drop(parent);
+                streams.remove(&current_parent);
+
+                if let Err(e) = self.remove_stream_dir(&dir) {
+                    warn!(%e, stream = current_parent.as_str(), "failed to remove tombstoned ancestor directory during cascade delete");
+                } else {
+                    self.rollback_total_bytes(total);
+                }
+
+                // Continue up the chain
+                if let Some(fi) = fi {
+                    current_parent = fi.source_name;
+                } else {
+                    break;
+                }
+            } else {
+                // Parent still alive or has other children — persist ref_count update
+                if let Err(e) = self.write_metadata_for(&current_parent, &parent) {
+                    warn!(%e, stream = current_parent.as_str(), "failed to persist parent ref_count during cascade delete");
+                }
+                break;
+            }
+        }
+    }
+
+    /// Read messages from a source chain, following fork lineage upward.
+    ///
+    /// Reads all messages from `from_offset` up to (but not including) `up_to`
+    /// across the full ancestor chain. This bypasses tombstone checks since
+    /// source streams may be soft-deleted but their data must still be readable
+    /// by forks.
+    fn read_source_chain(
+        &self,
+        source_name: &str,
+        from_offset: &Offset,
+        up_to: &Offset,
+    ) -> Result<Vec<Bytes>> {
+        let streams = self.streams.read().expect("streams lock poisoned");
+
+        // Build the ancestor chain from source to root
+        let plan = super::fork::build_read_plan(source_name, |n| {
+            streams.get(n).map(|arc| {
+                let s = arc.read().expect("stream lock poisoned");
+                s.fork_info.clone()
+            })
+        });
+
+        let mut all_messages: Vec<Bytes> = Vec::new();
+
+        for (i, segment) in plan.iter().enumerate() {
+            let Some(seg_arc) = streams.get(&segment.name) else {
+                continue;
+            };
+            let seg_stream = seg_arc.read().expect("stream lock poisoned");
+
+            // Determine the effective upper bound for this segment
+            let effective_up_to = if i == plan.len() - 1 {
+                // Last segment (the direct source): read up to `up_to`
+                Some(up_to)
+            } else {
+                // Intermediate segment: read up to this segment's read_up_to
+                segment.read_up_to.as_ref()
+            };
+
+            // Determine start offset for this segment
+            let effective_from = if i == 0 {
+                from_offset
+            } else {
+                &Offset::start()
+            };
+
+            // Find start index in this segment's index
+            let start_idx = if effective_from.is_start() {
+                0
+            } else {
+                match seg_stream
+                    .index
+                    .binary_search_by(|m| m.offset.cmp(effective_from))
+                {
+                    Ok(idx) | Err(idx) => idx,
+                }
+            };
+
+            // Find end index based on upper bound
+            let end_idx = if let Some(bound) = effective_up_to {
+                match seg_stream
+                    .index
+                    .binary_search_by(|m| m.offset.cmp(bound))
+                {
+                    Ok(idx) | Err(idx) => idx,
+                }
+            } else {
+                seg_stream.index.len()
+            };
+
+            if start_idx < end_idx {
+                let index_slice = &seg_stream.index[start_idx..end_idx];
+                let msgs = Self::read_messages(&seg_stream.file, index_slice)?;
+                all_messages.extend(msgs);
+            }
+        }
+
+        Ok(all_messages)
+    }
+
     fn load_existing_streams(&self) -> Result<()> {
         let entries = fs::read_dir(&self.root_dir).map_err(|e| {
             Error::Storage(format!(
@@ -668,6 +813,9 @@ impl FileStorage {
                 file,
                 file_len,
                 dir: path,
+                fork_info: meta.fork_info,
+                ref_count: meta.ref_count,
+                state: meta.state,
             };
 
             if super::is_stream_expired(&entry.config) {
@@ -712,6 +860,8 @@ impl Storage for FileStorage {
 
                 self.remove_stream_dir(&dir)?;
                 self.rollback_total_bytes(stream_bytes);
+            } else if stream.state == StreamState::Tombstone {
+                return Err(Error::StreamGone(name.to_string()));
             } else if stream.config == config {
                 return Ok(CreateStreamResult::AlreadyExists);
             } else {
@@ -751,9 +901,7 @@ impl Storage for FileStorage {
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         if stream.closed {
             return Err(Error::StreamClosed);
@@ -787,9 +935,7 @@ impl Storage for FileStorage {
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         if stream.closed {
             return Err(Error::StreamClosed);
@@ -818,58 +964,141 @@ impl Storage for FileStorage {
 
         let stream = stream_arc.read().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
+
+        let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
 
         if from_offset.is_now() {
             return Ok(ReadResult {
                 messages: Vec::new(),
-                next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                next_offset,
                 at_tail: true,
                 closed: stream.closed,
             });
         }
 
-        let start_idx = if from_offset.is_start() {
-            0
-        } else {
-            match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                Ok(idx) | Err(idx) => idx,
-            }
-        };
+        // If stream has no fork lineage, use the fast path
+        if stream.fork_info.is_none() {
+            let start_idx = if from_offset.is_start() {
+                0
+            } else {
+                match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
+                    Ok(idx) | Err(idx) => idx,
+                }
+            };
 
-        let index_slice = &stream.index[start_idx..];
-        let messages = Self::read_messages(&stream.file, index_slice)?;
-        let at_tail = start_idx + messages.len() >= stream.index.len();
+            let index_slice = &stream.index[start_idx..];
+            let messages = Self::read_messages(&stream.file, index_slice)?;
+            let at_tail = start_idx + messages.len() >= stream.index.len();
+
+            return Ok(ReadResult {
+                messages,
+                next_offset,
+                at_tail,
+                closed: stream.closed,
+            });
+        }
+
+        // Fork-aware read: stitch messages from source chain + fork's own data
+        let fi = stream.fork_info.clone().expect("checked above");
+        let closed = stream.closed;
+
+        // Read fork's own messages eagerly while we hold the lock
+        let fork_local_messages: Vec<Bytes> = if from_offset.is_start()
+            || *from_offset <= fi.fork_offset
+        {
+            // All fork messages
+            Self::read_messages(&stream.file, &stream.index)?
+        } else {
+            // from_offset is past fork_offset — binary search within fork messages
+            let start_idx =
+                match stream
+                    .index
+                    .binary_search_by(|m| m.offset.cmp(from_offset))
+                {
+                    Ok(idx) | Err(idx) => idx,
+                };
+            Self::read_messages(&stream.file, &stream.index[start_idx..])?
+        };
+        drop(stream);
+
+        let mut all_messages: Vec<Bytes> = Vec::new();
+
+        // Read source data if from_offset is before the fork_offset
+        if from_offset.is_start() || *from_offset < fi.fork_offset {
+            let source_messages =
+                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset)?;
+            all_messages.extend(source_messages);
+        }
+
+        // Add fork's own messages
+        all_messages.extend(fork_local_messages);
 
         Ok(ReadResult {
-            messages,
-            next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-            at_tail,
-            closed: stream.closed,
+            messages: all_messages,
+            next_offset,
+            at_tail: true,
+            closed,
         })
     }
 
     fn delete(&self, name: &str) -> Result<()> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        if let Some(stream_arc) = streams.remove(name) {
+        let stream_arc = streams
+            .get(name)
+            .ok_or_else(|| Error::NotFound(name.to_string()))?
+            .clone();
+
+        {
             let stream = stream_arc.read().expect("stream lock poisoned");
+
+            // Already tombstoned — treat as gone
+            if stream.state == StreamState::Tombstone {
+                return Err(Error::StreamGone(name.to_string()));
+            }
+
+            // Check expiry — let it fall through to removal
+            if super::is_stream_expired(&stream.config) {
+                // fall through
+            }
+
+            if stream.ref_count > 0 {
+                // Has child forks — soft-delete (tombstone)
+                drop(stream);
+                let mut stream_w = stream_arc.write().expect("stream lock poisoned");
+                stream_w.state = StreamState::Tombstone;
+                if let Err(e) = self.write_metadata_for(name, &stream_w) {
+                    warn!(%e, stream = name, "failed to persist tombstone state");
+                }
+                return Ok(());
+            }
+        }
+
+        // No child forks — hard delete
+        let fork_info = {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            let fi = stream.fork_info.clone();
             let dir = stream.dir.clone();
             let stream_bytes = stream.total_bytes;
             drop(stream);
 
             if let Err(e) = self.remove_stream_dir(&dir) {
-                // Re-insert into map — the stream still exists on disk.
-                streams.insert(name.to_string(), stream_arc);
+                // Directory removal failed — stream still exists on disk
                 return Err(e);
             }
             self.rollback_total_bytes(stream_bytes);
-            Ok(())
-        } else {
-            Err(Error::NotFound(name.to_string()))
+            fi
+        };
+        streams.remove(name);
+
+        // Cascade: decrement parent ref_count, and if parent is tombstoned
+        // with ref_count reaching 0, hard-delete it too (walk up the chain).
+        if let Some(fi) = fork_info {
+            self.cascade_delete(&mut streams, &fi.source_name);
         }
+
+        Ok(())
     }
 
     fn head(&self, name: &str) -> Result<StreamMetadata> {
@@ -879,9 +1108,7 @@ impl Storage for FileStorage {
 
         let stream = stream_arc.read().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         Ok(StreamMetadata {
             config: stream.config.clone(),
@@ -901,9 +1128,7 @@ impl Storage for FileStorage {
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         stream.closed = true;
         stream.updated_at = Some(Utc::now());
@@ -928,9 +1153,7 @@ impl Storage for FileStorage {
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
-            return Err(Error::StreamExpired);
-        }
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         super::cleanup_stale_producers(&mut stream.producers);
 
@@ -1009,6 +1232,8 @@ impl Storage for FileStorage {
 
                 self.remove_stream_dir(&dir)?;
                 self.rollback_total_bytes(stream_bytes);
+            } else if stream.state == StreamState::Tombstone {
+                return Err(Error::StreamGone(name.to_string()));
             } else if stream.config == config {
                 return Ok(CreateWithDataResult {
                     status: CreateStreamResult::AlreadyExists,
@@ -1068,7 +1293,7 @@ impl Storage for FileStorage {
         let streams = self.streams.read().expect("streams lock poisoned");
         if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            !super::is_stream_expired(&stream.config)
+            !super::is_stream_expired(&stream.config) && stream.state == StreamState::Active
         } else {
             false
         }
@@ -1078,7 +1303,7 @@ impl Storage for FileStorage {
         let stream_arc = self.get_stream(name)?;
         let stream = stream_arc.read().expect("stream lock poisoned");
 
-        if super::is_stream_expired(&stream.config) {
+        if super::is_stream_expired(&stream.config) || stream.state == StreamState::Tombstone {
             return None;
         }
 
@@ -1092,17 +1317,39 @@ impl Storage for FileStorage {
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
             if super::is_stream_expired(&stream.config) {
-                expired.push((name.clone(), stream.total_bytes, stream.dir.clone()));
+                expired.push((
+                    name.clone(),
+                    stream.total_bytes,
+                    stream.dir.clone(),
+                    stream.ref_count,
+                    stream.fork_info.clone(),
+                ));
             }
         }
 
         let count = expired.len();
-        for (name, bytes, dir) in &expired {
-            streams.remove(name);
-            if let Err(e) = self.remove_stream_dir(dir) {
-                warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+        for (name, bytes, dir, ref_count, fork_info) in expired {
+            if ref_count > 0 {
+                // Has child forks — tombstone instead of hard-delete
+                if let Some(arc) = streams.get(&name) {
+                    let mut stream = arc.write().expect("stream lock poisoned");
+                    stream.state = StreamState::Tombstone;
+                    if let Err(e) = self.write_metadata_for(&name, &stream) {
+                        warn!(%e, stream = name.as_str(), "failed to persist tombstone for expired stream");
+                    }
+                }
             } else {
-                self.rollback_total_bytes(*bytes);
+                // No children — hard delete
+                streams.remove(&name);
+                if let Err(e) = self.remove_stream_dir(&dir) {
+                    warn!(%e, stream = name.as_str(), "failed to remove expired stream directory");
+                } else {
+                    self.rollback_total_bytes(bytes);
+                }
+                // Cascade up fork chain
+                if let Some(fi) = fork_info {
+                    self.cascade_delete(&mut streams, &fi.source_name);
+                }
             }
         }
 
@@ -1114,7 +1361,9 @@ impl Storage for FileStorage {
         let mut result = Vec::new();
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            if super::is_stream_expired(&stream.config) {
+            if super::is_stream_expired(&stream.config)
+                || stream.state == StreamState::Tombstone
+            {
                 continue;
             }
             result.push((
@@ -1132,6 +1381,187 @@ impl Storage for FileStorage {
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
+    }
+
+    fn create_fork(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&Offset>,
+        config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        let mut streams = self.streams.write().expect("streams lock poisoned");
+
+        // Look up source stream
+        let source_arc = streams
+            .get(source_name)
+            .ok_or_else(|| Error::NotFound(source_name.to_string()))?
+            .clone();
+
+        let source = source_arc.read().expect("stream lock poisoned");
+
+        // Validate source: not expired, not tombstoned
+        super::fork::check_stream_access(&source.config, source.state, source_name)?;
+
+        // Resolve fork offset (defaults to source tail)
+        let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
+        let resolved_offset =
+            super::fork::resolve_fork_offset(fork_offset, &source_next_offset)?;
+
+        // Validate content type: fork must match source
+        if !config
+            .content_type
+            .eq_ignore_ascii_case(&source.config.content_type)
+        {
+            return Err(Error::ContentTypeMismatch {
+                expected: source.config.content_type.clone(),
+                actual: config.content_type.clone(),
+            });
+        }
+
+        // Inherit content type from source (use source's exact casing)
+        let fork_content_type = source.config.content_type.clone();
+
+        // Resolve TTL inheritance
+        let (fork_ttl, fork_expires_at) = super::fork::resolve_fork_ttl(
+            &source.config,
+            config.ttl_seconds,
+            config.expires_at,
+        );
+
+        // Whether fork should be closed
+        let fork_closed = config.created_closed;
+
+        drop(source);
+
+        // Check idempotent create — if fork already exists with matching config
+        if let Some(existing_arc) = streams.get(name) {
+            let existing = existing_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&existing.config) {
+                let existing_bytes = existing.total_bytes;
+                let dir = existing.dir.clone();
+                drop(existing);
+                streams.remove(name);
+                if let Err(e) = self.remove_stream_dir(&dir) {
+                    warn!(%e, stream = name, "failed to remove expired fork directory");
+                }
+                self.rollback_total_bytes(existing_bytes);
+            } else if existing.state == StreamState::Tombstone {
+                return Err(Error::StreamGone(name.to_string()));
+            } else {
+                // Idempotent check: config must match
+                let mut expected_config = StreamConfig::new(fork_content_type.clone());
+                if let Some(ttl) = fork_ttl {
+                    expected_config = expected_config.with_ttl(ttl);
+                }
+                if let Some(ea) = fork_expires_at {
+                    expected_config = expected_config.with_expires_at(ea);
+                }
+                if fork_closed {
+                    expected_config = expected_config.with_created_closed(true);
+                }
+                if existing.config == expected_config {
+                    return Ok(CreateStreamResult::AlreadyExists);
+                }
+                return Err(Error::ConfigMismatch);
+            }
+        }
+
+        // Extract fork offset components to initialize the fork entry
+        let (fork_read_seq, fork_byte_offset) = resolved_offset
+            .parse_components()
+            .unwrap_or((0, 0));
+
+        // Build fork config
+        let mut fork_config = StreamConfig::new(fork_content_type);
+        if let Some(ttl) = fork_ttl {
+            fork_config = fork_config.with_ttl(ttl);
+        }
+        if let Some(ea) = fork_expires_at {
+            fork_config = fork_config.with_expires_at(ea);
+        }
+        if fork_closed {
+            fork_config = fork_config.with_created_closed(true);
+        }
+
+        // Create fork directory and files on disk
+        let dir = self.stream_dir_for_name(name)?;
+        retry_on_eintr(|| fs::create_dir_all(&dir)).map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "create fork directory",
+                format!("failed to create fork directory {}: {e}", dir.display()),
+                &e,
+            )
+        })?;
+        self.validate_stream_dir(&dir)?;
+        let file = self.open_stream_file(&dir)?;
+
+        // Create fork entry
+        let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
+        let file_len = file.metadata().map_or(0, |m| m.len());
+        let entry = StreamEntry {
+            config: fork_config,
+            index: Vec::with_capacity(INITIAL_INDEX_CAPACITY),
+            closed: fork_closed,
+            next_read_seq: fork_read_seq,
+            next_byte_offset: fork_byte_offset,
+            total_bytes: 0,
+            created_at: Utc::now(),
+            updated_at: None,
+            producers: HashMap::with_capacity(INITIAL_PRODUCERS_CAPACITY),
+            notify,
+            last_seq: None,
+            file,
+            file_len,
+            dir: dir.clone(),
+            fork_info: Some(ForkInfo {
+                source_name: source_name.to_string(),
+                fork_offset: resolved_offset,
+            }),
+            ref_count: 0,
+            state: StreamState::Active,
+        };
+
+        // Write fork metadata to disk
+        if let Err(e) = self.write_metadata_for(name, &entry) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
+            }
+            return Err(e);
+        }
+
+        streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
+
+        // Increment source ref_count and persist
+        if let Some(source_arc) = streams.get(source_name) {
+            let mut source = source_arc.write().expect("stream lock poisoned");
+            source.ref_count += 1;
+            if let Err(e) = self.write_metadata_for(source_name, &source) {
+                warn!(%e, stream = source_name, "failed to persist source ref_count after fork creation");
+            }
+        }
+
+        Ok(CreateStreamResult::Created)
+    }
+
+    fn touch_ttl(&self, name: &str) -> Result<()> {
+        let stream_arc = self
+            .get_stream(name)
+            .ok_or_else(|| Error::NotFound(name.to_string()))?;
+
+        let mut stream = stream_arc.write().expect("stream lock poisoned");
+
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
+
+        if let Some(ttl) = stream.config.ttl_seconds {
+            stream.config.expires_at = Some(
+                Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)),
+            );
+            self.write_metadata_for(name, &stream)?;
+        }
+
+        Ok(())
     }
 }
 
