@@ -229,12 +229,17 @@ fn decode_hex_16(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Serialize an `Offset` as its canonical string representation.
-pub fn serialize_offset<S: serde::Serializer>(offset: &Offset, s: S) -> std::result::Result<S::Ok, S::Error> {
+pub fn serialize_offset<S: serde::Serializer>(
+    offset: &Offset,
+    s: S,
+) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_str(offset.as_str())
 }
 
 /// Deserialize an `Offset` from its canonical string representation.
-pub fn deserialize_offset<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Offset, D::Error> {
+pub fn deserialize_offset<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Offset, D::Error> {
     let raw = <String as serde::Deserialize>::deserialize(d)?;
     raw.parse::<Offset>().map_err(serde::de::Error::custom)
 }

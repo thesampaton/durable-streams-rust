@@ -8,7 +8,10 @@
 mod common;
 
 use bytes::Bytes;
-use common::{ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits, with_each_backend};
+use common::{
+    ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits,
+    with_each_backend,
+};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};

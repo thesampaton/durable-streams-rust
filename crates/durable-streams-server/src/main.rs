@@ -183,17 +183,14 @@ async fn main() {
             }
         }
         Command::Export { output, stream } => {
-            if let Err(err) =
-                run_with_storage(&config, |storage| run_export(storage, output.as_ref(), stream))
-            {
+            if let Err(err) = run_with_storage(&config, |storage| {
+                run_export(storage, output.as_ref(), stream)
+            }) {
                 eprintln!("{err}");
                 std::process::exit(1);
             }
         }
-        Command::Import {
-            input,
-            on_conflict,
-        } => {
+        Command::Import { input, on_conflict } => {
             if let Err(err) = run_with_storage(&config, |storage| {
                 run_import(storage, input.as_ref(), on_conflict.into())
             }) {
@@ -400,8 +397,7 @@ fn run_import(
     };
 
     let stats = if let Some(path) = input {
-        let file =
-            fs::File::open(path).map_err(|e| format!("failed to open input file: {e}"))?;
+        let file = fs::File::open(path).map_err(|e| format!("failed to open input file: {e}"))?;
         import_streams(storage, file, &options).map_err(|e| format!("import failed: {e}"))?
     } else {
         let stdin = std::io::stdin().lock();

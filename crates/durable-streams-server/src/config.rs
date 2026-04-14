@@ -441,14 +441,10 @@ impl Config {
         Self::parse_stream_base_path_value(&self.stream_base_path).map(|_| ())?;
 
         if self.max_stream_name_bytes == 0 {
-            return Err(
-                "limits.max_stream_name_bytes must be at least 1".to_string(),
-            );
+            return Err("limits.max_stream_name_bytes must be at least 1".to_string());
         }
         if self.max_stream_name_segments == 0 {
-            return Err(
-                "limits.max_stream_name_segments must be at least 1".to_string(),
-            );
+            return Err("limits.max_stream_name_segments must be at least 1".to_string());
         }
 
         Ok(())

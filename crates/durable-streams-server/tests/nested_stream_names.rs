@@ -51,7 +51,11 @@ async fn nested_stream_name_full_lifecycle() {
         .expect("head request failed");
     assert_eq!(head.status(), 200);
     assert_eq!(
-        head.headers().get("content-type").unwrap().to_str().unwrap(),
+        head.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "text/plain"
     );
 
@@ -266,7 +270,11 @@ async fn error_response_includes_instance() {
         "rejection response should include instance field"
     );
     assert!(
-        problem.instance.as_deref().unwrap().contains("/v1/stream/too-long-name"),
+        problem
+            .instance
+            .as_deref()
+            .unwrap()
+            .contains("/v1/stream/too-long-name"),
         "instance should contain the request path, got: {:?}",
         problem.instance
     );
