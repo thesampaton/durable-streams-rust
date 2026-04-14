@@ -129,6 +129,18 @@ pub enum Error {
     #[error("Storage capacity exhausted: {0}")]
     InsufficientStorage(StorageFailure),
 
+    /// Stream has been deleted (tombstoned) and is gone (410)
+    #[error("Stream is gone: {0}")]
+    StreamGone(String),
+
+    /// Fork offset exceeds the source stream's tail (400)
+    #[error("Fork offset is beyond the source stream's tail")]
+    ForkOffsetBeyondTail,
+
+    /// Cannot fork from a tombstoned stream (409)
+    #[error("Cannot fork from deleted stream: {0}")]
+    ForkFromTombstone(String),
+
     /// Storage backend I/O or serialization error (500)
     #[error("Storage error: {0}")]
     Storage(String),
@@ -143,6 +155,9 @@ impl Error {
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::NotFound(_) | Self::StreamExpired => StatusCode::NOT_FOUND,
+            Self::StreamGone(_) => StatusCode::GONE,
+            Self::ForkOffsetBeyondTail => StatusCode::BAD_REQUEST,
+            Self::ForkFromTombstone(_) => StatusCode::CONFLICT,
             Self::ConfigMismatch
             | Self::ContentTypeMismatch { .. }
             | Self::StreamClosed
@@ -287,6 +302,27 @@ impl Error {
                 "Stream Not Found",
                 self.status_code(),
                 "NOT_FOUND",
+            )
+            .with_detail(self.to_string()),
+            Self::StreamGone(name) => ProblemDetails::new(
+                "/errors/gone",
+                "Stream Gone",
+                self.status_code(),
+                "GONE",
+            )
+            .with_detail(format!("Stream is gone: {name}")),
+            Self::ForkOffsetBeyondTail => ProblemDetails::new(
+                "/errors/bad-request",
+                "Bad Request",
+                self.status_code(),
+                "BAD_REQUEST",
+            )
+            .with_detail(self.to_string()),
+            Self::ForkFromTombstone(_) => ProblemDetails::new(
+                "/errors/fork-from-tombstone",
+                "Fork From Deleted Stream",
+                self.status_code(),
+                "FORK_FROM_TOMBSTONE",
             )
             .with_detail(self.to_string()),
             Self::Storage(_) => ProblemDetails::new(

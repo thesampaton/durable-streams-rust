@@ -15,6 +15,8 @@ pub mod names {
     pub const PRODUCER_SEQ: &str = "Producer-Seq";
     pub const PRODUCER_EXPECTED_SEQ: &str = "Producer-Expected-Seq";
     pub const PRODUCER_RECEIVED_SEQ: &str = "Producer-Received-Seq";
+    pub const STREAM_FORKED_FROM: &str = "Stream-Forked-From";
+    pub const STREAM_FORK_OFFSET: &str = "Stream-Fork-Offset";
 }
 
 /// Parse TTL header value
