@@ -7,6 +7,7 @@ use durable_streams_server::protocol::error::{Error, Result};
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::InMemoryStorage;
+use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata,
@@ -121,6 +122,21 @@ impl Storage for FailingAppendStorage {
 
     fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
         self.inner.list_streams()
+    }
+
+    fn create_fork(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&StorageOffset>,
+        config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        self.inner
+            .create_fork(name, source_name, fork_offset, config)
+    }
+
+    fn touch_ttl(&self, name: &str) -> Result<()> {
+        self.inner.touch_ttl(name)
     }
 }
 

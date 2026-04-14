@@ -1,6 +1,7 @@
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
+use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemResponse, Result, request_instance};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
@@ -13,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// PUT handler for creating streams
@@ -31,6 +33,7 @@ use std::sync::Arc;
 ///
 /// Panics if validated content-type or offset strings fail to parse into
 /// header values, which should never happen with valid inputs.
+#[allow(clippy::too_many_lines)]
 pub async fn create_stream<S: Storage>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
@@ -113,6 +116,66 @@ pub async fn create_stream<S: Storage>(
             config = config.with_created_closed(true);
         }
 
+        // ── Fork branch ──────────────────────────────────────────────
+        let forked_from = headers
+            .get(names::STREAM_FORKED_FROM)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let fork_offset_raw = headers
+            .get(names::STREAM_FORK_OFFSET)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        if let Some(forked_from_value) = forked_from {
+            // Strip stream_base_path prefix to get the source stream name
+            let source_name = strip_stream_base_path(&forked_from_value, &stream_base_path);
+
+            // Parse optional fork offset
+            let fork_offset = if let Some(ref raw) = fork_offset_raw {
+                Some(Offset::from_str(raw)?)
+            } else {
+                None
+            };
+
+            let create_result = storage
+                .create_fork(&name, &source_name, fork_offset.as_ref(), config)
+                .map_err(|e| match e {
+                    // StreamGone from create_fork should be 409 Conflict, not 410
+                    Error::StreamGone(_) => ProblemResponse::from(Error::ConfigMismatch),
+                    other => ProblemResponse::from(other),
+                })?;
+
+            // After fork creation, read the fork metadata for response headers
+            let meta = storage.head(&name)?;
+
+            let status = if matches!(create_result, CreateStreamResult::Created) {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+
+            let location = build_location_url(&headers, &stream_base_path, &name);
+
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert(
+                "content-type",
+                meta.config.content_type.parse().unwrap(),
+            );
+            response_headers.insert(
+                names::STREAM_NEXT_OFFSET,
+                HeaderValue::from_bytes(meta.next_offset.as_str().as_bytes()).unwrap(),
+            );
+            response_headers.insert("location", location.parse().unwrap());
+
+            if meta.closed {
+                response_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
+            }
+
+            return Ok((status, response_headers).into_response());
+        }
+
+        // ── Standard (non-fork) create branch ────────────────────────
+
         // Parse body into messages BEFORE creating the stream so that
         // failures (e.g. invalid JSON) never leave an orphaned stream.
         let messages = if body_bytes.is_empty() {
@@ -127,11 +190,19 @@ pub async fn create_stream<S: Storage>(
         // Atomic create + append + close. If commit_messages fails (e.g.
         // memory limit), the stream is never inserted. If created_closed,
         // the entry is closed before it becomes visible to other operations.
+        let create_with_data_result = storage
+            .create_stream_with_data(&name, config, messages, created_closed)
+            .map_err(|e| match e {
+                // StreamGone from create_stream_with_data should be 409 Conflict
+                Error::StreamGone(_) => ProblemResponse::from(Error::ConfigMismatch),
+                other => ProblemResponse::from(other),
+            })?;
+
         let CreateWithDataResult {
             status: create_status,
             next_offset,
             closed,
-        } = storage.create_stream_with_data(&name, config, messages, created_closed)?;
+        } = create_with_data_result;
 
         let status = if matches!(create_status, CreateStreamResult::Created) {
             StatusCode::CREATED
@@ -159,6 +230,26 @@ pub async fn create_stream<S: Storage>(
     .await;
 
     result.map_err(|problem| problem.with_instance(instance))
+}
+
+/// Strip the stream base path prefix from a fork source header value.
+///
+/// The conformance tests send the `Stream-Forked-From` header as the full
+/// URL path (e.g., `/v1/stream/source-name`). This strips the leading
+/// `stream_base_path + "/"` to get just the stream name.
+fn strip_stream_base_path(value: &str, stream_base_path: &str) -> String {
+    let prefix = if stream_base_path == "/" {
+        "/".to_string()
+    } else {
+        format!("{stream_base_path}/")
+    };
+
+    if let Some(stripped) = value.strip_prefix(&prefix) {
+        stripped.to_string()
+    } else {
+        // If the value doesn't start with the prefix, use it as-is
+        value.to_string()
+    }
 }
 
 /// Build an absolute Location URL from request headers.

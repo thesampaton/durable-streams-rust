@@ -53,7 +53,15 @@ pub async fn stream_metadata<S: Storage>(
         if let Some(expires_at) = metadata.config.expires_at {
             // Calculate remaining TTL
             let now = Utc::now();
-            let remaining_seconds = (expires_at - now).num_seconds();
+            let remaining_seconds = if metadata.config.ttl_seconds.is_some() {
+                // When TTL was configured, use ceiling division to avoid
+                // reporting a value lower than the configured TTL when
+                // only sub-second drift has occurred.
+                let remaining_ms = (expires_at - now).num_milliseconds();
+                (remaining_ms + 999) / 1000
+            } else {
+                (expires_at - now).num_seconds()
+            };
 
             // Only include if not expired (positive remaining time)
             if remaining_seconds > 0 {

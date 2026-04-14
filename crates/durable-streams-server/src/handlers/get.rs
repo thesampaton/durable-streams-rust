@@ -86,6 +86,10 @@ pub async fn read_stream<S: Storage + 'static>(
         let metadata = storage.head(&name)?;
         let content_type = metadata.config.content_type.clone();
 
+        // Reset TTL sliding window on read (no-op if stream has no TTL).
+        // Ignore errors — the subsequent read will surface the right error.
+        let _ = storage.touch_ttl(&name);
+
         if let Some(ref live) = query.live {
             match live.as_str() {
                 "long-poll" => {

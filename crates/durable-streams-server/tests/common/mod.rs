@@ -12,6 +12,7 @@ use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
 };
+use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -241,6 +242,28 @@ impl Storage for TestStorage {
             Self::Memory(inner) => inner.list_streams(),
             Self::File(inner) => inner.list_streams(),
             Self::Acid(inner) => inner.list_streams(),
+        }
+    }
+
+    fn create_fork(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&StorageOffset>,
+        config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        match self {
+            Self::Memory(inner) => inner.create_fork(name, source_name, fork_offset, config),
+            Self::File(inner) => inner.create_fork(name, source_name, fork_offset, config),
+            Self::Acid(inner) => inner.create_fork(name, source_name, fork_offset, config),
+        }
+    }
+
+    fn touch_ttl(&self, name: &str) -> Result<()> {
+        match self {
+            Self::Memory(inner) => inner.touch_ttl(name),
+            Self::File(inner) => inner.touch_ttl(name),
+            Self::Acid(inner) => inner.touch_ttl(name),
         }
     }
 }
