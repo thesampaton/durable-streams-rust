@@ -34,8 +34,8 @@ pub struct ReadQuery {
     /// Cursor echoed from previous long-poll response. Parsed by axum/serde
     /// so the query param is accepted, but the server doesn't use it — it
     /// exists for CDN intermediaries to collapse identical polling requests.
-    #[allow(dead_code)]
-    cursor: Option<String>,
+    #[serde(rename = "cursor")]
+    _cursor: Option<String>,
 }
 
 /// GET handler for reading stream data
