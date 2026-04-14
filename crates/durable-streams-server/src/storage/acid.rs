@@ -55,6 +55,8 @@ struct StoredStreamMeta {
     next_byte_offset: u64,
     total_bytes: u64,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    updated_at: Option<DateTime<Utc>>,
     last_seq: Option<String>,
     producers: HashMap<String, ProducerState>,
 }
@@ -455,6 +457,7 @@ impl AcidStorage {
             next_byte_offset: 0,
             total_bytes: 0,
             created_at: Utc::now(),
+            updated_at: None,
             last_seq: None,
             producers: HashMap::new(),
         }
@@ -746,6 +749,7 @@ impl Storage for AcidStorage {
             meta.next_read_seq += 1;
             meta.next_byte_offset += message_bytes;
             meta.total_bytes += message_bytes;
+            meta.updated_at = Some(Utc::now());
 
             Self::write_stream_meta(&mut streams, name, &meta)?;
 
@@ -826,6 +830,7 @@ impl Storage for AcidStorage {
             if let Some(new_seq) = pending_seq {
                 meta.last_seq = Some(new_seq);
             }
+            meta.updated_at = Some(Utc::now());
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             Self::write_stream_meta(&mut streams, name, &meta)?;
@@ -957,6 +962,7 @@ impl Storage for AcidStorage {
             total_bytes: meta.total_bytes,
             message_count: meta.next_read_seq,
             created_at: meta.created_at,
+            updated_at: meta.updated_at,
         })
     }
 
@@ -975,6 +981,7 @@ impl Storage for AcidStorage {
         }
 
         meta.closed = true;
+        meta.updated_at = Some(Utc::now());
         Self::write_stream_meta(&mut streams, name, &meta)?;
 
         drop(streams);
@@ -1062,14 +1069,16 @@ impl Storage for AcidStorage {
                 meta.closed = true;
             }
 
+            let now = Utc::now();
             meta.producers.insert(
                 producer.id.clone(),
                 ProducerState {
                     epoch: producer.epoch,
                     last_seq: producer.seq,
-                    updated_at: Utc::now(),
+                    updated_at: now,
                 },
             );
+            meta.updated_at = Some(now);
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             let closed = meta.closed;
@@ -1316,6 +1325,51 @@ impl Storage for AcidStorage {
 
         total_removed
     }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        let mut result = Vec::new();
+
+        for shard in &self.shards {
+            let read_txn = shard
+                .db
+                .begin_read()
+                .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
+            let streams_table = read_txn
+                .open_table(STREAMS)
+                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+            let iter = streams_table
+                .iter()
+                .map_err(|e| Self::storage_err("failed to iterate streams", e))?;
+
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| Self::storage_err("failed to read stream entry", e))?;
+                let name = key.value().to_string();
+                let meta: StoredStreamMeta = serde_json::from_slice(value.value())
+                    .map_err(|e| Self::storage_err("failed to parse stream metadata", e))?;
+
+                if super::is_stream_expired(&meta.config) {
+                    continue;
+                }
+
+                result.push((
+                    name,
+                    StreamMetadata {
+                        config: meta.config,
+                        next_offset: Offset::new(meta.next_read_seq, meta.next_byte_offset),
+                        closed: meta.closed,
+                        total_bytes: meta.total_bytes,
+                        message_count: meta.next_read_seq,
+                        created_at: meta.created_at,
+                        updated_at: meta.updated_at,
+                    },
+                ));
+            }
+        }
+
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1345,107 +1399,8 @@ mod tests {
         .expect("acid storage should initialize")
     }
 
-    fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
-        ProducerHeaders {
-            id: id.to_string(),
-            epoch,
-            seq,
-        }
-    }
-
-    #[test]
-    fn test_restore_from_disk() {
-        let root = test_storage_dir();
-        let cfg = StreamConfig::new("text/plain".to_string());
-
-        {
-            let storage =
-                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
-                    .unwrap();
-            storage.create_stream("events", cfg.clone()).unwrap();
-            storage
-                .append("events", Bytes::from("event-1"), "text/plain")
-                .unwrap();
-            storage
-                .append("events", Bytes::from("event-2"), "text/plain")
-                .unwrap();
-        }
-
-        let restored =
-            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
-        let read = restored.read("events", &Offset::start()).unwrap();
-
-        assert_eq!(read.messages.len(), 2);
-        assert_eq!(read.messages[0], Bytes::from("event-1"));
-        assert_eq!(read.messages[1], Bytes::from("event-2"));
-    }
-
-    #[test]
-    fn test_restore_closed_stream_from_disk() {
-        let root = test_storage_dir();
-        let cfg = StreamConfig::new("text/plain".to_string());
-
-        {
-            let storage =
-                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
-                    .unwrap();
-            storage.create_stream("s", cfg.clone()).unwrap();
-            storage
-                .append("s", Bytes::from("data"), "text/plain")
-                .unwrap();
-            storage.close_stream("s").unwrap();
-        }
-
-        let restored =
-            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
-        let meta = restored.head("s").unwrap();
-        assert!(meta.closed);
-        assert_eq!(meta.message_count, 1);
-
-        assert!(matches!(
-            restored.append("s", Bytes::from("more"), "text/plain"),
-            Err(Error::StreamClosed)
-        ));
-    }
-
-    #[test]
-    fn test_restart_preserves_producer_state() {
-        let root = test_storage_dir();
-
-        {
-            let storage =
-                AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File)
-                    .unwrap();
-            storage
-                .create_stream("s", StreamConfig::new("text/plain".to_string()))
-                .unwrap();
-            let result = storage
-                .append_with_producer(
-                    "s",
-                    vec![Bytes::from("x")],
-                    "text/plain",
-                    &producer("p1", 0, 0),
-                    false,
-                    None,
-                )
-                .unwrap();
-            assert!(matches!(result, ProducerAppendResult::Accepted { .. }));
-        }
-
-        let restored =
-            AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
-        let dup = restored
-            .append_with_producer(
-                "s",
-                vec![Bytes::from("x")],
-                "text/plain",
-                &producer("p1", 0, 0),
-                false,
-                None,
-            )
-            .unwrap();
-        assert!(matches!(dup, ProducerAppendResult::Duplicate { .. }));
-    }
+    // Restore-from-disk and producer-state durability tests live in
+    // tests/acid_crash_recovery.rs and the storage_backend_contract suite.
 
     #[test]
     fn test_shard_routing_same_stream_is_stable() {

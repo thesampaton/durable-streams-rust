@@ -118,6 +118,10 @@ impl Storage for FailingAppendStorage {
     fn cleanup_expired_streams(&self) -> usize {
         self.inner.cleanup_expired_streams()
     }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        self.inner.list_streams()
+    }
 }
 
 #[tokio::test]

@@ -462,7 +462,7 @@ dependencies = [
 
 [[package]]
 name = "durable-streams-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-stream",
  "axum",
@@ -470,6 +470,7 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
+ "clap",
  "figment",
  "futures-util",
  "proptest",

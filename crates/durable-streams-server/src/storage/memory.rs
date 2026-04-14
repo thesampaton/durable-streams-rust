@@ -24,6 +24,7 @@ struct StreamEntry {
     next_byte_offset: u64,
     total_bytes: u64,
     created_at: chrono::DateTime<Utc>,
+    updated_at: Option<chrono::DateTime<Utc>>,
     /// Per-producer state for idempotent producer support
     producers: HashMap<String, ProducerState>,
     /// Broadcast sender for notifying long-poll/SSE subscribers
@@ -45,6 +46,7 @@ impl StreamEntry {
             next_byte_offset: 0,
             total_bytes: 0,
             created_at: Utc::now(),
+            updated_at: None,
             producers: HashMap::with_capacity(INITIAL_PRODUCERS_CAPACITY),
             notify,
             last_seq: None,
@@ -228,6 +230,7 @@ impl Storage for InMemoryStorage {
 
         let message = Message::new(offset.clone(), data);
         stream.messages.push(message);
+        stream.updated_at = Some(Utc::now());
 
         Ok(offset)
     }
@@ -268,6 +271,7 @@ impl Storage for InMemoryStorage {
         if let Some(new_seq) = pending_seq {
             stream.last_seq = Some(new_seq);
         }
+        stream.updated_at = Some(Utc::now());
 
         Ok(Offset::new(stream.next_read_seq, stream.next_byte_offset))
     }
@@ -351,6 +355,7 @@ impl Storage for InMemoryStorage {
             total_bytes: stream.total_bytes,
             message_count: u64::try_from(stream.messages.len()).unwrap_or(u64::MAX),
             created_at: stream.created_at,
+            updated_at: stream.updated_at,
         })
     }
 
@@ -366,6 +371,7 @@ impl Storage for InMemoryStorage {
         }
 
         stream.closed = true;
+        stream.updated_at = Some(Utc::now());
 
         let _ = stream.notify.send(());
 
@@ -421,6 +427,8 @@ impl Storage for InMemoryStorage {
         if should_close {
             stream.closed = true;
         }
+
+        stream.updated_at = Some(now);
 
         stream.producers.insert(
             producer.id.clone(),
@@ -533,63 +541,32 @@ impl Storage for InMemoryStorage {
 
         expired.len()
     }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        let streams = self.streams.read().expect("streams lock poisoned");
+        let mut result = Vec::new();
+        for (name, stream_arc) in streams.iter() {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&stream.config) {
+                continue;
+            }
+            result.push((
+                name.clone(),
+                StreamMetadata {
+                    config: stream.config.clone(),
+                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                    closed: stream.closed,
+                    total_bytes: stream.total_bytes,
+                    message_count: u64::try_from(stream.messages.len()).unwrap_or(u64::MAX),
+                    created_at: stream.created_at,
+                    updated_at: stream.updated_at,
+                },
+            ));
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::thread;
-
-    fn test_storage() -> InMemoryStorage {
-        InMemoryStorage::new(1024 * 1024, 100 * 1024)
-    }
-
-    fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
-        ProducerHeaders {
-            id: id.to_string(),
-            epoch,
-            seq,
-        }
-    }
-
-    #[test]
-    fn test_concurrent_producer_appends() {
-        let storage = Arc::new(test_storage());
-        let config = StreamConfig::new("text/plain".to_string());
-        storage.create_stream("test", config).unwrap();
-
-        let num_producers = 4;
-        let seqs_per_producer = 50;
-
-        let handles: Vec<_> = (0..num_producers)
-            .map(|p| {
-                let storage = Arc::clone(&storage);
-                thread::spawn(move || {
-                    let prod_id = format!("p{p}");
-                    for seq in 0..seqs_per_producer {
-                        let result = storage.append_with_producer(
-                            "test",
-                            vec![Bytes::from(format!("{prod_id}-{seq}"))],
-                            "text/plain",
-                            &producer(&prod_id, 0, seq),
-                            false,
-                            None,
-                        );
-                        assert!(
-                            result.is_ok(),
-                            "Producer {prod_id} seq {seq} failed: {result:?}"
-                        );
-                    }
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().expect("thread panicked");
-        }
-
-        let metadata = storage.head("test").unwrap();
-        assert_eq!(metadata.message_count, num_producers * seqs_per_producer);
-    }
-}
+// Concurrent producer and Storage trait contract tests live in the
+// integration test suite (storage_backend_contract, concurrent_stress).

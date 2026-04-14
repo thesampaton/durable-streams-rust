@@ -11,6 +11,9 @@
 //!
 //! The lower-level [`protocol`] module exposes types that are useful in tests,
 //! storage implementations, and conformance-oriented integrations.
+//!
+//! The [`transfer`] module provides JSON export/import for backup, restore,
+//! and cross-backend migration of stream data.
 
 pub mod config;
 mod handlers;
@@ -18,6 +21,7 @@ mod middleware;
 pub mod protocol;
 pub mod router;
 pub mod storage;
+pub mod transfer;
 
 pub use config::{Config, ConfigLoadOptions, StorageMode};
 pub use router::{DEFAULT_STREAM_BASE_PATH, ShutdownToken, build_router, build_router_with_ready};

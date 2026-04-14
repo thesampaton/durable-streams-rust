@@ -143,6 +143,8 @@ pub struct StreamMetadata {
     pub message_count: u64,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
+    /// Last modification timestamp (append, close, producer write)
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Outcome of [`Storage::create_stream`].
@@ -472,4 +474,12 @@ pub trait Storage: Send + Sync {
     /// This method sweeps all streams and deletes any that have expired,
     /// reclaiming their resources immediately.
     fn cleanup_expired_streams(&self) -> usize;
+
+    /// List all non-expired streams with their metadata.
+    ///
+    /// Returns `(name, metadata)` pairs sorted by stream name.
+    /// Expired streams are excluded from the listing.
+    ///
+    /// Returns `Err(Error::Storage)` if the underlying backend cannot be read.
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>>;
 }

@@ -3,6 +3,7 @@
 // a subset of helpers, so items appear unused when compiled per-test target.
 
 use durable_streams_server::config::{AcidBackend, Config, StorageMode};
+use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::problem::ProblemDetails;
@@ -46,6 +47,36 @@ impl StorageTestBackend {
             Self::FileDurable => "file-durable",
             Self::Acid => "acid",
             Self::AcidInMemory => "acid-in-memory",
+        }
+    }
+}
+
+/// All four storage backends.
+pub const ALL_BACKENDS: [StorageTestBackend; 4] = [
+    StorageTestBackend::Memory,
+    StorageTestBackend::FileDurable,
+    StorageTestBackend::Acid,
+    StorageTestBackend::AcidInMemory,
+];
+
+/// Run a test closure against each backend in `backends`, wrapping each
+/// iteration in `catch_unwind` so a failure names the backend that broke.
+pub fn with_each_backend(
+    backends: &[StorageTestBackend],
+    label: &str,
+    test: impl Fn(StorageTestBackend) + RefUnwindSafe,
+) {
+    for &backend in backends {
+        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
+        if let Err(payload) = result {
+            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            panic!("{label} failed for backend={}: {panic_msg}", backend.as_str());
         }
     }
 }
@@ -202,6 +233,14 @@ impl Storage for TestStorage {
             Self::Memory(inner) => inner.cleanup_expired_streams(),
             Self::File(inner) => inner.cleanup_expired_streams(),
             Self::Acid(inner) => inner.cleanup_expired_streams(),
+        }
+    }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        match self {
+            Self::Memory(inner) => inner.list_streams(),
+            Self::File(inner) => inner.list_streams(),
+            Self::Acid(inner) => inner.list_streams(),
         }
     }
 }

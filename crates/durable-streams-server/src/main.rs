@@ -1,9 +1,15 @@
 use axum_server::{Handle, tls_rustls::RustlsConfig};
+use clap::{Parser, Subcommand, ValueEnum};
 use durable_streams_server::{
     config::{Config, ConfigLoadOptions, StorageMode},
     router,
     storage::{Storage, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
+    transfer::{
+        export::{ExportOptions, export_streams},
+        import::{ConflictPolicy, ImportOptions, import_streams},
+    },
 };
+use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,59 +18,77 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-struct CliArgs {
+// ── CLI ─────────────────────────────────────────────────────────────
+
+/// Durable Streams protocol server.
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    /// Configuration profile (loads config/<name>.toml after config/default.toml)
+    #[arg(long, global = true, default_value = "default")]
     profile: String,
-    config_override: Option<PathBuf>,
+
+    /// Extra TOML configuration file to load last
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-impl CliArgs {
-    fn parse() -> Result<Self, String> {
-        let mut profile = String::from("default");
-        let mut config_override: Option<PathBuf> = None;
+#[derive(Subcommand)]
+enum Command {
+    /// Start the HTTP server (default when no subcommand is given)
+    Serve,
+    /// List all streams with their metadata
+    List {
+        /// Output as JSON instead of a table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export streams to JSON
+    Export {
+        /// Output file path (defaults to stdout)
+        #[arg(long, short)]
+        output: Option<PathBuf>,
 
-        let mut args = std::env::args().skip(1);
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--help" | "-h" => {
-                    print_usage();
-                    std::process::exit(0);
-                }
-                "--profile" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "missing value for --profile".to_string())?;
-                    profile = value;
-                }
-                "--config" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| "missing value for --config".to_string())?;
-                    config_override = Some(PathBuf::from(value));
-                }
-                _ if arg.starts_with("--profile=") => {
-                    profile = arg.trim_start_matches("--profile=").to_string();
-                }
-                _ if arg.starts_with("--config=") => {
-                    config_override = Some(PathBuf::from(arg.trim_start_matches("--config=")));
-                }
-                _ => {
-                    return Err(format!("unknown argument: {arg}"));
-                }
-            }
+        /// Only export streams matching these names (repeatable)
+        #[arg(long)]
+        stream: Vec<String>,
+    },
+    /// Import streams from JSON
+    Import {
+        /// Input file path (defaults to stdin)
+        #[arg(long, short)]
+        input: Option<PathBuf>,
+
+        /// How to handle streams that already exist
+        #[arg(long, value_enum, default_value_t = ConflictArg::Skip)]
+        on_conflict: ConflictArg,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ConflictArg {
+    /// Skip streams that already exist
+    Skip,
+    /// Fail if any stream already exists
+    Fail,
+    /// Delete and recreate existing streams
+    Replace,
+}
+
+impl From<ConflictArg> for ConflictPolicy {
+    fn from(arg: ConflictArg) -> Self {
+        match arg {
+            ConflictArg::Skip => Self::Skip,
+            ConflictArg::Fail => Self::Fail,
+            ConflictArg::Replace => Self::Replace,
         }
-
-        Ok(Self {
-            profile,
-            config_override,
-        })
     }
 }
 
-fn print_usage() {
-    eprintln!("Usage: durable-streams-server [--profile <name>] [--config <path>]");
-    eprintln!("  --profile <name>  Loads config/<name>.toml after config/default.toml");
-    eprintln!("  --config <path>   Loads an extra TOML override file last");
-}
+// ── Startup & runtime ───────────────────────────────────────────────
 
 struct AppRuntime {
     config: Config,
@@ -79,8 +103,6 @@ impl AppRuntime {
         Ok(Self { config, addr })
     }
 
-    /// Log startup diagnostics. Extend this with pre-warming, cert reload
-    /// setup, or other one-time initialisation when needed.
     fn provision(&self) {
         tracing::info!("Starting durable streams server on {}", self.addr);
         tracing::info!(
@@ -98,12 +120,10 @@ impl AppRuntime {
 
     fn validate(&self) -> Result<(), String> {
         self.config.validate()?;
-
         if let (Some(cert), Some(key)) = (&self.config.tls_cert_path, &self.config.tls_key_path) {
             ensure_regular_file(cert)?;
             ensure_regular_file(key)?;
         }
-
         Ok(())
     }
 
@@ -121,20 +141,15 @@ fn ensure_regular_file(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Main ────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() {
-    let cli = match CliArgs::parse() {
-        Ok(cli) => cli,
-        Err(err) => {
-            eprintln!("{err}");
-            print_usage();
-            std::process::exit(2);
-        }
-    };
+    let cli = Cli::parse();
 
     let load_options = ConfigLoadOptions {
         profile: cli.profile,
-        config_override: cli.config_override,
+        config_override: cli.config,
         ..ConfigLoadOptions::default()
     };
 
@@ -146,21 +161,264 @@ async fn main() {
         }
     };
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| config.rust_log.clone().into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    match cli.command.unwrap_or(Command::Serve) {
+        Command::Serve => {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| config.rust_log.clone().into()),
+                )
+                .with(tracing_subscriber::fmt::layer())
+                .init();
 
-    if let Err(err) = run(config).await {
-        tracing::error!("{err}");
-        std::process::exit(1);
+            if let Err(err) = run_serve(config).await {
+                tracing::error!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Command::List { json } => {
+            if let Err(err) = run_with_storage(&config, |storage| run_list(storage, json)) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Command::Export { output, stream } => {
+            if let Err(err) =
+                run_with_storage(&config, |storage| run_export(storage, output.as_ref(), stream))
+            {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        Command::Import {
+            input,
+            on_conflict,
+        } => {
+            if let Err(err) = run_with_storage(&config, |storage| {
+                run_import(storage, input.as_ref(), on_conflict.into())
+            }) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
-async fn run(config: Config) -> Result<(), String> {
+// ── Storage factory for CLI commands ────────────────────────────────
+
+fn run_with_storage<F>(config: &Config, f: F) -> Result<(), String>
+where
+    F: FnOnce(&dyn Storage) -> Result<(), String>,
+{
+    match config.storage_mode {
+        StorageMode::Memory => {
+            let storage = InMemoryStorage::new(config.max_memory_bytes, config.max_stream_bytes);
+            f(&storage)
+        }
+        StorageMode::FileFast | StorageMode::FileDurable => {
+            let sync_on_append = config.storage_mode.sync_on_append();
+            let storage = FileStorage::new(
+                &config.data_dir,
+                config.max_memory_bytes,
+                config.max_stream_bytes,
+                sync_on_append,
+            )
+            .map_err(|e| format!("Failed to initialize file storage: {e}"))?;
+            f(&storage)
+        }
+        StorageMode::Acid => {
+            let storage = AcidStorage::new(
+                &config.data_dir,
+                config.acid_shard_count,
+                config.max_memory_bytes,
+                config.max_stream_bytes,
+                config.acid_backend,
+            )
+            .map_err(|e| format!("Failed to initialize acid storage: {e}"))?;
+            f(&storage)
+        }
+    }
+}
+
+// ── List command ────────────────────────────────────────────────────
+
+fn run_list(storage: &dyn Storage, json: bool) -> Result<(), String> {
+    let streams = storage
+        .list_streams()
+        .map_err(|e| format!("failed to list streams: {e}"))?;
+
+    if json {
+        print_streams_json(&streams);
+    } else {
+        print_streams_table(&streams);
+    }
+    Ok(())
+}
+
+fn print_streams_json(streams: &[(String, durable_streams_server::storage::StreamMetadata)]) {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct StreamInfo {
+        name: String,
+        status: String,
+        message_count: u64,
+        total_bytes: u64,
+        content_type: String,
+        created_at: String,
+        updated_at: Option<String>,
+        ttl_seconds: Option<u64>,
+        expires_at: Option<String>,
+    }
+
+    let entries: Vec<StreamInfo> = streams
+        .iter()
+        .map(|(name, meta)| StreamInfo {
+            name: name.clone(),
+            status: if meta.closed {
+                "closed".to_string()
+            } else {
+                "open".to_string()
+            },
+            message_count: meta.message_count,
+            total_bytes: meta.total_bytes,
+            content_type: meta.config.content_type.clone(),
+            created_at: meta.created_at.to_rfc3339(),
+            updated_at: meta.updated_at.map(|t| t.to_rfc3339()),
+            ttl_seconds: meta.config.ttl_seconds,
+            expires_at: meta.config.expires_at.map(|t| t.to_rfc3339()),
+        })
+        .collect();
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&entries).expect("JSON serialization should not fail")
+    );
+}
+
+fn print_streams_table(streams: &[(String, durable_streams_server::storage::StreamMetadata)]) {
+    if streams.is_empty() {
+        println!("No streams found.");
+        return;
+    }
+
+    println!(
+        "{:<30} {:<8} {:>10} {:>12} {:<24} {:<22} {:<22}",
+        "Name", "Status", "Messages", "Bytes", "Content-Type", "Created", "Updated"
+    );
+    println!("{}", "-".repeat(132));
+
+    for (name, meta) in streams {
+        let status = if meta.closed { "closed" } else { "open" };
+        let bytes = format_bytes(meta.total_bytes);
+        let created = meta.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let updated = meta.updated_at.map_or_else(
+            || "-".to_string(),
+            |t| t.format("%Y-%m-%d %H:%M:%S").to_string(),
+        );
+
+        println!(
+            "{:<30} {:<8} {:>10} {:>12} {:<24} {:<22} {:<22}",
+            truncate(name, 30),
+            status,
+            meta.message_count,
+            bytes,
+            truncate(&meta.config.content_type, 24),
+            created,
+            updated
+        );
+    }
+
+    println!();
+    println!("{} stream(s) total", streams.len());
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max.saturating_sub(3)])
+    }
+}
+
+// ── Export command ───────────────────────────────────────────────────
+
+fn run_export(
+    storage: &dyn Storage,
+    output: Option<&PathBuf>,
+    streams: Vec<String>,
+) -> Result<(), String> {
+    let options = ExportOptions {
+        stream_names: streams,
+    };
+
+    let stats = if let Some(path) = output {
+        let file =
+            fs::File::create(path).map_err(|e| format!("failed to create output file: {e}"))?;
+        export_streams(storage, &options, file).map_err(|e| format!("export failed: {e}"))?
+    } else {
+        let stdout = std::io::stdout().lock();
+        export_streams(storage, &options, stdout).map_err(|e| format!("export failed: {e}"))?
+    };
+
+    if output.is_some() {
+        eprintln!(
+            "Exported {} stream(s) with {} message(s)",
+            stats.streams_exported, stats.messages_exported
+        );
+    }
+
+    Ok(())
+}
+
+// ── Import command ──────────────────────────────────────────────────
+
+fn run_import(
+    storage: &dyn Storage,
+    input: Option<&PathBuf>,
+    on_conflict: ConflictPolicy,
+) -> Result<(), String> {
+    let options = ImportOptions {
+        conflict_policy: on_conflict,
+    };
+
+    let stats = if let Some(path) = input {
+        let file =
+            fs::File::open(path).map_err(|e| format!("failed to open input file: {e}"))?;
+        import_streams(storage, file, &options).map_err(|e| format!("import failed: {e}"))?
+    } else {
+        let stdin = std::io::stdin().lock();
+        import_streams(storage, stdin, &options).map_err(|e| format!("import failed: {e}"))?
+    };
+
+    eprintln!(
+        "Imported {} stream(s), skipped {}, {} message(s) total",
+        stats.streams_imported, stats.streams_skipped, stats.messages_imported
+    );
+
+    Ok(())
+}
+
+// ── Server ──────────────────────────────────────────────────────────
+
+async fn run_serve(config: Config) -> Result<(), String> {
     let runtime = AppRuntime::new(config)?;
     runtime.provision();
     runtime.validate()?;
@@ -253,8 +511,6 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("Shutdown signal received, beginning graceful drain");
-        // Cancel the token first so long-poll/SSE handlers drain cleanly,
-        // then trigger the HTTP server graceful shutdown.
         shutdown.cancel();
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });

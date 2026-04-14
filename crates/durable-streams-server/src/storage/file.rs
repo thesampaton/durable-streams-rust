@@ -60,6 +60,8 @@ struct StreamMeta {
     config: StreamConfig,
     closed: bool,
     created_at: DateTime<Utc>,
+    #[serde(default)]
+    updated_at: Option<DateTime<Utc>>,
     last_seq: Option<String>,
     producers: HashMap<String, ProducerState>,
 }
@@ -72,6 +74,7 @@ struct StreamEntry {
     next_byte_offset: u64,
     total_bytes: u64,
     created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
     producers: HashMap<String, ProducerState>,
     notify: broadcast::Sender<()>,
     last_seq: Option<String>,
@@ -92,6 +95,7 @@ impl StreamEntry {
             next_byte_offset: 0,
             total_bytes: 0,
             created_at: Utc::now(),
+            updated_at: None,
             producers: HashMap::with_capacity(INITIAL_PRODUCERS_CAPACITY),
             notify,
             last_seq: None,
@@ -287,6 +291,7 @@ impl FileStorage {
             config: entry.config.clone(),
             closed: entry.closed,
             created_at: entry.created_at,
+            updated_at: entry.updated_at,
             last_seq: entry.last_seq.clone(),
             producers: entry.producers.clone(),
         };
@@ -656,6 +661,7 @@ impl FileStorage {
                 next_byte_offset,
                 total_bytes,
                 created_at: meta.created_at,
+                updated_at: meta.updated_at,
                 producers: meta.producers,
                 notify,
                 last_seq: meta.last_seq,
@@ -757,7 +763,7 @@ impl Storage for FileStorage {
 
         let offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
         self.append_records(name, &mut stream, &[data])?;
-        // Plain appends do not mutate persisted metadata fields (closed/seq/producers).
+        stream.updated_at = Some(Utc::now());
         Ok(offset)
     }
 
@@ -793,6 +799,7 @@ impl Storage for FileStorage {
 
         let pending_seq = super::validate_seq(stream.last_seq.as_deref(), seq)?;
         self.append_records(name, &mut stream, &messages)?;
+        stream.updated_at = Some(Utc::now());
         if let Some(new_seq) = pending_seq {
             stream.last_seq = Some(new_seq);
             // Stream-Seq changed, persist metadata best-effort.
@@ -883,6 +890,7 @@ impl Storage for FileStorage {
             total_bytes: stream.total_bytes,
             message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
             created_at: stream.created_at,
+            updated_at: stream.updated_at,
         })
     }
 
@@ -898,6 +906,7 @@ impl Storage for FileStorage {
         }
 
         stream.closed = true;
+        stream.updated_at = Some(Utc::now());
         self.write_metadata_for(name, &stream)?;
 
         let _ = stream.notify.send(());
@@ -965,6 +974,7 @@ impl Storage for FileStorage {
                 updated_at: now,
             },
         );
+        stream.updated_at = Some(now);
 
         // Data is committed to the log; metadata write failure is non-fatal
         if let Err(e) = self.write_metadata_for(name, &stream) {
@@ -1098,6 +1108,31 @@ impl Storage for FileStorage {
 
         count
     }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        let streams = self.streams.read().expect("streams lock poisoned");
+        let mut result = Vec::new();
+        for (name, stream_arc) in streams.iter() {
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            if super::is_stream_expired(&stream.config) {
+                continue;
+            }
+            result.push((
+                name.clone(),
+                StreamMetadata {
+                    config: stream.config.clone(),
+                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                    closed: stream.closed,
+                    total_bytes: stream.total_bytes,
+                    message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
+                    created_at: stream.created_at,
+                    updated_at: stream.updated_at,
+                },
+            ));
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -1137,61 +1172,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_restore_from_disk() {
-        let root = test_storage_dir();
-        let config = StreamConfig::new("text/plain".to_string());
-
-        {
-            let storage = FileStorage::new(root.clone(), 1024 * 1024, 100 * 1024, false)
-                .expect("file storage should initialize");
-            storage
-                .create_stream("events", config.clone())
-                .expect("stream should be created");
-            storage
-                .append("events", Bytes::from("event-1"), "text/plain")
-                .expect("append should succeed");
-            storage
-                .append("events", Bytes::from("event-2"), "text/plain")
-                .expect("append should succeed");
-        }
-
-        let restored =
-            FileStorage::new(root, 1024 * 1024, 100 * 1024, false).expect("restore should work");
-
-        let read = restored
-            .read("events", &Offset::start())
-            .expect("read should succeed");
-
-        assert_eq!(read.messages.len(), 2);
-        assert_eq!(read.messages[0], Bytes::from("event-1"));
-        assert_eq!(read.messages[1], Bytes::from("event-2"));
-    }
-
-    #[test]
-    fn test_restore_closed_stream_from_disk() {
-        let root = test_storage_dir();
-        let config = StreamConfig::new("text/plain".to_string());
-
-        {
-            let storage = FileStorage::new(root.clone(), 1024 * 1024, 100 * 1024, false).unwrap();
-            storage.create_stream("s", config.clone()).unwrap();
-            storage
-                .append("s", Bytes::from("data"), "text/plain")
-                .unwrap();
-            storage.close_stream("s").unwrap();
-        }
-
-        let restored = FileStorage::new(root, 1024 * 1024, 100 * 1024, false).unwrap();
-        let meta = restored.head("s").unwrap();
-        assert!(meta.closed);
-        assert_eq!(meta.message_count, 1);
-
-        assert!(matches!(
-            restored.append("s", Bytes::from("more"), "text/plain"),
-            Err(Error::StreamClosed)
-        ));
-    }
+    // Restore-from-disk and closed-stream durability tests live in
+    // tests/crash_recovery.rs and the storage_backend_contract suite.
 
     #[test]
     fn test_partial_record_truncation_on_recovery() {
