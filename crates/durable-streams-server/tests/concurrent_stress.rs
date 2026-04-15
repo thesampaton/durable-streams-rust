@@ -8,43 +8,24 @@
 mod common;
 
 use bytes::Bytes;
-use common::{StorageTestBackend, create_test_storage, create_test_storage_with_limits};
+use common::{
+    ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits,
+    with_each_backend,
+};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
 use std::collections::{HashMap, HashSet};
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
+use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Barrier};
 use std::thread;
-
-const BACKENDS: [StorageTestBackend; 3] = [
-    StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
-    StorageTestBackend::Acid,
-];
 
 fn plain_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    for backend in BACKENDS {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "concurrent stress failed for backend={}: {}",
-                backend.as_str(),
-                panic_msg
-            );
-        }
-    }
+fn for_all_backends(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
+    with_each_backend(&ALL_BACKENDS, "concurrent stress", test);
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +34,7 @@ fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
 
 #[test]
 fn concurrent_readers_and_writers_no_torn_reads() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -137,7 +118,7 @@ fn concurrent_readers_and_writers_no_torn_reads() {
 
 #[test]
 fn read_after_write_visibility() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -168,7 +149,7 @@ fn read_after_write_visibility() {
 
 #[test]
 fn concurrent_create_stream_with_data_race() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -235,7 +216,7 @@ fn concurrent_create_stream_with_data_race() {
 
 #[test]
 fn delete_during_concurrent_reads() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -304,7 +285,7 @@ fn delete_during_concurrent_reads() {
 
 #[test]
 fn subscribe_receives_close_notification() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = Arc::new(handle.storage);
 
@@ -341,7 +322,7 @@ fn subscribe_receives_close_notification() {
 
 #[test]
 fn broadcast_channel_saturation_does_not_deadlock() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = &handle.storage;
 
@@ -385,7 +366,7 @@ fn broadcast_channel_saturation_does_not_deadlock() {
 
 #[test]
 fn concurrent_appends_produce_unique_monotonic_offsets() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -436,7 +417,7 @@ fn concurrent_appends_produce_unique_monotonic_offsets() {
 
 #[test]
 fn total_bytes_consistent_after_concurrent_appends() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -480,7 +461,7 @@ fn total_bytes_consistent_after_concurrent_appends() {
 
 #[test]
 fn concurrent_create_delete_no_corruption() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
@@ -528,7 +509,7 @@ fn concurrent_create_delete_no_corruption() {
 
 #[test]
 fn concurrent_reads_from_different_offsets() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 

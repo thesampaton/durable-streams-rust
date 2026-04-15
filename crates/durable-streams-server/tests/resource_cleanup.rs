@@ -8,18 +8,15 @@ mod common;
 
 use bytes::Bytes;
 use chrono::Utc;
-use common::{StorageTestBackend, create_test_storage, create_test_storage_with_limits};
+use common::{
+    ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits,
+    with_each_backend,
+};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{Storage, StreamConfig};
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
-
-const BACKENDS: [StorageTestBackend; 3] = [
-    StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
-    StorageTestBackend::Acid,
-];
+use std::panic::RefUnwindSafe;
 
 fn plain_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
@@ -33,24 +30,8 @@ fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
     }
 }
 
-fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    for backend in BACKENDS {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "resource cleanup failed for backend={}: {}",
-                backend.as_str(),
-                panic_msg
-            );
-        }
-    }
+fn for_all_backends(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
+    with_each_backend(&ALL_BACKENDS, "resource cleanup", test);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +40,7 @@ fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
 
 #[test]
 fn expired_stream_returns_not_found_on_read() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -85,7 +66,7 @@ fn expired_stream_returns_not_found_on_read() {
 
 #[test]
 fn expired_stream_returns_not_found_on_head() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -108,7 +89,7 @@ fn expired_stream_returns_not_found_on_head() {
 
 #[test]
 fn expired_stream_returns_error_on_append() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -135,7 +116,7 @@ fn expired_stream_returns_error_on_append() {
 
 #[test]
 fn expired_stream_can_be_recreated() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -173,7 +154,7 @@ fn expired_stream_can_be_recreated() {
 
 #[test]
 fn cleanup_expired_streams_removes_expired() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -230,7 +211,7 @@ fn cleanup_expired_streams_removes_expired() {
 
 #[test]
 fn cleanup_expired_streams_returns_zero_when_none_expired() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -254,7 +235,7 @@ fn cleanup_expired_streams_returns_zero_when_none_expired() {
 
 #[test]
 fn cleanup_expired_streams_reclaims_bytes() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -289,7 +270,7 @@ fn cleanup_expired_streams_reclaims_bytes() {
 
 #[test]
 fn memory_limit_rollback_on_failed_append() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 100, 50);
         let storage = &handle.storage;
 
@@ -322,7 +303,7 @@ fn memory_limit_rollback_on_failed_append() {
 
 #[test]
 fn global_memory_limit_rollback_on_failed_append() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 100, 80);
         let storage = &handle.storage;
 
@@ -357,7 +338,7 @@ fn global_memory_limit_rollback_on_failed_append() {
 
 #[test]
 fn delete_reclaims_total_bytes() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 
@@ -381,7 +362,7 @@ fn delete_reclaims_total_bytes() {
 
 #[test]
 fn delete_allows_reuse_of_capacity() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 100, 80);
         let storage = &handle.storage;
 
@@ -417,7 +398,7 @@ fn producer_append_still_works_after_many_operations() {
     // This test verifies that producer state management doesn't leak over
     // many sequential operations. While we can't directly test the 7-day TTL
     // without time manipulation, we verify the cleanup path runs correctly.
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = &handle.storage;
 
@@ -452,7 +433,7 @@ fn producer_append_still_works_after_many_operations() {
 
 #[test]
 fn cleanup_expired_streams_is_idempotent() {
-    with_each_backend(|backend| {
+    for_all_backends(|backend| {
         let handle = create_test_storage(backend);
         let storage = &handle.storage;
 

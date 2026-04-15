@@ -51,7 +51,11 @@ async fn nested_stream_name_full_lifecycle() {
         .expect("head request failed");
     assert_eq!(head.status(), 200);
     assert_eq!(
-        head.headers().get("content-type").unwrap().to_str().unwrap(),
+        head.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "text/plain"
     );
 
@@ -102,13 +106,11 @@ async fn deeply_nested_stream_within_limits() {
 #[tokio::test]
 async fn stream_name_exceeding_segment_limit_rejected() {
     // Use a low segment limit for testing
-    let config = Config {
-        max_stream_name_segments: 3,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_stream_name_segments = 3;
     let storage = Arc::new(durable_streams_server::InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -154,13 +156,11 @@ async fn stream_name_exceeding_segment_limit_rejected() {
 
 #[tokio::test]
 async fn stream_name_exceeding_byte_limit_rejected() {
-    let config = Config {
-        max_stream_name_bytes: 20,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_stream_name_bytes = 20;
     let storage = Arc::new(durable_streams_server::InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -229,13 +229,11 @@ async fn empty_segment_rejected() {
 
 #[tokio::test]
 async fn error_response_includes_instance() {
-    let config = Config {
-        max_stream_name_bytes: 5,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_stream_name_bytes = 5;
     let storage = Arc::new(durable_streams_server::InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -266,7 +264,11 @@ async fn error_response_includes_instance() {
         "rejection response should include instance field"
     );
     assert!(
-        problem.instance.as_deref().unwrap().contains("/v1/stream/too-long-name"),
+        problem
+            .instance
+            .as_deref()
+            .unwrap()
+            .contains("/v1/stream/too-long-name"),
         "instance should contain the request path, got: {:?}",
         problem.instance
     );
@@ -274,27 +276,23 @@ async fn error_response_includes_instance() {
 
 #[test]
 fn config_validate_rejects_zero_max_stream_name_bytes() {
-    let config = Config {
-        max_stream_name_bytes: 0,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_stream_name_bytes = 0;
     let err = config.validate().unwrap_err();
-    assert!(
-        err.contains("max_stream_name_bytes"),
-        "expected error about max_stream_name_bytes, got: {err}"
+    assert_eq!(
+        err,
+        durable_streams_server::config::ConfigValidationError::MaxStreamNameBytesTooSmall
     );
 }
 
 #[test]
 fn config_validate_rejects_zero_max_stream_name_segments() {
-    let config = Config {
-        max_stream_name_segments: 0,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_stream_name_segments = 0;
     let err = config.validate().unwrap_err();
-    assert!(
-        err.contains("max_stream_name_segments"),
-        "expected error about max_stream_name_segments, got: {err}"
+    assert_eq!(
+        err,
+        durable_streams_server::config::ConfigValidationError::MaxStreamNameSegmentsTooSmall
     );
 }
 

@@ -15,6 +15,7 @@ use durable_streams_server::storage::acid::AcidStorage;
 use durable_streams_server::storage::file::FileStorage;
 use durable_streams_server::storage::{Storage, StreamConfig};
 use std::fs;
+use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,72 +40,114 @@ fn plain_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-// ---------------------------------------------------------------------------
-// 1. FileStorage startup with many streams
-// ---------------------------------------------------------------------------
+// ── Durable backend abstraction for shared startup tests ────────────
 
-#[test]
-fn file_storage_startup_with_100_streams() {
-    let root = unique_dir("many-file");
-    let expected_total;
-    {
-        let s = new_file_storage(&root);
-        for i in 0..100 {
-            let name = format!("stream-{i:03}");
-            s.create_stream(&name, plain_config()).unwrap();
-            s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
-                .unwrap();
+#[derive(Debug, Clone, Copy)]
+enum DurableBackend {
+    File,
+    Acid,
+}
+
+impl DurableBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Acid => "acid",
         }
-        expected_total = s.total_bytes();
-        assert!(expected_total > 0);
     }
+}
 
-    let restored = new_file_storage(&root);
-    assert_eq!(
-        restored.total_bytes(),
-        expected_total,
-        "total_bytes should match after restoring 100 streams"
-    );
+const DURABLE_BACKENDS: [DurableBackend; 2] = [DurableBackend::File, DurableBackend::Acid];
 
-    for i in 0..100 {
-        let name = format!("stream-{i:03}");
-        let read = restored.read(&name, &Offset::start()).unwrap();
-        assert_eq!(
-            read.messages.len(),
-            1,
-            "stream {name} should have 1 message"
-        );
-        assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
+/// Open (or create) a durable storage instance at the given root.
+fn open_durable(backend: DurableBackend, root: &Path) -> Box<dyn Storage> {
+    match backend {
+        DurableBackend::File => Box::new(new_file_storage(root)),
+        DurableBackend::Acid => Box::new(new_acid(root)),
+    }
+}
+
+fn with_each_durable_backend(test: impl Fn(DurableBackend) + RefUnwindSafe) {
+    for backend in DURABLE_BACKENDS {
+        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
+        if let Err(payload) = result {
+            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
+                (*msg).to_string()
+            } else if let Some(msg) = payload.downcast_ref::<String>() {
+                msg.clone()
+            } else {
+                "non-string panic payload".to_string()
+            };
+            panic!(
+                "startup resilience failed for backend={}: {panic_msg}",
+                backend.as_str()
+            );
+        }
     }
 }
 
 // ---------------------------------------------------------------------------
-// 2. AcidStorage startup with many streams
+// 1. Durable storage startup with many streams (file + acid)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn acid_storage_startup_with_100_streams() {
-    let root = unique_dir("many-acid");
-    let expected_total;
-    {
-        let s = new_acid(&root);
+fn durable_startup_with_100_streams() {
+    with_each_durable_backend(|backend| {
+        let root = unique_dir(&format!("many-{}", backend.as_str()));
+        let expected_total;
+        {
+            let s = open_durable(backend, &root);
+            for i in 0..100 {
+                let name = format!("stream-{i:03}");
+                s.create_stream(&name, plain_config()).unwrap();
+                s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
+                    .unwrap();
+            }
+            let meta = s.list_streams().unwrap();
+            expected_total = meta.iter().map(|(_, m)| m.total_bytes).sum::<u64>();
+            assert!(expected_total > 0);
+        }
+
+        let restored = open_durable(backend, &root);
+        let meta = restored.list_streams().unwrap();
+        let restored_total = meta.iter().map(|(_, m)| m.total_bytes).sum::<u64>();
+        assert_eq!(
+            restored_total, expected_total,
+            "total_bytes should match after restoring 100 streams"
+        );
+
         for i in 0..100 {
             let name = format!("stream-{i:03}");
-            s.create_stream(&name, plain_config()).unwrap();
-            s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
-                .unwrap();
+            let read = restored.read(&name, &Offset::start()).unwrap();
+            assert_eq!(
+                read.messages.len(),
+                1,
+                "stream {name} should have 1 message"
+            );
+            assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
         }
-        expected_total = s.total_bytes();
-    }
+    });
+}
 
-    let restored = new_acid(&root);
-    assert_eq!(restored.total_bytes(), expected_total);
+// ---------------------------------------------------------------------------
+// 2. Durable storage starts clean on empty directory (file + acid)
+// ---------------------------------------------------------------------------
 
-    for i in 0..100 {
-        let name = format!("stream-{i:03}");
-        let read = restored.read(&name, &Offset::start()).unwrap();
+#[test]
+fn durable_starts_clean_on_empty_directory() {
+    with_each_durable_backend(|backend| {
+        let root = unique_dir(&format!("empty-{}", backend.as_str()));
+        let s = open_durable(backend, &root);
+
+        let meta = s.list_streams().unwrap();
+        assert!(meta.is_empty());
+
+        s.create_stream("s", plain_config()).unwrap();
+        s.append("s", Bytes::from("hello"), "text/plain").unwrap();
+
+        let read = s.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
-    }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -301,42 +344,7 @@ async fn healthz_always_returns_200_regardless_of_ready() {
 }
 
 // ---------------------------------------------------------------------------
-// 7. FileStorage empty root directory
-// ---------------------------------------------------------------------------
-
-#[test]
-fn file_storage_starts_clean_on_empty_directory() {
-    let root = unique_dir("empty");
-    let s = new_file_storage(&root);
-    assert_eq!(s.total_bytes(), 0);
-
-    // Should be able to create and use streams immediately
-    s.create_stream("s", plain_config()).unwrap();
-    s.append("s", Bytes::from("hello"), "text/plain").unwrap();
-
-    let read = s.read("s", &Offset::start()).unwrap();
-    assert_eq!(read.messages.len(), 1);
-}
-
-// ---------------------------------------------------------------------------
-// 8. AcidStorage empty root directory
-// ---------------------------------------------------------------------------
-
-#[test]
-fn acid_storage_starts_clean_on_empty_directory() {
-    let root = unique_dir("empty-acid");
-    let s = new_acid(&root);
-    assert_eq!(s.total_bytes(), 0);
-
-    s.create_stream("s", plain_config()).unwrap();
-    s.append("s", Bytes::from("hello"), "text/plain").unwrap();
-
-    let read = s.read("s", &Offset::start()).unwrap();
-    assert_eq!(read.messages.len(), 1);
-}
-
-// ---------------------------------------------------------------------------
-// 9. FileStorage with stream directories missing data.log
+// 7. FileStorage with stream directories missing data.log
 // ---------------------------------------------------------------------------
 
 #[test]

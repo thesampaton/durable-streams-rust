@@ -1,3 +1,4 @@
+use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::problem::ProblemTelemetry;
 use axum::{
     body::Body,
@@ -8,6 +9,23 @@ use axum::{
 };
 use std::time::Instant;
 use tracing::{Instrument, Span, field, info_span};
+
+/// Bundles values extracted from an inbound HTTP request so that
+/// [`request_span`] stays under the clippy argument-count threshold.
+struct RequestContext<'a> {
+    operation: &'static str,
+    method: &'a str,
+    path: &'a str,
+    query: Option<&'a str>,
+    route: Option<&'a str>,
+    live_mode: Option<&'a str>,
+    stream_id: Option<&'a str>,
+    server_address: Option<&'a str>,
+    client_address: Option<&'a str>,
+    user_agent: Option<&'a str>,
+    http_version: &'static str,
+    proxy_trust: Option<&'a ProxyTrustResult>,
+}
 
 /// Record request/response telemetry using tracing field names that align with
 /// OpenTelemetry semantic conventions and ECS where practical.
@@ -28,8 +46,13 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
     let stream_id = route
         .and_then(|route| resource_id_from_path(route, &path))
         .filter(|stream_id| !stream_id.is_empty());
-    let host = forwarded_or_host(&request);
-    let client_address = forwarded_for(&request);
+    let proxy_trust = request.extensions().get::<ProxyTrustResult>().cloned();
+    let host = proxy_trust
+        .as_ref()
+        .and_then(|origin| origin.authority.clone());
+    let client_address = proxy_trust
+        .as_ref()
+        .and_then(|origin| origin.client_address.clone());
     let user_agent = request
         .headers()
         .get("user-agent")
@@ -38,19 +61,21 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
     let operation = operation_name(method.as_str(), route, live_mode.as_deref());
     let http_version = http_version(request.version());
 
-    let span = request_span(
+    let ctx = RequestContext {
         operation,
-        method.as_str(),
-        &path,
-        query.as_deref(),
+        method: method.as_str(),
+        path: &path,
+        query: query.as_deref(),
         route,
-        live_mode.as_deref(),
-        stream_id.as_deref(),
-        host.as_deref(),
-        client_address.as_deref(),
-        user_agent.as_deref(),
+        live_mode: live_mode.as_deref(),
+        stream_id,
+        server_address: host.as_deref(),
+        client_address: client_address.as_deref(),
+        user_agent: user_agent.as_deref(),
         http_version,
-    );
+        proxy_trust: proxy_trust.as_ref(),
+    };
+    let span = request_span(&ctx);
     let started = Instant::now();
 
     let response = next.run(request).instrument(span.clone()).await;
@@ -59,63 +84,59 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-fn request_span(
-    operation: &'static str,
-    method: &str,
-    path: &str,
-    query: Option<&str>,
-    route: Option<&str>,
-    live_mode: Option<&str>,
-    stream_id: Option<&str>,
-    server_address: Option<&str>,
-    client_address: Option<&str>,
-    user_agent: Option<&str>,
-    http_version: &'static str,
-) -> Span {
+fn request_span(ctx: &RequestContext<'_>) -> Span {
     let span = info_span!(
         "durable_streams.server",
-        "ds.operation" = operation,
+        "ds.operation" = ctx.operation,
         "ds.live_mode" = field::Empty,
         "ds.stream_id" = field::Empty,
         "ds.error_code" = field::Empty,
         "ds.error_class" = field::Empty,
         "ds.storage.backend" = field::Empty,
         "ds.storage.operation" = field::Empty,
-        "http.request.method" = method,
+        "ds.proxy.peer_ip" = field::Empty,
+        "ds.proxy.trusted" = field::Empty,
+        "http.request.method" = ctx.method,
         "http.route" = field::Empty,
         "http.response.status_code" = field::Empty,
         "http.response.header.retry_after" = field::Empty,
-        "url.path" = path,
+        "url.path" = ctx.path,
         "url.query" = field::Empty,
         "server.address" = field::Empty,
         "client.address" = field::Empty,
         "user_agent.original" = field::Empty,
-        "network.protocol.version" = http_version,
+        "network.protocol.version" = ctx.http_version,
         "event.duration" = field::Empty,
         "error.type" = field::Empty,
         "error.message" = field::Empty
     );
 
-    if let Some(query) = query {
+    if let Some(query) = ctx.query {
         span.record("url.query", query);
     }
-    if let Some(route) = route {
+    if let Some(route) = ctx.route {
         span.record("http.route", route);
     }
-    if let Some(live_mode) = live_mode {
+    if let Some(live_mode) = ctx.live_mode {
         span.record("ds.live_mode", live_mode);
     }
-    if let Some(stream_id) = stream_id {
+    if let Some(stream_id) = ctx.stream_id {
         span.record("ds.stream_id", stream_id);
     }
-    if let Some(server_address) = server_address {
+    if let Some(server_address) = ctx.server_address {
         span.record("server.address", server_address);
     }
-    if let Some(client_address) = client_address {
+    if let Some(client_address) = ctx.client_address {
         span.record("client.address", client_address);
     }
-    if let Some(user_agent) = user_agent {
+    if let Some(user_agent) = ctx.user_agent {
         span.record("user_agent.original", user_agent);
+    }
+    if let Some(trust) = ctx.proxy_trust {
+        if let Some(ip) = trust.peer_ip {
+            span.record("ds.proxy.peer_ip", field::display(ip));
+        }
+        span.record("ds.proxy.trusted", trust.trusted);
     }
 
     span
@@ -222,32 +243,6 @@ fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         (key == name).then_some(value)
     })
-}
-
-fn forwarded_or_host(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-forwarded-host")
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            request
-                .headers()
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned)
-        })
-}
-
-fn forwarded_for(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn http_version(version: Version) -> &'static str {

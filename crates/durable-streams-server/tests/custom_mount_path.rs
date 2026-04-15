@@ -9,13 +9,11 @@ use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn custom_mount_path_updates_location_and_problem_instance() {
-    let config = Config {
-        stream_base_path: "/streams".to_string(),
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.http.stream_base_path = "/streams".to_string();
     let storage = Arc::new(InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

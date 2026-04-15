@@ -55,9 +55,7 @@ fn validate(name: &str, limits: &StreamNameLimits) -> Result<(), String> {
             );
         }
         if segment == "." || segment == ".." {
-            return Err(format!(
-                "stream name contains invalid segment '{segment}'"
-            ));
+            return Err(format!("stream name contains invalid segment '{segment}'"));
         }
     }
 
@@ -86,18 +84,13 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Use OriginalUri to get the full request path; `parts.uri` is
         // stripped by axum's `.nest()` and would omit the base path prefix.
         let instance = OriginalUri::from_request_parts(parts, state)
             .await
             .ok()
-            .and_then(|OriginalUri(uri)| {
-                uri.path_and_query().map(|pq| pq.as_str().to_string())
-            });
+            .and_then(|OriginalUri(uri)| uri.path_and_query().map(|pq| pq.as_str().to_string()));
 
         let raw_name = Path::<String>::from_request_parts(parts, state)
             .await
@@ -114,18 +107,16 @@ where
             ));
         }
 
-        let Extension(limits) =
-            Extension::<StreamNameLimits>::from_request_parts(parts, state)
-                .await
-                .map_err(|_| {
-                    problem_response(
-                        "server misconfiguration: stream name limits not set",
-                        instance.as_deref(),
-                    )
-                })?;
+        let Extension(limits) = Extension::<StreamNameLimits>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| {
+                problem_response(
+                    "server misconfiguration: stream name limits not set",
+                    instance.as_deref(),
+                )
+            })?;
 
-        validate(name, &limits)
-            .map_err(|reason| problem_response(&reason, instance.as_deref()))?;
+        validate(name, &limits).map_err(|reason| problem_response(&reason, instance.as_deref()))?;
 
         Ok(Self(name.to_string()))
     }
@@ -140,8 +131,7 @@ fn problem_response(reason: &str, instance: Option<&str>) -> Response {
 }
 
 fn path_rejection_to_response(rejection: &PathRejection, instance: Option<&str>) -> Response {
-    let mut response =
-        ProblemResponse::from(Error::InvalidStreamName(rejection.to_string()));
+    let mut response = ProblemResponse::from(Error::InvalidStreamName(rejection.to_string()));
     if let Some(inst) = instance {
         response = response.with_instance(inst);
     }
@@ -212,7 +202,10 @@ mod tests {
             max_segments: 8,
         };
         let err = strip_and_validate("this-is-way-too-long", &limits).unwrap_err();
-        assert!(err.contains("20 bytes"), "should include actual length: {err}");
+        assert!(
+            err.contains("20 bytes"),
+            "should include actual length: {err}"
+        );
         assert!(
             err.contains("maximum of 10 bytes"),
             "should include limit: {err}"

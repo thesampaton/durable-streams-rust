@@ -6,13 +6,13 @@ and updated in-repo rather than inferred from tribal knowledge.
 
 ## Verified Baselines
 
-Verified on **2026-04-06**:
+Verified on **2026-04-14**:
 
 | Standard | Baseline | Source |
 | --- | --- | --- |
 | Protocol document | Durable Streams Protocol `1.0-draft` | `https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md` |
-| Protocol revision | `f091f315e4c3ca6769b45135ab8b5f53d70b1751` | `durable-streams` `main` branch tip at verification time |
-| Server conformance suite | `@durable-streams/server-conformance-tests@0.2.3` | npm registry |
+| Protocol revision | `8e3ef080ec3a74745ce363d59322f1cbe6de19cc` | `durable-streams` `main` branch tip at verification time |
+| Server conformance suite | `@durable-streams/server-conformance-tests@0.3.0` | npm registry |
 | Client conformance suite | `@durable-streams/client-conformance-tests@0.2.3` | npm registry |
 
 ## Governance Rules

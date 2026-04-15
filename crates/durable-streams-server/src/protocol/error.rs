@@ -129,6 +129,22 @@ pub enum Error {
     #[error("Storage capacity exhausted: {0}")]
     InsufficientStorage(StorageFailure),
 
+    /// Stream has been deleted (tombstoned) and is gone (410)
+    #[error("Stream is gone: {0}")]
+    StreamGone(String),
+
+    /// Stream path is blocked because a soft-deleted lineage still owns it (409)
+    #[error("Stream path is reserved by a soft-deleted lineage: {0}")]
+    StreamPathBlocked(String),
+
+    /// Fork offset exceeds the source stream's tail (400)
+    #[error("Fork offset is beyond the source stream's tail")]
+    ForkOffsetBeyondTail,
+
+    /// Cannot fork from a tombstoned stream (409)
+    #[error("Cannot fork from deleted stream: {0}")]
+    ForkFromTombstone(String),
+
     /// Storage backend I/O or serialization error (500)
     #[error("Storage error: {0}")]
     Storage(String),
@@ -139,11 +155,19 @@ impl Error {
     ///
     /// This is the single place where errors are mapped to status codes.
     /// Handlers should use this method to determine the response code.
+    ///
+    /// # Panics
+    ///
+    /// Panics if HTTP status code 507 cannot be constructed, which should
+    /// never happen since 507 is a valid IANA-registered status code.
     #[must_use]
     pub fn status_code(&self) -> StatusCode {
         match self {
             Self::NotFound(_) | Self::StreamExpired => StatusCode::NOT_FOUND,
-            Self::ConfigMismatch
+            Self::StreamGone(_) => StatusCode::GONE,
+            Self::StreamPathBlocked(_)
+            | Self::ForkFromTombstone(_)
+            | Self::ConfigMismatch
             | Self::ContentTypeMismatch { .. }
             | Self::StreamClosed
             | Self::SequenceGap { .. }
@@ -152,7 +176,8 @@ impl Error {
             Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => {
                 StatusCode::PAYLOAD_TOO_LARGE
             }
-            Self::InvalidOffset(_)
+            Self::ForkOffsetBeyondTail
+            | Self::InvalidOffset(_)
             | Self::InvalidProducerState(_)
             | Self::InvalidTtl(_)
             | Self::ConflictingExpiration
@@ -169,103 +194,94 @@ impl Error {
         }
     }
 
-    #[must_use]
-    fn problem_details(&self) -> ProblemDetails {
+    /// Build a [`ProblemDetails`] using `self.to_string()` as the detail message.
+    ///
+    /// This covers the common case where the `Display` impl already provides a
+    /// sufficiently descriptive detail string.
+    fn simple_problem(
+        &self,
+        type_uri: &'static str,
+        title: &'static str,
+        code: &'static str,
+    ) -> ProblemDetails {
+        ProblemDetails::new(type_uri, title, self.status_code(), code).with_detail(self.to_string())
+    }
+
+    fn conflict_problem(&self) -> ProblemDetails {
         match self {
-            Self::NotFound(name) => ProblemDetails::new(
-                "/errors/not-found",
-                "Stream Not Found",
-                self.status_code(),
-                "NOT_FOUND",
-            )
-            .with_detail(format!("Stream not found: {name}")),
-            Self::ConfigMismatch => ProblemDetails::new(
+            Self::ConfigMismatch => self.simple_problem(
                 "/errors/already-exists",
                 "Stream Already Exists",
-                self.status_code(),
                 "ALREADY_EXISTS",
-            )
-            .with_detail(self.to_string()),
-            Self::InvalidOffset(_) => ProblemDetails::new(
-                "/errors/invalid-offset",
-                "Invalid Offset",
-                self.status_code(),
-                "INVALID_OFFSET",
-            )
-            .with_detail(self.to_string()),
-            Self::ContentTypeMismatch { .. } => ProblemDetails::new(
+            ),
+            Self::ContentTypeMismatch { .. } => self.simple_problem(
                 "/errors/content-type-mismatch",
                 "Content Type Mismatch",
-                self.status_code(),
                 "CONTENT_TYPE_MISMATCH",
-            )
-            .with_detail(self.to_string()),
-            Self::StreamClosed => ProblemDetails::new(
-                "/errors/stream-closed",
-                "Stream Closed",
-                self.status_code(),
-                "STREAM_CLOSED",
-            )
-            .with_detail(self.to_string()),
-            Self::SequenceGap { .. } | Self::SeqOrderingViolation { .. } => ProblemDetails::new(
+            ),
+            Self::StreamClosed => {
+                self.simple_problem("/errors/stream-closed", "Stream Closed", "STREAM_CLOSED")
+            }
+            Self::SequenceGap { .. } | Self::SeqOrderingViolation { .. } => self.simple_problem(
                 "/errors/sequence-conflict",
                 "Sequence Conflict",
-                self.status_code(),
                 "SEQUENCE_CONFLICT",
-            )
-            .with_detail(self.to_string()),
-            Self::EpochFenced { .. } => ProblemDetails::new(
-                "/errors/producer-epoch-fenced",
-                "Producer Epoch Fenced",
+            ),
+            Self::ForkFromTombstone(_) => self.simple_problem(
+                "/errors/fork-from-tombstone",
+                "Fork From Deleted Stream",
+                "FORK_FROM_TOMBSTONE",
+            ),
+            Self::StreamPathBlocked(name) => ProblemDetails::new(
+                "/errors/path-blocked",
+                "Stream Path Blocked",
                 self.status_code(),
-                "PRODUCER_EPOCH_FENCED",
+                "PATH_BLOCKED",
             )
-            .with_detail(self.to_string()),
-            Self::InvalidProducerState(_)
-            | Self::InvalidTtl(_)
-            | Self::ConflictingExpiration
-            | Self::InvalidHeader { .. } => ProblemDetails::new(
-                "/errors/bad-request",
-                "Bad Request",
-                self.status_code(),
-                "BAD_REQUEST",
-            )
-            .with_detail(self.to_string()),
-            Self::InvalidStreamName(_) => ProblemDetails::new(
+            .with_detail(format!(
+                "Stream path is reserved by a soft-deleted lineage: {name}"
+            )),
+            _ => unreachable!("conflict_problem called with non-conflict error"),
+        }
+    }
+
+    fn client_problem(&self) -> ProblemDetails {
+        match self {
+            Self::InvalidOffset(_) => {
+                self.simple_problem("/errors/invalid-offset", "Invalid Offset", "INVALID_OFFSET")
+            }
+            Self::InvalidStreamName(_) => self.simple_problem(
                 "/errors/invalid-stream-name",
                 "Invalid Stream Name",
-                self.status_code(),
                 "INVALID_STREAM_NAME",
-            )
-            .with_detail(self.to_string()),
-            Self::InvalidJson(_) => ProblemDetails::new(
-                "/errors/invalid-json",
-                "Invalid JSON",
-                self.status_code(),
-                "INVALID_JSON",
-            )
-            .with_detail(self.to_string()),
-            Self::EmptyBody => ProblemDetails::new(
-                "/errors/empty-body",
-                "Empty Body",
-                self.status_code(),
-                "EMPTY_BODY",
-            )
-            .with_detail(self.to_string()),
-            Self::EmptyArray => ProblemDetails::new(
-                "/errors/empty-array",
-                "Empty Array",
-                self.status_code(),
-                "EMPTY_ARRAY",
-            )
-            .with_detail(self.to_string()),
-            Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => ProblemDetails::new(
-                "/errors/payload-too-large",
-                "Payload Too Large",
-                self.status_code(),
-                "PAYLOAD_TOO_LARGE",
-            )
-            .with_detail(self.to_string()),
+            ),
+            Self::InvalidJson(_) => {
+                self.simple_problem("/errors/invalid-json", "Invalid JSON", "INVALID_JSON")
+            }
+            Self::EmptyBody => {
+                self.simple_problem("/errors/empty-body", "Empty Body", "EMPTY_BODY")
+            }
+            Self::EmptyArray => {
+                self.simple_problem("/errors/empty-array", "Empty Array", "EMPTY_ARRAY")
+            }
+            Self::EpochFenced { .. } => self.simple_problem(
+                "/errors/producer-epoch-fenced",
+                "Producer Epoch Fenced",
+                "PRODUCER_EPOCH_FENCED",
+            ),
+            Self::ForkOffsetBeyondTail
+            | Self::InvalidProducerState(_)
+            | Self::InvalidTtl(_)
+            | Self::ConflictingExpiration
+            | Self::InvalidHeader { .. } => {
+                self.simple_problem("/errors/bad-request", "Bad Request", "BAD_REQUEST")
+            }
+            _ => unreachable!("client_problem called with unsupported error"),
+        }
+    }
+
+    fn storage_problem(&self) -> ProblemDetails {
+        match self {
             Self::Unavailable(_) => ProblemDetails::new(
                 "/errors/unavailable",
                 "Service Unavailable",
@@ -282,13 +298,6 @@ impl Error {
             .with_detail(
                 "The server does not have enough storage capacity to complete the request.",
             ),
-            Self::StreamExpired => ProblemDetails::new(
-                "/errors/not-found",
-                "Stream Not Found",
-                self.status_code(),
-                "NOT_FOUND",
-            )
-            .with_detail(self.to_string()),
             Self::Storage(_) => ProblemDetails::new(
                 "/errors/internal",
                 "Internal Server Error",
@@ -296,6 +305,53 @@ impl Error {
                 "INTERNAL_ERROR",
             )
             .with_detail("The server encountered an internal error."),
+            _ => unreachable!("storage_problem called with non-storage error"),
+        }
+    }
+
+    #[must_use]
+    fn problem_details(&self) -> ProblemDetails {
+        match self {
+            Self::NotFound(name) => ProblemDetails::new(
+                "/errors/not-found",
+                "Stream Not Found",
+                self.status_code(),
+                "NOT_FOUND",
+            )
+            .with_detail(format!("Stream not found: {name}")),
+            Self::ConfigMismatch
+            | Self::ContentTypeMismatch { .. }
+            | Self::StreamClosed
+            | Self::SequenceGap { .. }
+            | Self::SeqOrderingViolation { .. }
+            | Self::ForkFromTombstone(_)
+            | Self::StreamPathBlocked(_) => self.conflict_problem(),
+            Self::InvalidOffset(_)
+            | Self::EpochFenced { .. }
+            | Self::InvalidProducerState(_)
+            | Self::InvalidTtl(_)
+            | Self::ConflictingExpiration
+            | Self::InvalidJson(_)
+            | Self::EmptyBody
+            | Self::EmptyArray
+            | Self::InvalidHeader { .. }
+            | Self::InvalidStreamName(_)
+            | Self::ForkOffsetBeyondTail => self.client_problem(),
+            Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => self.simple_problem(
+                "/errors/payload-too-large",
+                "Payload Too Large",
+                "PAYLOAD_TOO_LARGE",
+            ),
+            Self::Unavailable(_) | Self::InsufficientStorage(_) | Self::Storage(_) => {
+                self.storage_problem()
+            }
+            Self::StreamExpired => {
+                self.simple_problem("/errors/not-found", "Stream Not Found", "NOT_FOUND")
+            }
+            Self::StreamGone(name) => {
+                ProblemDetails::new("/errors/gone", "Stream Gone", self.status_code(), "GONE")
+                    .with_detail(format!("Stream is gone: {name}"))
+            }
         }
     }
 

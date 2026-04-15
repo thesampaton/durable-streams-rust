@@ -586,12 +586,7 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
                 _ => panic!("BumpEpoch unexpected result: {result:?}"),
             },
             ProducerOp::SkipSeq { .. } => {
-                if trackers[pidx].first_append && seq == 5 {
-                    assert!(
-                        matches!(result, Err(Error::SequenceGap { .. })),
-                        "SkipSeq should return SequenceGap, got {result:?}"
-                    );
-                } else if !trackers[pidx].first_append {
+                if !trackers[pidx].first_append || seq == 5 {
                     assert!(
                         matches!(result, Err(Error::SequenceGap { .. })),
                         "SkipSeq should return SequenceGap, got {result:?}"

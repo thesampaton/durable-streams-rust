@@ -2,11 +2,12 @@ mod common;
 
 use bytes::Bytes;
 use common::{read_problem, spawn_test_server_with_storage, test_client, unique_stream_name};
+use durable_streams_server::InMemoryStorage;
 use durable_streams_server::config::Config;
 use durable_streams_server::protocol::error::{Error, Result};
 use durable_streams_server::protocol::offset::Offset;
+use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
-use durable_streams_server::InMemoryStorage;
 use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata,
@@ -117,6 +118,21 @@ impl Storage for FailingAppendStorage {
 
     fn cleanup_expired_streams(&self) -> usize {
         self.inner.cleanup_expired_streams()
+    }
+
+    fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
+        self.inner.list_streams()
+    }
+
+    fn create_fork(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&StorageOffset>,
+        config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        self.inner
+            .create_fork(name, source_name, fork_offset, config)
     }
 }
 

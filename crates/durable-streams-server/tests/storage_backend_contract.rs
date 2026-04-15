@@ -1,23 +1,19 @@
 mod common;
 
 use bytes::Bytes;
-use common::{StorageTestBackend, create_test_storage, create_test_storage_with_limits};
+use chrono::Utc;
+use common::{
+    ALL_BACKENDS, create_test_storage, create_test_storage_with_limits, with_each_backend,
+};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, ProducerAppendResult, Storage, StreamConfig,
 };
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
+use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::thread;
-
-const BACKENDS: [StorageTestBackend; 4] = [
-    StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
-    StorageTestBackend::Acid,
-    StorageTestBackend::AcidInMemory,
-];
 
 fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
     ProducerHeaders {
@@ -31,24 +27,8 @@ fn plain_text_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-fn with_each_backend(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    for backend in BACKENDS {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "backend contract failed for backend={}: {}",
-                backend.as_str(),
-                panic_msg
-            );
-        }
-    }
+fn for_all_backends(test: impl Fn(common::StorageTestBackend) + RefUnwindSafe) {
+    with_each_backend(&ALL_BACKENDS, "backend contract", test);
 }
 
 mod core {
@@ -56,7 +36,7 @@ mod core {
 
     #[test]
     fn create_idempotent_and_config_mismatch() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             let cfg = plain_text_config();
@@ -86,7 +66,7 @@ mod core {
 
     #[test]
     fn append_read_and_offset_monotonicity() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -103,7 +83,7 @@ mod core {
 
     #[test]
     fn read_from_offset_and_sentinels() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -132,7 +112,7 @@ mod core {
 
     #[test]
     fn close_and_content_type_rules() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -159,7 +139,7 @@ mod core {
 
     #[test]
     fn delete_and_exists() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -184,7 +164,7 @@ mod limits_atomicity {
 
     #[test]
     fn limits_and_not_found() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage_with_limits(backend, 100, 50);
             let storage = &handle.storage;
             let cfg = plain_text_config();
@@ -225,7 +205,7 @@ mod limits_atomicity {
 
     #[test]
     fn create_with_data_atomicity_and_idempotency() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let small = create_test_storage_with_limits(backend, 1024, 8);
             let cfg = plain_text_config();
             let oversized = vec![Bytes::from(vec![0_u8; 9])];
@@ -262,7 +242,7 @@ mod limits_atomicity {
 
     #[test]
     fn stream_seq_rollback_after_failed_commit() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let small = create_test_storage_with_limits(backend, 1024, 8);
             small
                 .storage
@@ -309,7 +289,7 @@ mod producer {
 
     #[test]
     fn duplicate_gap_fencing_and_epoch_reset_rules() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -396,7 +376,7 @@ mod producer {
 
     #[test]
     fn multi_producer_independence_and_closed_precedence() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
@@ -445,12 +425,138 @@ mod producer {
     }
 }
 
+mod fork_lifecycle {
+    use super::*;
+
+    #[test]
+    fn fork_idempotency_requires_matching_source_and_offset() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            storage
+                .create_stream("source-a", plain_text_config())
+                .unwrap();
+            storage
+                .append("source-a", Bytes::from("a1"), "text/plain")
+                .unwrap();
+            storage
+                .create_stream("source-b", plain_text_config())
+                .unwrap();
+            storage
+                .append("source-b", Bytes::from("b1"), "text/plain")
+                .unwrap();
+
+            let created = storage
+                .create_fork("fork", "source-a", None, plain_text_config())
+                .unwrap();
+            assert_eq!(created, CreateStreamResult::Created);
+
+            let idempotent = storage
+                .create_fork("fork", "source-a", None, plain_text_config())
+                .unwrap();
+            assert_eq!(idempotent, CreateStreamResult::AlreadyExists);
+
+            let wrong_source = storage
+                .create_fork("fork", "source-b", None, plain_text_config())
+                .unwrap_err();
+            assert!(matches!(wrong_source, Error::ConfigMismatch));
+
+            let different_offset = storage
+                .create_fork(
+                    "fork",
+                    "source-a",
+                    Some(&Offset::start()),
+                    plain_text_config(),
+                )
+                .unwrap_err();
+            assert!(matches!(different_offset, Error::ConfigMismatch));
+        });
+    }
+
+    #[test]
+    fn expired_parent_with_descendants_becomes_tombstone_and_blocks_recreation() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            let expires_at = Utc::now() + chrono::Duration::milliseconds(300);
+            let config = plain_text_config().with_expires_at(expires_at);
+            storage.create_stream("source", config).unwrap();
+            storage
+                .append("source", Bytes::from("baseline"), "text/plain")
+                .unwrap();
+
+            let fork_created = storage
+                .create_fork("fork", "source", None, plain_text_config().with_ttl(10))
+                .unwrap();
+            assert_eq!(fork_created, CreateStreamResult::Created);
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let removed = storage.cleanup_expired_streams();
+            assert_eq!(
+                removed,
+                1,
+                "backend={} should process one expired source",
+                backend.as_str()
+            );
+
+            let source_head = storage.head("source").unwrap_err();
+            assert!(matches!(source_head, Error::StreamGone(_)));
+
+            let recreate = storage
+                .create_stream("source", plain_text_config())
+                .unwrap_err();
+            assert!(matches!(recreate, Error::StreamPathBlocked(_)));
+
+            let fork_read = storage.read("fork", &Offset::start()).unwrap();
+            assert_eq!(fork_read.messages, vec![Bytes::from("baseline")]);
+        });
+    }
+
+    #[test]
+    fn deleting_last_descendant_cascades_cleanup() {
+        for_all_backends(|backend| {
+            let handle = create_test_storage(backend);
+            let storage = &handle.storage;
+
+            storage
+                .create_stream("source", plain_text_config())
+                .unwrap();
+            storage
+                .append("source", Bytes::from("baseline"), "text/plain")
+                .unwrap();
+            storage
+                .create_fork("fork", "source", None, plain_text_config())
+                .unwrap();
+
+            storage.delete("source").unwrap();
+            assert!(matches!(storage.head("source"), Err(Error::StreamGone(_))));
+            assert!(matches!(
+                storage.create_stream("source", plain_text_config()),
+                Err(Error::StreamPathBlocked(_))
+            ));
+
+            storage.delete("fork").unwrap();
+            assert!(!storage.exists("fork"));
+
+            let recreated = storage
+                .create_stream("source", plain_text_config())
+                .unwrap();
+            assert_eq!(recreated, CreateStreamResult::Created);
+
+            let source_read = storage.read("source", &Offset::start()).unwrap();
+            assert!(source_read.messages.is_empty());
+        });
+    }
+}
+
 mod concurrency {
     use super::*;
 
     #[test]
     fn concurrent_append_offsets_unique() {
-        with_each_backend(|backend| {
+        for_all_backends(|backend| {
             let handle = create_test_storage(backend);
             let storage = Arc::new(handle.storage);
             storage.create_stream("s", plain_text_config()).unwrap();

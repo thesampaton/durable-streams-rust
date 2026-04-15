@@ -2,7 +2,8 @@
 //!
 //! [`build_router`] is the main embedding entry point for library consumers.
 
-use crate::config::{Config, LongPollTimeout, SseReconnectInterval};
+use crate::config::Config;
+use crate::middleware::proxy_trust::ProxyTrustState;
 use crate::protocol::stream_name::StreamNameLimits;
 use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;
@@ -18,6 +19,17 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 /// when the server begins a graceful shutdown.
 #[derive(Clone)]
 pub struct ShutdownToken(pub CancellationToken);
+
+/// Combined read-stream configuration extracted as a single axum `Extension`.
+///
+/// Groups the long-poll timeout, SSE reconnect interval, and shutdown token
+/// so handlers that need all three only consume one extractor slot.
+#[derive(Clone)]
+pub(crate) struct ReadStreamConfig {
+    pub(crate) long_poll_timeout: std::time::Duration,
+    pub(crate) sse_reconnect_interval_secs: u64,
+    pub(crate) shutdown: CancellationToken,
+}
 
 /// Default mount path for the Durable Streams protocol routes.
 pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
@@ -53,7 +65,7 @@ pub fn build_router_with_ready<S: Storage + 'static>(
     ready: Option<Arc<AtomicBool>>,
     shutdown: CancellationToken,
 ) -> Router {
-    let stream_base_path = Arc::<str>::from(config.stream_base_path.as_str());
+    let stream_base_path = Arc::<str>::from(config.http.stream_base_path.as_str());
     let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))
         .nest(
@@ -67,10 +79,15 @@ pub fn build_router_with_ready<S: Storage + 'static>(
             .layer(Extension(flag));
     }
 
+    let proxy_trust_state = Arc::new(ProxyTrustState::from_config(config));
+
     app.layer(axum_middleware::from_fn(
         middleware::telemetry::track_requests,
     ))
-    .layer(cors_layer(&config.cors_origins))
+    .layer(cors_layer(&config.http.cors_origins))
+    .layer(axum_middleware::from_fn(move |request, next| {
+        middleware::proxy_trust::enforce_proxy_trust(proxy_trust_state.clone(), request, next)
+    }))
 }
 
 /// Build a CORS layer from the configured origins string.
@@ -114,14 +131,14 @@ fn protocol_routes<S: Storage + 'static>(
                 .delete(handlers::delete::delete_stream::<S>),
         )
         .layer(Extension(StreamNameLimits {
-            max_bytes: config.max_stream_name_bytes,
-            max_segments: config.max_stream_name_segments,
+            max_bytes: config.limits.max_stream_name_bytes,
+            max_segments: config.limits.max_stream_name_segments,
         }))
-        .layer(Extension(ShutdownToken(shutdown)))
-        .layer(Extension(SseReconnectInterval(
-            config.sse_reconnect_interval_secs,
-        )))
-        .layer(Extension(LongPollTimeout(config.long_poll_timeout)))
+        .layer(Extension(ReadStreamConfig {
+            long_poll_timeout: config.long_poll_timeout(),
+            sse_reconnect_interval_secs: config.transport.connection.sse_reconnect_interval_secs,
+            shutdown,
+        }))
         .layer(Extension(StreamBasePath(stream_base_path)))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,

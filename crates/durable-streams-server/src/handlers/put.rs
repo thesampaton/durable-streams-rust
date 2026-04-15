@@ -1,6 +1,8 @@
+use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
+use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemResponse, Result, request_instance};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
@@ -13,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// PUT handler for creating streams
@@ -31,11 +34,13 @@ use std::sync::Arc;
 ///
 /// Panics if validated content-type or offset strings fail to parse into
 /// header values, which should never happen with valid inputs.
+#[allow(clippy::too_many_lines)]
 pub async fn create_stream<S: Storage>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Extension(StreamBasePath(stream_base_path)): Extension<StreamBasePath>,
+    Extension(request_origin): Extension<ProxyTrustResult>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response> {
@@ -113,6 +118,59 @@ pub async fn create_stream<S: Storage>(
             config = config.with_created_closed(true);
         }
 
+        // ── Fork branch ──────────────────────────────────────────────
+        let forked_from = headers
+            .get(names::STREAM_FORKED_FROM)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let fork_offset_raw = headers
+            .get(names::STREAM_FORK_OFFSET)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        if let Some(forked_from_value) = forked_from {
+            // Strip stream_base_path prefix to get the source stream name
+            let source_name = strip_stream_base_path(&forked_from_value, &stream_base_path);
+
+            // Parse optional fork offset
+            let fork_offset = if let Some(ref raw) = fork_offset_raw {
+                Some(Offset::from_str(raw)?)
+            } else {
+                None
+            };
+
+            let create_result = storage
+                .create_fork(&name, &source_name, fork_offset.as_ref(), config)
+                .map_err(ProblemResponse::from)?;
+
+            // After fork creation, read the fork metadata for response headers
+            let meta = storage.head(&name)?;
+
+            let status = if matches!(create_result, CreateStreamResult::Created) {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+
+            let location = build_location_url(&request_origin, &stream_base_path, &name);
+
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert("content-type", meta.config.content_type.parse().unwrap());
+            response_headers.insert(
+                names::STREAM_NEXT_OFFSET,
+                HeaderValue::from_bytes(meta.next_offset.as_str().as_bytes()).unwrap(),
+            );
+            response_headers.insert("location", location.parse().unwrap());
+
+            if meta.closed {
+                response_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
+            }
+
+            return Ok((status, response_headers).into_response());
+        }
+
+        // ── Standard (non-fork) create branch ────────────────────────
+
         // Parse body into messages BEFORE creating the stream so that
         // failures (e.g. invalid JSON) never leave an orphaned stream.
         let messages = if body_bytes.is_empty() {
@@ -127,11 +185,15 @@ pub async fn create_stream<S: Storage>(
         // Atomic create + append + close. If commit_messages fails (e.g.
         // memory limit), the stream is never inserted. If created_closed,
         // the entry is closed before it becomes visible to other operations.
+        let create_with_data_result = storage
+            .create_stream_with_data(&name, config, messages, created_closed)
+            .map_err(ProblemResponse::from)?;
+
         let CreateWithDataResult {
             status: create_status,
             next_offset,
             closed,
-        } = storage.create_stream_with_data(&name, config, messages, created_closed)?;
+        } = create_with_data_result;
 
         let status = if matches!(create_status, CreateStreamResult::Created) {
             StatusCode::CREATED
@@ -140,7 +202,7 @@ pub async fn create_stream<S: Storage>(
         };
 
         // Build absolute Location URL
-        let location = build_location_url(&headers, &stream_base_path, &name);
+        let location = build_location_url(&request_origin, &stream_base_path, &name);
 
         let mut response_headers = HeaderMap::new();
         response_headers.insert("content-type", normalized_ct.parse().unwrap());
@@ -161,22 +223,30 @@ pub async fn create_stream<S: Storage>(
     result.map_err(|problem| problem.with_instance(instance))
 }
 
-/// Build an absolute Location URL from request headers.
+/// Strip the stream base path prefix from a fork source header value.
 ///
-/// Uses `X-Forwarded-Host`/`Host` for the authority and `X-Forwarded-Proto`
-/// for the scheme.
-/// Falls back to `http` and `localhost` when headers are absent.
-fn build_location_url(headers: &HeaderMap, stream_base_path: &str, name: &str) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
+/// The conformance tests send the `Stream-Forked-From` header as the full
+/// URL path (e.g., `/v1/stream/source-name`). This strips the leading
+/// `stream_base_path + "/"` to get just the stream name.
+fn strip_stream_base_path(value: &str, stream_base_path: &str) -> String {
+    let prefix = if stream_base_path == "/" {
+        "/".to_string()
+    } else {
+        format!("{stream_base_path}/")
+    };
 
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
-        .unwrap_or("localhost");
+    if let Some(stripped) = value.strip_prefix(&prefix) {
+        stripped.to_string()
+    } else {
+        // If the value doesn't start with the prefix, use it as-is
+        value.to_string()
+    }
+}
+
+/// Build an absolute Location URL from the trusted request origin.
+fn build_location_url(origin: &ProxyTrustResult, stream_base_path: &str, name: &str) -> String {
+    let scheme = origin.scheme.as_str();
+    let host = origin.authority.as_deref().unwrap_or("localhost");
 
     if stream_base_path == "/" {
         format!("{scheme}://{host}/{name}")
@@ -191,39 +261,65 @@ mod tests {
 
     #[test]
     fn test_build_location_prefers_x_forwarded_host() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", "https".parse().unwrap());
-        headers.insert("x-forwarded-host", "proxy.example.com".parse().unwrap());
-        headers.insert("host", "internal.local".parse().unwrap());
-
-        let location = build_location_url(&headers, "/v1/stream", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: true,
+                scheme: "https".to_string(),
+                authority: Some("proxy.example.com".to_string()),
+                client_address: None,
+            },
+            "/v1/stream",
+            "orders",
+        );
         assert_eq!(location, "https://proxy.example.com/v1/stream/orders");
     }
 
     #[test]
     fn test_build_location_falls_back_to_host_and_http() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/v1/stream", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/v1/stream",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/v1/stream/orders");
     }
 
     #[test]
     fn test_build_location_supports_custom_base_path() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/streams", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/streams",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/streams/orders");
     }
 
     #[test]
     fn test_build_location_supports_root_base_path() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/orders");
     }
 }

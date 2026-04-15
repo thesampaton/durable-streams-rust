@@ -1,26 +1,55 @@
+# Baseline config for a local or edge-terminated HTTP deployment.
+# Keep this file minimal: values that only matter for other modes stay commented.
+
 [server]
-port = 4437
-long_poll_timeout_secs = 30
-sse_reconnect_interval_secs = 60
+bind_address = "0.0.0.0:4437" # host:port
 
 [limits]
-max_memory_bytes = 104857600
-max_stream_bytes = 10485760
-max_stream_name_bytes = 1024
-max_stream_name_segments = 8
+max_memory_bytes = 104857600 # total in-process payload bytes
+max_stream_bytes = 10485760 # max bytes retained per stream
+max_stream_name_bytes = 1024 # max UTF-8 bytes in a stream name
+max_stream_name_segments = 8 # max "/"-separated path segments
 
 [http]
-cors_origins = "*"
+cors_origins = "*" # "*" or comma-separated origins
 stream_base_path = "/v1/stream"
+# Set to true to acknowledge wildcard CORS and suppress the warning/error.
+# Required only if you intentionally want `cors_origins = "*"` in production.
+# allow_wildcard_cors = false
 
 [storage]
-mode = "memory"
-data_dir = "./data/streams"
-acid_shard_count = 16
+mode = "memory" # memory | file-fast | file-durable | acid
+# data_dir = "./data/streams" # required for file-fast, file-durable, or acid
+# acid_shard_count = 16 # acid only; power of two in 1..=256
+# acid_backend = "file" # acid only; file | in-memory
 
-[tls]
-# cert_path = "/etc/ds/tls/server-cert.pem"
-# key_path = "/etc/ds/tls/server-key.pem"
+[transport]
+mode = "http" # http | tls | mtls
 
-[log]
+[transport.http]
+versions = ["http1"] # http1 | http2 (http2 requires tls or mtls)
+
+[transport.connection]
+long_poll_timeout_secs = 30 # GET ?live=long-poll timeout
+sse_reconnect_interval_secs = 60 # 0 disables forced reconnects
+
+# [transport.tls]
+# min_version = "1.2" # tls/mtls only
+# max_version = "1.3" # tls/mtls only
+# alpn_protocols = ["http/1.1"] # auto-derived from transport.http.versions; h2 listed first when both enabled
+# cert_path = "/etc/durable-streams/tls/server.crt" # tls/mtls only
+# key_path = "/etc/durable-streams/tls/server.key" # tls/mtls only
+# client_ca_path = "/etc/durable-streams/tls/client-ca.crt" # mtls only
+
+[proxy]
+enabled = false # set true only when the backend should trust a proxy
+forwarded_headers = "none" # none | x-forwarded | forwarded
+trusted_proxies = [] # IPs or CIDRs for trusted proxy peers
+
+[proxy.identity]
+mode = "none" # none | header; header requires transport.mode = "mtls"
+# require_tls = true # only used with mode = "header"
+# header_name = "x-client-identity" # only used with mode = "header"
+
+[observability]
 rust_log = "info"

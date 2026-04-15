@@ -1,2 +1,12 @@
-[log]
+# Local development profile.
+#
+# Layered on top of default.toml:
+# - binds to loopback only
+# - keeps plain HTTP
+# - keeps minimal defaults unless you override them locally
+
+[server]
+bind_address = "127.0.0.1:4437" # loopback-only dev listener
+
+[observability]
 rust_log = "debug"
