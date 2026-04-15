@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-04-15
+
+### Added
+
+- Support for the latest draft Durable Streams protocol updates, including
+  stream forking, sliding TTL renewal, and the related storage lifecycle
+  changes needed to keep server behaviour aligned with the evolving spec.
+- First-class transport and proxy configuration via structured `[transport]`
+  and `[proxy]` sections, including direct TLS, mTLS, trusted proxy handling,
+  and production profile examples for common deployment patterns.
+- CLI subcommands — the server binary now uses `clap` and exposes `serve`
+  (default), `list`, `export`, and `import` subcommands for operational
+  stream management without external tooling.
+- Stream export and import — `export` serialises streams and their messages
+  to a versioned JSON format; `import` restores them with configurable
+  conflict handling (skip, fail, or replace existing streams). Useful for
+  backups, cross-backend migration, and disaster recovery.
+- Public API snapshot test — a nightly-only test guards against accidental
+  changes to the crate's public API surface.
+
+### Changed
+
+- Configuration layout restructured — `port` moves to
+  `server.bind_address`, `tls.*` moves to `[transport.tls]`,
+  `long_poll_timeout_secs` and `sse_reconnect_interval_secs` move to
+  `[transport.connection]`, and `[log]` becomes `[observability]`.
+- Startup now reports phased, typed errors for config loading, validation,
+  TLS preflight, and listener binding.
+- Server conformance suite updated to
+  `@durable-streams/server-conformance-tests` 0.3.0 (299 tests), covering the
+  latest draft-spec behaviours added in that release.
+- Streams now track soft-delete state — deleting a stream that has child
+  forks returns 410 Gone instead of removing data, preserving fork
+  read integrity. The stream is hard-deleted once all forks are removed.
+
+### Fixed
+
+- Assorted fixes across configuration validation, storage lifecycle
+  bookkeeping, and test infrastructure.
+
 ## [0.2.0] - 2026-04-13
 
 ### Added
@@ -110,6 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Exclude non-essential files from crates.io package.
 - Add keywords and categories for crates.io discoverability.
 
+[0.2.1]: https://github.com/thesampaton/durable-streams-rust/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/thesampaton/durable-streams-rust/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/thesampaton/durable-streams-rust-server/compare/v0.1.1...v0.1.2
