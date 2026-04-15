@@ -356,20 +356,16 @@ pub async fn spawn_test_server_with_limits(
     max_total_bytes: u64,
     max_stream_bytes: u64,
 ) -> (String, u16) {
-    let config = Config {
-        max_memory_bytes: max_total_bytes,
-        max_stream_bytes,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.limits.max_memory_bytes = max_total_bytes;
+    config.limits.max_stream_bytes = max_stream_bytes;
     spawn_test_server_with_config(config).await
 }
 
 /// Spawn a test server with a custom long-poll timeout.
 pub async fn spawn_test_server_with_timeout(timeout: Duration) -> (String, u16) {
-    let config = Config {
-        long_poll_timeout: timeout,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.transport.connection.long_poll_timeout_secs = timeout.as_secs();
     spawn_test_server_with_config(config).await
 }
 
@@ -388,10 +384,10 @@ pub async fn spawn_test_server_for_backend(backend: HttpTestBackend) -> (String,
 }
 
 /// Spawn a test server with a full Config.
-async fn spawn_test_server_with_config(config: Config) -> (String, u16) {
+pub async fn spawn_test_server_with_config(config: Config) -> (String, u16) {
     let storage = Arc::new(InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
     spawn_test_server_with_storage(storage, config).await
 }
@@ -399,18 +395,16 @@ async fn spawn_test_server_with_config(config: Config) -> (String, u16) {
 /// Spawn a test server in acid mode (sharded redb).
 pub async fn spawn_test_server_acid() -> (String, u16) {
     let storage_dir = unique_storage_dir("acid-http");
-    let config = Config {
-        storage_mode: StorageMode::Acid,
-        data_dir: storage_dir.to_string_lossy().into_owned(),
-        acid_shard_count: 16,
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.storage.mode = StorageMode::Acid;
+    config.storage.data_dir = storage_dir.to_string_lossy().into_owned();
+    config.storage.acid_shard_count = 16;
     let storage = Arc::new(
         AcidStorage::new(
-            &config.data_dir,
-            config.acid_shard_count,
-            config.max_memory_bytes,
-            config.max_stream_bytes,
+            &config.storage.data_dir,
+            config.storage.acid_shard_count,
+            config.limits.max_memory_bytes,
+            config.limits.max_stream_bytes,
             AcidBackend::File,
         )
         .expect("Failed to initialize acid test storage"),
@@ -430,13 +424,17 @@ where
     let addr = listener.local_addr().expect("Failed to get local addr");
     let port = addr.port();
 
-    // Build and spawn server
+    // Build and spawn server — ConnectInfo<SocketAddr> is required by proxy
+    // trust middleware to identify the peer IP.
     let app = durable_streams_server::router::build_router(storage, &config);
 
     tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("Test server failed");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("Test server failed");
     });
 
     // Give the server a moment to start
@@ -453,8 +451,8 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let config = Config::default();
     let storage = Arc::new(InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -471,9 +469,12 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
     );
 
     tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("Test server failed");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("Test server failed");
     });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -487,13 +488,11 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
 pub async fn spawn_test_server_with_shutdown() -> (String, u16, tokio_util::sync::CancellationToken)
 {
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let config = Config {
-        long_poll_timeout: Duration::from_secs(30),
-        ..Config::default()
-    };
+    let mut config = Config::default();
+    config.transport.connection.long_poll_timeout_secs = 30;
     let storage = Arc::new(InMemoryStorage::new(
-        config.max_memory_bytes,
-        config.max_stream_bytes,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
     ));
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -510,9 +509,12 @@ pub async fn spawn_test_server_with_shutdown() -> (String, u16, tokio_util::sync
     );
 
     tokio::spawn(async move {
-        axum::serve(listener, app)
-            .await
-            .expect("Test server failed");
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .expect("Test server failed");
     });
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;

@@ -1,3 +1,4 @@
+use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::problem::ProblemTelemetry;
 use axum::{
     body::Body,
@@ -28,8 +29,13 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
     let stream_id = route
         .and_then(|route| resource_id_from_path(route, &path))
         .filter(|stream_id| !stream_id.is_empty());
-    let host = forwarded_or_host(&request);
-    let client_address = forwarded_for(&request);
+    let proxy_trust = request.extensions().get::<ProxyTrustResult>().cloned();
+    let host = proxy_trust
+        .as_ref()
+        .and_then(|origin| origin.authority.clone());
+    let client_address = proxy_trust
+        .as_ref()
+        .and_then(|origin| origin.client_address.clone());
     let user_agent = request
         .headers()
         .get("user-agent")
@@ -50,6 +56,7 @@ pub async fn track_requests(request: Request<Body>, next: Next) -> Response {
         client_address.as_deref(),
         user_agent.as_deref(),
         http_version,
+        proxy_trust.as_ref(),
     );
     let started = Instant::now();
 
@@ -71,6 +78,7 @@ fn request_span(
     client_address: Option<&str>,
     user_agent: Option<&str>,
     http_version: &'static str,
+    proxy_trust: Option<&ProxyTrustResult>,
 ) -> Span {
     let span = info_span!(
         "durable_streams.server",
@@ -81,6 +89,8 @@ fn request_span(
         "ds.error_class" = field::Empty,
         "ds.storage.backend" = field::Empty,
         "ds.storage.operation" = field::Empty,
+        "ds.proxy.peer_ip" = field::Empty,
+        "ds.proxy.trusted" = field::Empty,
         "http.request.method" = method,
         "http.route" = field::Empty,
         "http.response.status_code" = field::Empty,
@@ -116,6 +126,12 @@ fn request_span(
     }
     if let Some(user_agent) = user_agent {
         span.record("user_agent.original", user_agent);
+    }
+    if let Some(trust) = proxy_trust {
+        if let Some(ip) = trust.peer_ip {
+            span.record("ds.proxy.peer_ip", field::display(ip));
+        }
+        span.record("ds.proxy.trusted", trust.trusted);
     }
 
     span
@@ -222,32 +238,6 @@ fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         (key == name).then_some(value)
     })
-}
-
-fn forwarded_or_host(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-forwarded-host")
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
-        .or_else(|| {
-            request
-                .headers()
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned)
-        })
-}
-
-fn forwarded_for(request: &Request<Body>) -> Option<String> {
-    request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 fn http_version(version: Version) -> &'static str {

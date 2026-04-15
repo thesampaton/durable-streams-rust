@@ -1,3 +1,4 @@
+use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
@@ -39,6 +40,7 @@ pub async fn create_stream<S: Storage>(
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Extension(StreamBasePath(stream_base_path)): Extension<StreamBasePath>,
+    Extension(request_origin): Extension<ProxyTrustResult>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response> {
@@ -150,7 +152,7 @@ pub async fn create_stream<S: Storage>(
                 StatusCode::OK
             };
 
-            let location = build_location_url(&headers, &stream_base_path, &name);
+            let location = build_location_url(&request_origin, &stream_base_path, &name);
 
             let mut response_headers = HeaderMap::new();
             response_headers.insert("content-type", meta.config.content_type.parse().unwrap());
@@ -200,7 +202,7 @@ pub async fn create_stream<S: Storage>(
         };
 
         // Build absolute Location URL
-        let location = build_location_url(&headers, &stream_base_path, &name);
+        let location = build_location_url(&request_origin, &stream_base_path, &name);
 
         let mut response_headers = HeaderMap::new();
         response_headers.insert("content-type", normalized_ct.parse().unwrap());
@@ -241,22 +243,10 @@ fn strip_stream_base_path(value: &str, stream_base_path: &str) -> String {
     }
 }
 
-/// Build an absolute Location URL from request headers.
-///
-/// Uses `X-Forwarded-Host`/`Host` for the authority and `X-Forwarded-Proto`
-/// for the scheme.
-/// Falls back to `http` and `localhost` when headers are absent.
-fn build_location_url(headers: &HeaderMap, stream_base_path: &str, name: &str) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("http");
-
-    let host = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|v| v.to_str().ok()))
-        .unwrap_or("localhost");
+/// Build an absolute Location URL from the trusted request origin.
+fn build_location_url(origin: &ProxyTrustResult, stream_base_path: &str, name: &str) -> String {
+    let scheme = origin.scheme.as_str();
+    let host = origin.authority.as_deref().unwrap_or("localhost");
 
     if stream_base_path == "/" {
         format!("{scheme}://{host}/{name}")
@@ -271,39 +261,65 @@ mod tests {
 
     #[test]
     fn test_build_location_prefers_x_forwarded_host() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", "https".parse().unwrap());
-        headers.insert("x-forwarded-host", "proxy.example.com".parse().unwrap());
-        headers.insert("host", "internal.local".parse().unwrap());
-
-        let location = build_location_url(&headers, "/v1/stream", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: true,
+                scheme: "https".to_string(),
+                authority: Some("proxy.example.com".to_string()),
+                client_address: None,
+            },
+            "/v1/stream",
+            "orders",
+        );
         assert_eq!(location, "https://proxy.example.com/v1/stream/orders");
     }
 
     #[test]
     fn test_build_location_falls_back_to_host_and_http() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/v1/stream", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/v1/stream",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/v1/stream/orders");
     }
 
     #[test]
     fn test_build_location_supports_custom_base_path() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/streams", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/streams",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/streams/orders");
     }
 
     #[test]
     fn test_build_location_supports_root_base_path() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", "localhost:4437".parse().unwrap());
-
-        let location = build_location_url(&headers, "/", "orders");
+        let location = build_location_url(
+            &ProxyTrustResult {
+                peer_ip: None,
+                trusted: false,
+                scheme: "http".to_string(),
+                authority: Some("localhost:4437".to_string()),
+                client_address: None,
+            },
+            "/",
+            "orders",
+        );
         assert_eq!(location, "http://localhost:4437/orders");
     }
 }

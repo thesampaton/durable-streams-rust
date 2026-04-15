@@ -3,6 +3,7 @@
 //! [`build_router`] is the main embedding entry point for library consumers.
 
 use crate::config::{Config, LongPollTimeout, SseReconnectInterval};
+use crate::middleware::proxy_trust::ProxyTrustState;
 use crate::protocol::stream_name::StreamNameLimits;
 use crate::{handlers, middleware, storage::Storage};
 use axum::http::HeaderValue;
@@ -67,10 +68,15 @@ pub fn build_router_with_ready<S: Storage + 'static>(
             .layer(Extension(flag));
     }
 
+    let proxy_trust_state = ProxyTrustState::from_config(config);
+
     app.layer(axum_middleware::from_fn(
         middleware::telemetry::track_requests,
     ))
     .layer(cors_layer(&config.http.cors_origins))
+    .layer(axum_middleware::from_fn(move |request, next| {
+        middleware::proxy_trust::enforce_proxy_trust(proxy_trust_state.clone(), request, next)
+    }))
 }
 
 /// Build a CORS layer from the configured origins string.
