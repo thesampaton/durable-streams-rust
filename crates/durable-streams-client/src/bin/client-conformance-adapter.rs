@@ -231,11 +231,32 @@ struct ReadChunkResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FeatureFlags {
-    batching: bool,
+    #[serde(flatten)]
+    read_modes: ReadModeFeatures,
+    #[serde(flatten)]
+    data: DataFeatures,
+    #[serde(flatten)]
+    protocol: ProtocolFeatures,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadModeFeatures {
     sse: bool,
     long_poll: bool,
     auto: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataFeatures {
+    batching: bool,
     streaming: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtocolFeatures {
     dynamic_headers: bool,
     strict_zero_validation: bool,
 }
@@ -321,55 +342,43 @@ enum AdapterOutput {
     Error(ErrorResult),
 }
 
+struct CreateParams {
+    path: String,
+    content_type: Option<String>,
+    ttl_seconds: Option<u64>,
+    expires_at: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    closed: Option<bool>,
+    data: Option<String>,
+}
+
+struct AppendParams {
+    path: String,
+    data: String,
+    binary: Option<bool>,
+    seq: Option<i64>,
+    headers: Option<HashMap<String, String>>,
+    producer_id: Option<String>,
+    producer_epoch: Option<i64>,
+    producer_seq: Option<i64>,
+}
+
+struct ReadParams {
+    path: String,
+    offset: Option<String>,
+    live: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+    max_chunks: Option<usize>,
+    wait_for_up_to_date: Option<bool>,
+    headers: Option<HashMap<String, String>>,
+}
+
 async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> AdapterOutput {
     match command {
         Command::Init {
             server_url,
             timeout_ms,
-        } => {
-            let mut config = ClientConfig::default();
-            config.base_url = match url::Url::parse(&server_url) {
-                Ok(url) => url,
-                Err(error) => {
-                    return AdapterOutput::Error(error_output(
-                        "init",
-                        None,
-                        ErrorCode::InvalidArgument,
-                        error.to_string(),
-                    ));
-                }
-            };
-            let client = match Client::new(config) {
-                Ok(client) => client,
-                Err(error) => return AdapterOutput::Error(error_to_output("init", None, &error)),
-            };
-
-            let mut state = state.lock().await;
-            state.client = Some(client);
-            state.server_url = Some(server_url);
-            state.timeout_ms = timeout_ms.unwrap_or(30_000);
-            state.content_types.clear();
-            state.producers.clear();
-            state.dynamic_headers.clear();
-            state.dynamic_params.clear();
-
-            AdapterOutput::Success(SuccessResult {
-                result_type: "init".to_string(),
-                success: true,
-                client_name: Some("durable-streams-client-rust".to_string()),
-                client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
-                features: Some(FeatureFlags {
-                    batching: false,
-                    sse: true,
-                    long_poll: true,
-                    auto: true,
-                    streaming: true,
-                    dynamic_headers: true,
-                    strict_zero_validation: true,
-                }),
-                ..Default::default()
-            })
-        }
+        } => handle_init(&state, server_url, timeout_ms).await,
         Command::Create {
             path,
             content_type,
@@ -378,84 +387,8 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             headers,
             closed,
             data,
-        } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "create",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            let content_type =
-                content_type.unwrap_or_else(|| "application/octet-stream".to_string());
-            let request = CreateStreamRequest {
-                content_type: content_type.clone(),
-                ttl_seconds,
-                expires_at,
-                closed: closed.unwrap_or(false),
-                body: data.map(Bytes::from),
-                options: RequestOptions {
-                    headers: headers.unwrap_or_default(),
-                    query: HashMap::new(),
-                },
-            };
-            match client.create_raw(&path, &request).await {
-                Ok(result) => {
-                    state.content_types.insert(path.clone(), content_type);
-                    AdapterOutput::Success(SuccessResult {
-                        result_type: "create".to_string(),
-                        success: true,
-                        status: Some(result.status),
-                        offset: result.next_offset,
-                        stream_closed: Some(result.stream_closed),
-                        ..Default::default()
-                    })
-                }
-                Err(error) => AdapterOutput::Error(error_to_output("create", Some(&path), &error)),
-            }
-        }
-        Command::Connect { path, headers } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "connect",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            match client
-                .connect_raw(
-                    &path,
-                    &ConnectRequest {
-                        options: RequestOptions {
-                            headers: headers.unwrap_or_default(),
-                            query: HashMap::new(),
-                        },
-                    },
-                )
-                .await
-            {
-                Ok(result) => {
-                    if let Some(content_type) = &result.content_type {
-                        state
-                            .content_types
-                            .insert(path.clone(), content_type.clone());
-                    }
-                    AdapterOutput::Success(SuccessResult {
-                        result_type: "connect".to_string(),
-                        success: true,
-                        status: Some(result.status),
-                        offset: result.offset,
-                        stream_closed: Some(result.stream_closed),
-                        ..Default::default()
-                    })
-                }
-                Err(error) => AdapterOutput::Error(error_to_output("connect", Some(&path), &error)),
-            }
-        }
+        } => handle_create(&state, CreateParams { path, content_type, ttl_seconds, expires_at, headers, closed, data }).await,
+        Command::Connect { path, headers } => handle_connect(&state, path, headers).await,
         Command::Append {
             path,
             data,
@@ -465,66 +398,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             producer_id,
             producer_epoch,
             producer_seq,
-        } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "append",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
-            let body = if binary.unwrap_or(false) {
-                match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
-                    Ok(body) => Bytes::from(body),
-                    Err(error) => {
-                        return AdapterOutput::Error(error_output(
-                            "append",
-                            None,
-                            ErrorCode::ParseError,
-                            error.to_string(),
-                        ));
-                    }
-                }
-            } else {
-                Bytes::from(data)
-            };
-            let request = AppendRequest {
-                body,
-                content_type: Some(
-                    state
-                        .content_types
-                        .get(&path)
-                        .cloned()
-                        .unwrap_or_else(|| "application/octet-stream".to_string()),
-                ),
-                stream_seq: seq.map(|value| value.to_string()),
-                producer: producer_id.map(|producer_id| ProducerRequest {
-                    producer_id,
-                    producer_epoch: producer_epoch.unwrap_or(0),
-                    producer_seq: producer_seq.unwrap_or(0),
-                }),
-                options: RequestOptions {
-                    headers: merged_headers,
-                    query: HashMap::new(),
-                },
-            };
-            match client.append_raw(&path, &request).await {
-                Ok(result) => AdapterOutput::Success(SuccessResult {
-                    result_type: "append".to_string(),
-                    success: true,
-                    status: Some(200),
-                    offset: result.next_offset,
-                    stream_closed: Some(result.stream_closed),
-                    headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
-                    params_sent: Some(params_sent).filter(|m| !m.is_empty()),
-                    ..Default::default()
-                }),
-                Err(error) => AdapterOutput::Error(error_to_output("append", Some(&path), &error)),
-            }
-        }
+        } => handle_append(&state, AppendParams { path, data, binary, seq, headers, producer_id, producer_epoch, producer_seq }).await,
         Command::Read {
             path,
             offset,
@@ -533,222 +407,24 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             max_chunks,
             wait_for_up_to_date,
             headers,
-        } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "read",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
-            let live = match live {
-                Some(serde_json::Value::Bool(true)) => LiveMode::Auto,
-                Some(serde_json::Value::Bool(false)) | None => LiveMode::CatchUp,
-                Some(serde_json::Value::String(value)) if value == "long-poll" => {
-                    LiveMode::LongPoll
-                }
-                Some(serde_json::Value::String(value)) if value == "sse" => LiveMode::Sse,
-                _ => LiveMode::CatchUp,
-            };
-            let request = ReadRequest {
-                offset: offset.clone(),
-                live,
-                timeout: Some(std::time::Duration::from_millis(
-                    timeout_ms.unwrap_or(state.timeout_ms),
-                )),
-                max_chunks,
-                wait_for_up_to_date: wait_for_up_to_date.unwrap_or(false),
-                cursor: None,
-                if_none_match: None,
-                options: RequestOptions {
-                    headers: merged_headers,
-                    query: HashMap::new(),
-                },
-            };
-            match client.read_raw(&path, &request).await {
-                Ok(result) => {
-                    let chunks = result
-                        .chunks
-                        .iter()
-                        .map(|chunk| ReadChunkResult {
-                            data: String::from_utf8_lossy(&chunk.data).to_string(),
-                            offset: Some(chunk.next_offset.clone()),
-                        })
-                        .collect::<Vec<_>>();
-                    AdapterOutput::Success(SuccessResult {
-                        result_type: "read".to_string(),
-                        success: true,
-                        status: Some(result.status),
-                        offset: Some(result.next_offset),
-                        up_to_date: Some(result.up_to_date),
-                        stream_closed: Some(result.stream_closed),
-                        headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
-                        params_sent: Some(params_sent).filter(|m| !m.is_empty()),
-                        chunks: Some(chunks),
-                        ..Default::default()
-                    })
-                }
-                Err(error) => {
-                    AdapterOutput::Error(read_error_output(&path, live, offset.as_deref(), &error))
-                }
-            }
-        }
-        Command::Head { path, headers } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "head",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            match client
-                .head_raw(
-                    &path,
-                    &HeadRequest {
-                        options: RequestOptions {
-                            headers: headers.unwrap_or_default(),
-                            query: HashMap::new(),
-                        },
-                    },
-                )
-                .await
-            {
-                Ok(result) => {
-                    if let Some(content_type) = &result.content_type {
-                        state
-                            .content_types
-                            .insert(path.clone(), content_type.clone());
-                    }
-                    AdapterOutput::Success(SuccessResult {
-                        result_type: "head".to_string(),
-                        success: true,
-                        status: Some(result.status),
-                        offset: result.offset,
-                        stream_closed: Some(result.stream_closed),
-                        content_type: result.content_type,
-                        ..Default::default()
-                    })
-                }
-                Err(error) => AdapterOutput::Error(error_to_output("head", Some(&path), &error)),
-            }
-        }
-        Command::Delete { path, headers } => {
-            let state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "delete",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            match client
-                .delete_raw(
-                    &path,
-                    &DeleteRequest {
-                        options: RequestOptions {
-                            headers: headers.unwrap_or_default(),
-                            query: HashMap::new(),
-                        },
-                    },
-                )
-                .await
-            {
-                Ok(_result) => AdapterOutput::Success(SuccessResult {
-                    result_type: "delete".to_string(),
-                    success: true,
-                    status: Some(200),
-                    ..Default::default()
-                }),
-                Err(error) => AdapterOutput::Error(error_to_output("delete", Some(&path), &error)),
-            }
-        }
+        } => handle_read(&state, ReadParams { path, offset, live, timeout_ms, max_chunks, wait_for_up_to_date, headers }).await,
+        Command::Head { path, headers } => handle_head(&state, path, headers).await,
+        Command::Delete { path, headers } => handle_delete(&state, path, headers).await,
         Command::Close {
             path,
             data,
             content_type,
-        } => {
-            let state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "close",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            let content_type = content_type.or_else(|| state.content_types.get(&path).cloned());
-            match client
-                .close_raw(
-                    &path,
-                    &CloseStreamRequest {
-                        body: data.map(Bytes::from),
-                        content_type,
-                        producer: None,
-                        options: RequestOptions::default(),
-                    },
-                )
-                .await
-            {
-                Ok(result) => AdapterOutput::Success(SuccessResult {
-                    result_type: "close".to_string(),
-                    success: true,
-                    status: Some(200),
-                    final_offset: Some(result.final_offset),
-                    stream_closed: Some(result.stream_closed),
-                    ..Default::default()
-                }),
-                Err(error) => AdapterOutput::Error(error_to_output("close", Some(&path), &error)),
-            }
-        }
+        } => handle_close(&state, path, data, content_type).await,
         Command::SetDynamicHeader {
             name,
             value_type,
             initial_value,
-        } => {
-            let mut state = state.lock().await;
-            state.dynamic_headers.insert(
-                name,
-                DynamicValue {
-                    kind: value_type,
-                    counter: 0,
-                    token: initial_value,
-                },
-            );
-            AdapterOutput::Success(empty_success("set-dynamic-header"))
-        }
+        } => handle_set_dynamic_header(&state, name, value_type, initial_value).await,
         Command::SetDynamicParam { name, value_type } => {
-            let mut state = state.lock().await;
-            state.dynamic_params.insert(
-                name,
-                DynamicValue {
-                    kind: value_type,
-                    counter: 0,
-                    token: None,
-                },
-            );
-            AdapterOutput::Success(empty_success("set-dynamic-param"))
+            handle_set_dynamic_param(&state, name, value_type).await
         }
-        Command::ClearDynamic => {
-            let mut state = state.lock().await;
-            state.dynamic_headers.clear();
-            state.dynamic_params.clear();
-            AdapterOutput::Success(empty_success("clear-dynamic"))
-        }
-        Command::Validate { target } => match validate_target(target) {
-            Ok(()) => AdapterOutput::Success(empty_success("validate")),
-            Err(error) => AdapterOutput::Error(error_output(
-                "validate",
-                None,
-                ErrorCode::InvalidArgument,
-                error,
-            )),
-        },
+        Command::ClearDynamic => handle_clear_dynamic(&state).await,
+        Command::Validate { target } => handle_validate(target),
         Command::IdempotentAppend {
             path,
             data,
@@ -756,43 +432,7 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             epoch,
             auto_claim,
             headers,
-        } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "idempotent-append",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            match get_or_create_producer(
-                client,
-                &mut state,
-                &path,
-                &producer_id,
-                epoch.unwrap_or(0),
-                auto_claim.unwrap_or(false),
-                headers.unwrap_or_default(),
-            ) {
-                Ok(producer) => match producer.append(data.into_bytes()).await {
-                    Ok(_) => AdapterOutput::Success(SuccessResult {
-                        result_type: "idempotent-append".to_string(),
-                        success: true,
-                        status: Some(200),
-                        ..Default::default()
-                    }),
-                    Err(error) => AdapterOutput::Error(error_to_output(
-                        "idempotent-append",
-                        Some(&path),
-                        &error,
-                    )),
-                },
-                Err(error) => {
-                    AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error))
-                }
-            }
-        }
+        } => handle_idempotent_append(&state, path, data, producer_id, epoch, auto_claim, headers).await,
         Command::IdempotentAppendBatch {
             path,
             items,
@@ -801,47 +441,563 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             auto_claim,
             max_in_flight: _,
             headers,
-        } => {
-            let state = state.lock().await;
-            let Some(client) = state.client.clone() else {
+        } => handle_idempotent_append_batch(&state, path, items, producer_id, epoch, auto_claim, headers).await,
+        Command::IdempotentClose {
+            path,
+            producer_id,
+            epoch,
+            data,
+            auto_claim,
+            headers,
+        } => handle_idempotent_close(&state, path, producer_id, epoch, data, auto_claim, headers).await,
+        Command::IdempotentDetach {
+            path,
+            producer_id,
+            epoch,
+            headers: _,
+        } => handle_idempotent_detach(&state, path, producer_id, epoch).await,
+        Command::Shutdown => AdapterOutput::Success(empty_success("shutdown")),
+    }
+}
+
+async fn handle_init(
+    state: &Arc<Mutex<AdapterState>>,
+    server_url: String,
+    timeout_ms: Option<u64>,
+) -> AdapterOutput {
+    let config = ClientConfig {
+        base_url: match url::Url::parse(&server_url) {
+            Ok(url) => url,
+            Err(error) => {
                 return AdapterOutput::Error(error_output(
-                    "idempotent-append-batch",
+                    "init",
                     None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
+                    ErrorCode::InvalidArgument,
+                    error.to_string(),
                 ));
-            };
-            match create_producer(
-                client,
-                &path,
-                &producer_id,
-                epoch.unwrap_or(0),
-                auto_claim.unwrap_or(false),
-                headers.unwrap_or_default(),
-                state.content_types.get(&path).cloned(),
-            ) {
-                Ok(producer) => {
-                    let items = items
-                        .into_iter()
-                        .map(BatchItem::into_data)
-                        .map(String::into_bytes)
-                        .collect::<Vec<_>>();
-                    match producer.append_batch(&items).await {
-                        Ok(_) => {
-                            let _ = producer.detach().await;
-                            AdapterOutput::Success(SuccessResult {
-                                result_type: "idempotent-append-batch".to_string(),
-                                success: true,
-                                status: Some(200),
-                                ..Default::default()
-                            })
-                        }
-                        Err(error) => AdapterOutput::Error(error_to_output(
-                            "idempotent-append-batch",
-                            Some(&path),
-                            &error,
-                        )),
-                    }
+            }
+        },
+        ..ClientConfig::default()
+    };
+    let client = match Client::new(config) {
+        Ok(client) => client,
+        Err(error) => return AdapterOutput::Error(error_to_output("init", None, &error)),
+    };
+
+    let mut state = state.lock().await;
+    state.client = Some(client);
+    state.server_url = Some(server_url);
+    state.timeout_ms = timeout_ms.unwrap_or(30_000);
+    state.content_types.clear();
+    state.producers.clear();
+    state.dynamic_headers.clear();
+    state.dynamic_params.clear();
+
+    AdapterOutput::Success(SuccessResult {
+        result_type: "init".to_string(),
+        success: true,
+        client_name: Some("durable-streams-client-rust".to_string()),
+        client_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        features: Some(FeatureFlags {
+            read_modes: ReadModeFeatures {
+                sse: true,
+                long_poll: true,
+                auto: true,
+            },
+            data: DataFeatures {
+                batching: false,
+                streaming: true,
+            },
+            protocol: ProtocolFeatures {
+                dynamic_headers: true,
+                strict_zero_validation: true,
+            },
+        }),
+        ..Default::default()
+    })
+}
+
+async fn handle_create(
+    state: &Arc<Mutex<AdapterState>>,
+    params: CreateParams,
+) -> AdapterOutput {
+    let CreateParams { path, content_type, ttl_seconds, expires_at, headers, closed, data } = params;
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "create",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    let content_type = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+    let request = CreateStreamRequest {
+        content_type: content_type.clone(),
+        ttl_seconds,
+        expires_at,
+        closed: closed.unwrap_or(false),
+        body: data.map(Bytes::from),
+        options: RequestOptions {
+            headers: headers.unwrap_or_default(),
+            query: HashMap::new(),
+        },
+    };
+    match client.create_raw(&path, &request).await {
+        Ok(result) => {
+            state.content_types.insert(path.clone(), content_type);
+            AdapterOutput::Success(SuccessResult {
+                result_type: "create".to_string(),
+                success: true,
+                status: Some(result.status),
+                offset: result.next_offset,
+                stream_closed: Some(result.stream_closed),
+                ..Default::default()
+            })
+        }
+        Err(error) => AdapterOutput::Error(error_to_output("create", Some(&path), &error)),
+    }
+}
+
+async fn handle_connect(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "connect",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match client
+        .connect_raw(
+            &path,
+            &ConnectRequest {
+                options: RequestOptions {
+                    headers: headers.unwrap_or_default(),
+                    query: HashMap::new(),
+                },
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            if let Some(content_type) = &result.content_type {
+                state
+                    .content_types
+                    .insert(path.clone(), content_type.clone());
+            }
+            AdapterOutput::Success(SuccessResult {
+                result_type: "connect".to_string(),
+                success: true,
+                status: Some(result.status),
+                offset: result.offset,
+                stream_closed: Some(result.stream_closed),
+                ..Default::default()
+            })
+        }
+        Err(error) => AdapterOutput::Error(error_to_output("connect", Some(&path), &error)),
+    }
+}
+
+async fn handle_append(
+    state: &Arc<Mutex<AdapterState>>,
+    params: AppendParams,
+) -> AdapterOutput {
+    let AppendParams { path, data, binary, seq, headers, producer_id, producer_epoch, producer_seq } = params;
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "append",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
+    let body = if binary.unwrap_or(false) {
+        match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+            Ok(body) => Bytes::from(body),
+            Err(error) => {
+                return AdapterOutput::Error(error_output(
+                    "append",
+                    None,
+                    ErrorCode::ParseError,
+                    error.to_string(),
+                ));
+            }
+        }
+    } else {
+        Bytes::from(data)
+    };
+    let request = AppendRequest {
+        body,
+        content_type: Some(
+            state
+                .content_types
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+        ),
+        stream_seq: seq.map(|value| value.to_string()),
+        producer: producer_id.map(|producer_id| ProducerRequest {
+            producer_id,
+            producer_epoch: producer_epoch.unwrap_or(0),
+            producer_seq: producer_seq.unwrap_or(0),
+        }),
+        options: RequestOptions {
+            headers: merged_headers,
+            query: HashMap::new(),
+        },
+    };
+    match client.append_raw(&path, &request).await {
+        Ok(result) => AdapterOutput::Success(SuccessResult {
+            result_type: "append".to_string(),
+            success: true,
+            status: Some(200),
+            offset: result.next_offset,
+            stream_closed: Some(result.stream_closed),
+            headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
+            params_sent: Some(params_sent).filter(|m| !m.is_empty()),
+            ..Default::default()
+        }),
+        Err(error) => AdapterOutput::Error(error_to_output("append", Some(&path), &error)),
+    }
+}
+
+async fn handle_read(
+    state: &Arc<Mutex<AdapterState>>,
+    params: ReadParams,
+) -> AdapterOutput {
+    let ReadParams { path, offset, live, timeout_ms, max_chunks, wait_for_up_to_date, headers } = params;
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "read",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    let (headers_sent, params_sent, merged_headers) = resolve_dynamic(&mut state, headers);
+    let live = match live {
+        Some(serde_json::Value::Bool(true)) => LiveMode::Auto,
+        Some(serde_json::Value::String(value)) if value == "long-poll" => LiveMode::LongPoll,
+        Some(serde_json::Value::String(value)) if value == "sse" => LiveMode::Sse,
+        _ => LiveMode::CatchUp,
+    };
+    let request = ReadRequest {
+        offset: offset.clone(),
+        live,
+        timeout: Some(std::time::Duration::from_millis(
+            timeout_ms.unwrap_or(state.timeout_ms),
+        )),
+        max_chunks,
+        wait_for_up_to_date: wait_for_up_to_date.unwrap_or(false),
+        cursor: None,
+        if_none_match: None,
+        options: RequestOptions {
+            headers: merged_headers,
+            query: HashMap::new(),
+        },
+    };
+    match client.read_raw(&path, &request).await {
+        Ok(result) => {
+            let chunks = result
+                .chunks
+                .iter()
+                .map(|chunk| ReadChunkResult {
+                    data: String::from_utf8_lossy(&chunk.data).to_string(),
+                    offset: Some(chunk.next_offset.clone()),
+                })
+                .collect::<Vec<_>>();
+            AdapterOutput::Success(SuccessResult {
+                result_type: "read".to_string(),
+                success: true,
+                status: Some(result.status),
+                offset: Some(result.next_offset),
+                up_to_date: Some(result.up_to_date),
+                stream_closed: Some(result.stream_closed),
+                headers_sent: Some(headers_sent).filter(|m| !m.is_empty()),
+                params_sent: Some(params_sent).filter(|m| !m.is_empty()),
+                chunks: Some(chunks),
+                ..Default::default()
+            })
+        }
+        Err(error) => {
+            AdapterOutput::Error(read_error_output(&path, live, offset.as_deref(), &error))
+        }
+    }
+}
+
+async fn handle_head(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "head",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match client
+        .head_raw(
+            &path,
+            &HeadRequest {
+                options: RequestOptions {
+                    headers: headers.unwrap_or_default(),
+                    query: HashMap::new(),
+                },
+            },
+        )
+        .await
+    {
+        Ok(result) => {
+            if let Some(content_type) = &result.content_type {
+                state
+                    .content_types
+                    .insert(path.clone(), content_type.clone());
+            }
+            AdapterOutput::Success(SuccessResult {
+                result_type: "head".to_string(),
+                success: true,
+                status: Some(result.status),
+                offset: result.offset,
+                stream_closed: Some(result.stream_closed),
+                content_type: result.content_type,
+                ..Default::default()
+            })
+        }
+        Err(error) => AdapterOutput::Error(error_to_output("head", Some(&path), &error)),
+    }
+}
+
+async fn handle_delete(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "delete",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match client
+        .delete_raw(
+            &path,
+            &DeleteRequest {
+                options: RequestOptions {
+                    headers: headers.unwrap_or_default(),
+                    query: HashMap::new(),
+                },
+            },
+        )
+        .await
+    {
+        Ok(_result) => AdapterOutput::Success(SuccessResult {
+            result_type: "delete".to_string(),
+            success: true,
+            status: Some(200),
+            ..Default::default()
+        }),
+        Err(error) => AdapterOutput::Error(error_to_output("delete", Some(&path), &error)),
+    }
+}
+
+async fn handle_close(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    data: Option<String>,
+    content_type: Option<String>,
+) -> AdapterOutput {
+    let state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "close",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    let content_type = content_type.or_else(|| state.content_types.get(&path).cloned());
+    match client
+        .close_raw(
+            &path,
+            &CloseStreamRequest {
+                body: data.map(Bytes::from),
+                content_type,
+                producer: None,
+                options: RequestOptions::default(),
+            },
+        )
+        .await
+    {
+        Ok(result) => AdapterOutput::Success(SuccessResult {
+            result_type: "close".to_string(),
+            success: true,
+            status: Some(200),
+            final_offset: Some(result.final_offset),
+            stream_closed: Some(result.stream_closed),
+            ..Default::default()
+        }),
+        Err(error) => AdapterOutput::Error(error_to_output("close", Some(&path), &error)),
+    }
+}
+
+async fn handle_set_dynamic_header(
+    state: &Arc<Mutex<AdapterState>>,
+    name: String,
+    value_type: String,
+    initial_value: Option<String>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    state.dynamic_headers.insert(
+        name,
+        DynamicValue {
+            kind: value_type,
+            counter: 0,
+            token: initial_value,
+        },
+    );
+    AdapterOutput::Success(empty_success("set-dynamic-header"))
+}
+
+async fn handle_set_dynamic_param(
+    state: &Arc<Mutex<AdapterState>>,
+    name: String,
+    value_type: String,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    state.dynamic_params.insert(
+        name,
+        DynamicValue {
+            kind: value_type,
+            counter: 0,
+            token: None,
+        },
+    );
+    AdapterOutput::Success(empty_success("set-dynamic-param"))
+}
+
+async fn handle_clear_dynamic(state: &Arc<Mutex<AdapterState>>) -> AdapterOutput {
+    let mut state = state.lock().await;
+    state.dynamic_headers.clear();
+    state.dynamic_params.clear();
+    AdapterOutput::Success(empty_success("clear-dynamic"))
+}
+
+fn handle_validate(target: ValidateTarget) -> AdapterOutput {
+    match validate_target(target) {
+        Ok(()) => AdapterOutput::Success(empty_success("validate")),
+        Err(error) => AdapterOutput::Error(error_output(
+            "validate",
+            None,
+            ErrorCode::InvalidArgument,
+            error,
+        )),
+    }
+}
+
+async fn handle_idempotent_append(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    data: String,
+    producer_id: String,
+    epoch: Option<i64>,
+    auto_claim: Option<bool>,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "idempotent-append",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match get_or_create_producer(
+        client,
+        &mut state,
+        &path,
+        &producer_id,
+        epoch.unwrap_or(0),
+        auto_claim.unwrap_or(false),
+        headers.unwrap_or_default(),
+    ) {
+        Ok(producer) => match producer.append(data.into_bytes()).await {
+            Ok(_) => AdapterOutput::Success(SuccessResult {
+                result_type: "idempotent-append".to_string(),
+                success: true,
+                status: Some(200),
+                ..Default::default()
+            }),
+            Err(error) => AdapterOutput::Error(error_to_output(
+                "idempotent-append",
+                Some(&path),
+                &error,
+            )),
+        },
+        Err(error) => {
+            AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error))
+        }
+    }
+}
+
+async fn handle_idempotent_append_batch(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    items: Vec<BatchItem>,
+    producer_id: String,
+    epoch: Option<i64>,
+    auto_claim: Option<bool>,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "idempotent-append-batch",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match create_producer(
+        client,
+        &path,
+        &producer_id,
+        epoch.unwrap_or(0),
+        auto_claim.unwrap_or(false),
+        headers.unwrap_or_default(),
+        state.content_types.get(&path).cloned(),
+    ) {
+        Ok(producer) => {
+            let items = items
+                .into_iter()
+                .map(BatchItem::into_data)
+                .map(String::into_bytes)
+                .collect::<Vec<_>>();
+            match producer.append_batch(&items).await {
+                Ok(_) => {
+                    let _ = producer.detach();
+                    AdapterOutput::Success(SuccessResult {
+                        result_type: "idempotent-append-batch".to_string(),
+                        success: true,
+                        status: Some(200),
+                        ..Default::default()
+                    })
                 }
                 Err(error) => AdapterOutput::Error(error_to_output(
                     "idempotent-append-batch",
@@ -850,71 +1006,78 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
                 )),
             }
         }
-        Command::IdempotentClose {
-            path,
-            producer_id,
-            epoch,
-            data,
-            auto_claim,
-            headers,
-        } => {
-            let mut state = state.lock().await;
-            let Some(client) = state.client.clone() else {
-                return AdapterOutput::Error(error_output(
-                    "idempotent-close",
-                    None,
-                    ErrorCode::InternalError,
-                    "client adapter not initialized",
-                ));
-            };
-            match get_or_create_producer(
-                client,
-                &mut state,
-                &path,
-                &producer_id,
-                epoch.unwrap_or(0),
-                auto_claim.unwrap_or(false),
-                headers.unwrap_or_default(),
-            ) {
-                Ok(producer) => match producer.close(data.map(String::into_bytes)).await {
-                    Ok(result) => AdapterOutput::Success(SuccessResult {
-                        result_type: "idempotent-close".to_string(),
-                        success: true,
-                        status: Some(200),
-                        final_offset: Some(result.final_offset),
-                        stream_closed: Some(result.stream_closed),
-                        ..Default::default()
-                    }),
-                    Err(error) => AdapterOutput::Error(error_to_output(
-                        "idempotent-close",
-                        Some(&path),
-                        &error,
-                    )),
-                },
-                Err(error) => {
-                    AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error))
-                }
-            }
-        }
-        Command::IdempotentDetach {
-            path,
-            producer_id,
-            epoch,
-            headers: _,
-        } => {
-            let mut state = state.lock().await;
-            state
-                .producers
-                .remove(&producer_key(&path, &producer_id, epoch.unwrap_or(0)));
-            AdapterOutput::Success(SuccessResult {
-                result_type: "idempotent-detach".to_string(),
+        Err(error) => AdapterOutput::Error(error_to_output(
+            "idempotent-append-batch",
+            Some(&path),
+            &error,
+        )),
+    }
+}
+
+async fn handle_idempotent_close(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    producer_id: String,
+    epoch: Option<i64>,
+    data: Option<String>,
+    auto_claim: Option<bool>,
+    headers: Option<HashMap<String, String>>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    let Some(client) = state.client.clone() else {
+        return AdapterOutput::Error(error_output(
+            "idempotent-close",
+            None,
+            ErrorCode::InternalError,
+            "client adapter not initialized",
+        ));
+    };
+    match get_or_create_producer(
+        client,
+        &mut state,
+        &path,
+        &producer_id,
+        epoch.unwrap_or(0),
+        auto_claim.unwrap_or(false),
+        headers.unwrap_or_default(),
+    ) {
+        Ok(producer) => match producer.close(data.map(String::into_bytes)).await {
+            Ok(result) => AdapterOutput::Success(SuccessResult {
+                result_type: "idempotent-close".to_string(),
                 success: true,
                 status: Some(200),
+                final_offset: Some(result.final_offset),
+                stream_closed: Some(result.stream_closed),
                 ..Default::default()
-            })
+            }),
+            Err(error) => AdapterOutput::Error(error_to_output(
+                "idempotent-close",
+                Some(&path),
+                &error,
+            )),
+        },
+        Err(error) => {
+            AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error))
         }
-        Command::Shutdown => AdapterOutput::Success(empty_success("shutdown")),
     }
+}
+
+async fn handle_idempotent_detach(
+    state: &Arc<Mutex<AdapterState>>,
+    path: String,
+    producer_id: String,
+    epoch: Option<i64>,
+) -> AdapterOutput {
+    let mut state = state.lock().await;
+    state
+        .producers
+        .remove(&producer_key(&path, &producer_id, epoch.unwrap_or(0)));
+    AdapterOutput::Success(SuccessResult {
+        result_type: "idempotent-detach".to_string(),
+        success: true,
+        status: Some(200),
+        ..Default::default()
+    })
 }
 
 fn empty_success(result_type: &str) -> SuccessResult {
@@ -977,8 +1140,6 @@ fn error_to_output(command_type: &str, path: Option<&str>, error: &Error) -> Err
                 ErrorKind::Conflict => ErrorCode::Conflict,
                 ErrorKind::StreamClosed => ErrorCode::StreamClosed,
                 ErrorKind::InvalidOffset => ErrorCode::InvalidOffset,
-                ErrorKind::Forbidden => ErrorCode::UnexpectedStatus,
-                ErrorKind::RateLimited => ErrorCode::UnexpectedStatus,
                 _ => ErrorCode::UnexpectedStatus,
             };
             error_output(
@@ -1048,12 +1209,12 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
             if initial_delay_ms.is_some_and(|value| value <= 0) {
                 return Err("initialDelayMs must be greater than zero".to_string());
             }
-            if let (Some(initial), Some(max)) = (initial_delay_ms, max_delay_ms) {
-                if max < initial {
-                    return Err(
-                        "maxDelayMs must be greater than or equal to initialDelayMs".to_string()
-                    );
-                }
+            if let (Some(initial), Some(max)) = (initial_delay_ms, max_delay_ms)
+                && max < initial
+            {
+                return Err(
+                    "maxDelayMs must be greater than or equal to initialDelayMs".to_string(),
+                );
             }
             if multiplier.is_some_and(|value| value < 1.0) {
                 return Err("multiplier must be at least 1.0".to_string());
@@ -1077,8 +1238,10 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
                 producer_id: producer_id.unwrap_or_else(|| "test-producer".to_string()),
                 epoch: epoch.unwrap_or(0),
                 auto_claim: false,
-                max_batch_bytes: max_batch_bytes.unwrap_or(1024 * 1024_i64) as usize,
-                max_batch_items: max_batch_items.map(|value| value as usize),
+                max_batch_bytes: usize::try_from(max_batch_bytes.unwrap_or(1024 * 1024_i64))
+                    .expect("max_batch_bytes must fit in usize"),
+                max_batch_items: max_batch_items
+                    .map(|value| usize::try_from(value).expect("max_batch_items must fit in usize")),
             }
             .validate()
             .map_err(|error| error.to_string())
