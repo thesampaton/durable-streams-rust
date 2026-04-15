@@ -50,6 +50,11 @@ impl JsonInput {
 /// - one top-level JSON value
 /// - one top-level JSON array, expanded into logical items
 /// - line-delimited JSON with one value per non-empty line
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or its content is not valid
+/// JSON or JSONL.
 pub fn load_json_input(path: impl AsRef<Path>) -> Result<JsonInput, Error> {
     let bytes = fs::read(path)?;
     parse_json_input(&bytes)
@@ -58,6 +63,10 @@ pub fn load_json_input(path: impl AsRef<Path>) -> Result<JsonInput, Error> {
 /// Parse JSON values from an in-memory buffer.
 ///
 /// Empty or whitespace-only input is treated as an empty JSONL stream.
+///
+/// # Errors
+///
+/// Returns an error if the bytes are not valid JSON or JSONL.
 pub fn parse_json_input(bytes: &[u8]) -> Result<JsonInput, Error> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(JsonInput {

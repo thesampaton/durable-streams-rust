@@ -37,6 +37,10 @@ pub struct ReadReplica {
 
 impl ReadReplica {
     /// Open a local journal and bind it to a client-backed replication session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the journal cannot be opened or replayed.
     pub fn open(
         client: Client,
         journal_path: impl AsRef<Path>,
@@ -53,6 +57,7 @@ impl ReadReplica {
     }
 
     /// Borrow the replicated JSON values in journal order.
+    #[must_use]
     pub fn values(&self) -> impl ExactSizeIterator<Item = &Value> + '_ {
         self.journal.values()
     }
@@ -68,6 +73,11 @@ impl ReadReplica {
     /// The passed request must not set `offset`; the replica derives it from
     /// the journal. SSE reads are rejected in v1 because the replication API is
     /// defined around discrete persisted catch-up steps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request specifies an explicit offset or SSE
+    /// live mode, the server read fails, or journaling the response fails.
     pub async fn replicate(
         &mut self,
         mut request: ReadRequest,

@@ -21,6 +21,11 @@ impl RetryPolicy {
     }
 
     /// Validate retry parameters before policy construction or execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `initial_backoff` is zero, `max_backoff` is less
+    /// than `initial_backoff`, or `backoff_multiplier` is below `1.0`.
     pub fn validate(options: RetryOptions) -> Result<(), Error> {
         if options.initial_backoff.is_zero() {
             return Err(Error::invalid_argument(
@@ -41,6 +46,11 @@ impl RetryPolicy {
     }
 
     /// Run an operation with bounded retry behavior for retryable errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last error if all retry attempts are exhausted or a
+    /// non-retryable error is encountered.
     pub async fn run<T, F, Fut>(&self, mut operation: F) -> Result<T, Error>
     where
         F: FnMut() -> Fut,
@@ -66,12 +76,12 @@ impl RetryPolicy {
                 }
                 Err(error) if attempt < self.options.max_retries && error.is_retryable() => {
                     trace::record_error(&span, &error);
-                    span.record("retry.backoff_ms", delay.as_millis() as u64);
+                    span.record("retry.backoff_ms", u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
                     warn!(
                         parent: &span,
                         event = "retry.scheduled",
                         "retry.attempt" = attempt_number,
-                        "retry.backoff_ms" = delay.as_millis() as u64
+                        "retry.backoff_ms" = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX)
                     );
                     tokio::time::sleep(delay).await;
                     attempt += 1;

@@ -207,7 +207,7 @@ pub struct ReadBuilder {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ProducerHeaders<'a> {
-    pub producer_id: &'a str,
-    pub producer_epoch: i64,
-    pub producer_seq: i64,
+    pub id: &'a str,
+    pub epoch: i64,
+    pub seq: i64,
 }

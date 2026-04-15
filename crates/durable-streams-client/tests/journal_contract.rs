@@ -93,7 +93,7 @@ fn producer_metadata_is_forward_compatible_with_v1_replay() {
             JournalDirection::Outbound,
             vec![json!({"id": 2})],
             Some("2".to_string()),
-            Some(ProducerJournalProgress {
+            Some(&ProducerJournalProgress {
                 producer_id: "producer-1".to_string(),
                 epoch: 4,
                 next_seq: 9,

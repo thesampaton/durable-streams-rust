@@ -49,6 +49,11 @@ impl Default for ClientConfig {
 
 impl ClientConfig {
     /// Validate auth, transport, and retry settings before client construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the auth configuration is incomplete, transport
+    /// timeouts are zero, or retry parameters are invalid.
     pub fn validate(&self) -> Result<(), Error> {
         self.auth.validate()?;
         crate::retry::RetryPolicy::validate(self.retry)?;
@@ -144,14 +149,27 @@ impl Default for ClientConfigLoader {
 
 impl ClientConfigLoader {
     /// Load configuration from files plus environment-variable overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a config file cannot be read or parsed, an
+    /// environment override is invalid, or the resulting configuration fails
+    /// validation.
     pub fn load(&self) -> Result<ClientConfig, ClientConfigLoaderError> {
         self.load_with_lookup(&|key| env::var(key).ok())
     }
 
     /// Load configuration from the default search path plus one explicit override file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the override file does not exist, cannot be parsed,
+    /// or the resulting configuration fails validation.
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<ClientConfig, ClientConfigLoaderError> {
-        let mut loader = Self::default();
-        loader.config_override = Some(path.as_ref().to_path_buf());
+        let loader = Self {
+            config_override: Some(path.as_ref().to_path_buf()),
+            ..Self::default()
+        };
         loader.load()
     }
 
@@ -161,12 +179,12 @@ impl ClientConfigLoader {
     ) -> Result<ClientConfig, ClientConfigLoaderError> {
         let mut file_config = FileConfig::default();
 
-        self.merge_if_exists(self.config_dir.join("default.toml"), &mut file_config)?;
+        Self::merge_if_exists(self.config_dir.join("default.toml"), &mut file_config)?;
         let profile_path = self
             .config_dir
             .join(format!("{}.toml", self.profile.trim()));
-        self.merge_if_exists(profile_path, &mut file_config)?;
-        self.merge_if_exists(self.config_dir.join("local.toml"), &mut file_config)?;
+        Self::merge_if_exists(profile_path, &mut file_config)?;
+        Self::merge_if_exists(self.config_dir.join("local.toml"), &mut file_config)?;
 
         if let Some(path) = &self.config_override {
             if !path.is_file() {
@@ -175,7 +193,7 @@ impl ClientConfigLoader {
                     path.display()
                 )));
             }
-            self.merge_file(path, &mut file_config)?;
+            Self::merge_file(path, &mut file_config)?;
         }
 
         apply_env_overrides(&self.env_prefix, get_env, &mut file_config)?;
@@ -186,18 +204,16 @@ impl ClientConfigLoader {
     }
 
     fn merge_if_exists(
-        &self,
         path: PathBuf,
         into: &mut FileConfig,
     ) -> Result<(), ClientConfigLoaderError> {
         if path.is_file() {
-            self.merge_file(path, into)?;
+            Self::merge_file(path, into)?;
         }
         Ok(())
     }
 
     fn merge_file(
-        &self,
         path: impl AsRef<Path>,
         into: &mut FileConfig,
     ) -> Result<(), ClientConfigLoaderError> {
@@ -407,7 +423,7 @@ impl TransportFileConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
 #[serde(default)]
 struct RetryFileConfig {
     max_retries: Option<u32>,

@@ -74,6 +74,11 @@ impl StreamHandle {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEAD request fails or the server returns an
+    /// error status.
     pub async fn head(&self) -> Result<StreamInfo, Error> {
         let response = self
             .client
@@ -131,6 +136,11 @@ impl StreamHandle {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the value cannot be serialized to JSON or the
+    /// server rejects the append.
     pub async fn append_json<T>(&self, value: &T) -> Result<AppendOutcome, Error>
     where
         T: Serialize,
@@ -223,6 +233,10 @@ impl StreamHandle {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the deletion.
     pub async fn delete(&self) -> Result<(), Error> {
         self.client
             .delete_raw(&self.path, &DeleteRequest::default())
@@ -231,6 +245,10 @@ impl StreamHandle {
     }
 
     /// Create this stream using the protocol-shaped raw request API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the creation request.
     pub async fn create_raw(
         &self,
         request: &CreateStreamRequest,
@@ -239,21 +257,39 @@ impl StreamHandle {
     }
 
     /// Fetch metadata for this stream using the protocol-shaped raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server returns an error status.
     pub async fn connect_raw(&self, request: &ConnectRequest) -> Result<ConnectResponse, Error> {
         self.client.connect_raw(&self.path, request).await
     }
 
     /// Append to this stream using the protocol-shaped raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the append.
     pub async fn append_raw(&self, request: &AppendRequest) -> Result<AppendResponse, Error> {
         self.client.append_raw(&self.path, request).await
     }
 
     /// Read from this stream using the protocol-shaped raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the read or the response body
+    /// cannot be collected.
     pub async fn read_raw(&self, request: &ReadRequest) -> Result<ReadResponse, Error> {
         self.client.read_raw(&self.path, request).await
     }
 
     /// Close this stream using the protocol-shaped raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the close or the response is
+    /// missing the final offset header.
     pub async fn close_raw(
         &self,
         request: &CloseStreamRequest,
@@ -262,11 +298,20 @@ impl StreamHandle {
     }
 
     /// Fetch metadata for this stream using a raw HEAD request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEAD request fails or the server returns an
+    /// error status.
     pub async fn head_raw(&self, request: &HeadRequest) -> Result<HeadResponse, Error> {
         self.client.head_raw(&self.path, request).await
     }
 
     /// Delete this stream using the protocol-shaped raw API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the deletion.
     pub async fn delete_raw(&self, request: &DeleteRequest) -> Result<DeleteResponse, Error> {
         self.client.delete_raw(&self.path, request).await
     }
