@@ -1775,10 +1775,14 @@ mod tests {
 
     #[test]
     fn test_built_in_profile_defaults_apply_cleanly() {
+        // Use an empty fixture dir so only the built-in profile patch and
+        // code defaults are tested — no coupling to the shipped config/ files.
+        let config_dir = temp_config_dir();
         let config = Config::from_sources_with_lookup(
             &ConfigLoadOptions {
+                config_dir,
                 profile: DeploymentProfile::ProdTls,
-                ..ConfigLoadOptions::default()
+                config_override: None,
             },
             &lookup(&[]),
         )
