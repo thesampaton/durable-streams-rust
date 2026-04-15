@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "durable-streams-server"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "axum",

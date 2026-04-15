@@ -5,6 +5,99 @@ pub durable_streams_server::config::AcidBackend::File
 pub durable_streams_server::config::AcidBackend::InMemory
 impl durable_streams_server::config::AcidBackend
 pub fn durable_streams_server::config::AcidBackend::as_str(self) -> &'static str
+pub enum durable_streams_server::config::AlpnProtocol
+pub durable_streams_server::config::AlpnProtocol::H2
+pub durable_streams_server::config::AlpnProtocol::Http1_1
+impl durable_streams_server::config::AlpnProtocol
+pub fn durable_streams_server::config::AlpnProtocol::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::AlpnProtocol
+pub fn durable_streams_server::config::AlpnProtocol::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum durable_streams_server::config::ConfigLoadError
+pub durable_streams_server::config::ConfigLoadError::InvalidValue
+pub durable_streams_server::config::ConfigLoadError::InvalidValue::input_source: &'static str
+pub durable_streams_server::config::ConfigLoadError::InvalidValue::key: &'static str
+pub durable_streams_server::config::ConfigLoadError::InvalidValue::reason: alloc::string::String
+pub durable_streams_server::config::ConfigLoadError::InvalidValue::value: alloc::string::String
+pub durable_streams_server::config::ConfigLoadError::OverrideFileNotFound
+pub durable_streams_server::config::ConfigLoadError::OverrideFileNotFound::path: std::path::PathBuf
+pub durable_streams_server::config::ConfigLoadError::TomlParse
+pub durable_streams_server::config::ConfigLoadError::TomlParse::message: alloc::string::String
+pub enum durable_streams_server::config::ConfigValidationError
+pub durable_streams_server::config::ConfigValidationError::ClientCaRequiresMtls
+pub durable_streams_server::config::ConfigValidationError::EmptyCorsOrigin
+pub durable_streams_server::config::ConfigValidationError::EmptyHttpVersions
+pub durable_streams_server::config::ConfigValidationError::EmptyPath
+pub durable_streams_server::config::ConfigValidationError::EmptyPath::field: &'static str
+pub durable_streams_server::config::ConfigValidationError::EmptyStorageDataDir
+pub durable_streams_server::config::ConfigValidationError::EmptyStorageDataDir::mode: durable_streams_server::config::StorageMode
+pub durable_streams_server::config::ConfigValidationError::HeaderIdentityRequiresHeaderName
+pub durable_streams_server::config::ConfigValidationError::HeaderIdentityRequiresMtls
+pub durable_streams_server::config::ConfigValidationError::HttpModeDisallowsTlsField
+pub durable_streams_server::config::ConfigValidationError::HttpModeDisallowsTlsField::field: &'static str
+pub durable_streams_server::config::ConfigValidationError::HttpModeDoesNotSupportHttp2
+pub durable_streams_server::config::ConfigValidationError::IdentityHeaderRequiresHeaderMode
+pub durable_streams_server::config::ConfigValidationError::InvalidAcidShardCount
+pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress
+pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress::reason: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidCorsOrigin
+pub durable_streams_server::config::ConfigValidationError::InvalidCorsOrigin::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidIdentityHeaderName
+pub durable_streams_server::config::ConfigValidationError::InvalidIdentityHeaderName::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath
+pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath::reason: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidTlsVersionRange
+pub durable_streams_server::config::ConfigValidationError::InvalidTrustedProxy
+pub durable_streams_server::config::ConfigValidationError::InvalidTrustedProxy::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::LongPollTimeoutTooSmall
+pub durable_streams_server::config::ConfigValidationError::MaxMemoryBytesTooSmall
+pub durable_streams_server::config::ConfigValidationError::MaxStreamBytesTooSmall
+pub durable_streams_server::config::ConfigValidationError::MaxStreamNameBytesTooSmall
+pub durable_streams_server::config::ConfigValidationError::MaxStreamNameSegmentsTooSmall
+pub durable_streams_server::config::ConfigValidationError::MissingAlpnProtocol
+pub durable_streams_server::config::ConfigValidationError::MissingAlpnProtocol::alpn: durable_streams_server::config::AlpnProtocol
+pub durable_streams_server::config::ConfigValidationError::MissingAlpnProtocol::version: durable_streams_server::config::HttpVersion
+pub durable_streams_server::config::ConfigValidationError::MissingTlsField
+pub durable_streams_server::config::ConfigValidationError::MissingTlsField::field: &'static str
+pub durable_streams_server::config::ConfigValidationError::MissingTlsField::mode: durable_streams_server::config::TransportMode
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsForwardedHeaders
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsForwardedHeaders::mode: durable_streams_server::config::ForwardedHeadersMode
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsIdentityHeader
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsIdentityMode
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsIdentityMode::mode: durable_streams_server::config::ProxyIdentityMode
+pub durable_streams_server::config::ConfigValidationError::ProxyDisabledDisallowsTrustedProxies
+pub durable_streams_server::config::ConfigValidationError::ProxyEnabledRequiresForwardedHeaders
+pub durable_streams_server::config::ConfigValidationError::ProxyEnabledRequiresTrustedProxies
+pub durable_streams_server::config::ConfigValidationError::UnexpectedAlpnProtocol
+pub durable_streams_server::config::ConfigValidationError::UnexpectedAlpnProtocol::alpn: durable_streams_server::config::AlpnProtocol
+pub enum durable_streams_server::config::DeploymentProfile
+pub durable_streams_server::config::DeploymentProfile::Default
+pub durable_streams_server::config::DeploymentProfile::Dev
+pub durable_streams_server::config::DeploymentProfile::Named(alloc::string::String)
+pub durable_streams_server::config::DeploymentProfile::Prod
+pub durable_streams_server::config::DeploymentProfile::ProdMtls
+pub durable_streams_server::config::DeploymentProfile::ProdTls
+impl durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::as_str(&self) -> &str
+impl core::convert::From<&str> for durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::from(raw: &str) -> Self
+impl core::convert::From<alloc::string::String> for durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::from(raw: alloc::string::String) -> Self
+pub enum durable_streams_server::config::ForwardedHeadersMode
+pub durable_streams_server::config::ForwardedHeadersMode::Forwarded
+pub durable_streams_server::config::ForwardedHeadersMode::None
+pub durable_streams_server::config::ForwardedHeadersMode::XForwarded
+pub enum durable_streams_server::config::HttpVersion
+pub durable_streams_server::config::HttpVersion::Http1
+pub durable_streams_server::config::HttpVersion::Http2
+impl durable_streams_server::config::HttpVersion
+pub fn durable_streams_server::config::HttpVersion::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::HttpVersion
+pub fn durable_streams_server::config::HttpVersion::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum durable_streams_server::config::ProxyIdentityMode
+pub durable_streams_server::config::ProxyIdentityMode::Header
+pub durable_streams_server::config::ProxyIdentityMode::None
 pub enum durable_streams_server::config::StorageMode
 pub durable_streams_server::config::StorageMode::Acid
 pub durable_streams_server::config::StorageMode::FileDurable
@@ -14,38 +107,93 @@ impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
 pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
+impl core::fmt::Display for durable_streams_server::config::StorageMode
+pub fn durable_streams_server::config::StorageMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum durable_streams_server::config::TlsVersion
+pub durable_streams_server::config::TlsVersion::V1_2
+pub durable_streams_server::config::TlsVersion::V1_3
+impl durable_streams_server::config::TlsVersion
+pub fn durable_streams_server::config::TlsVersion::as_str(self) -> &'static str
+pub enum durable_streams_server::config::TransportMode
+pub durable_streams_server::config::TransportMode::Http
+pub durable_streams_server::config::TransportMode::Mtls
+pub durable_streams_server::config::TransportMode::Tls
+impl durable_streams_server::config::TransportMode
+pub fn durable_streams_server::config::TransportMode::as_str(self) -> &'static str
+pub fn durable_streams_server::config::TransportMode::uses_tls(self) -> bool
+impl core::fmt::Display for durable_streams_server::config::TransportMode
+pub fn durable_streams_server::config::TransportMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct durable_streams_server::config::Config
-pub durable_streams_server::config::Config::acid_backend: durable_streams_server::config::AcidBackend
-pub durable_streams_server::config::Config::acid_shard_count: usize
-pub durable_streams_server::config::Config::cors_origins: alloc::string::String
-pub durable_streams_server::config::Config::data_dir: alloc::string::String
-pub durable_streams_server::config::Config::long_poll_timeout: core::time::Duration
-pub durable_streams_server::config::Config::max_memory_bytes: u64
-pub durable_streams_server::config::Config::max_stream_bytes: u64
-pub durable_streams_server::config::Config::max_stream_name_bytes: usize
-pub durable_streams_server::config::Config::max_stream_name_segments: usize
-pub durable_streams_server::config::Config::port: u16
-pub durable_streams_server::config::Config::rust_log: alloc::string::String
-pub durable_streams_server::config::Config::sse_reconnect_interval_secs: u64
-pub durable_streams_server::config::Config::storage_mode: durable_streams_server::config::StorageMode
-pub durable_streams_server::config::Config::stream_base_path: alloc::string::String
-pub durable_streams_server::config::Config::tls_cert_path: core::option::Option<alloc::string::String>
-pub durable_streams_server::config::Config::tls_key_path: core::option::Option<alloc::string::String>
+pub durable_streams_server::config::Config::http: durable_streams_server::config::HttpConfig
+pub durable_streams_server::config::Config::limits: durable_streams_server::config::LimitsConfig
+pub durable_streams_server::config::Config::observability: durable_streams_server::config::ObservabilityConfig
+pub durable_streams_server::config::Config::proxy: durable_streams_server::config::ProxyConfig
+pub durable_streams_server::config::Config::server: durable_streams_server::config::ServerConfig
+pub durable_streams_server::config::Config::storage: durable_streams_server::config::StorageConfig
+pub durable_streams_server::config::Config::transport: durable_streams_server::config::TransportConfig
 impl durable_streams_server::config::Config
-pub fn durable_streams_server::config::Config::from_env() -> core::result::Result<Self, alloc::string::String>
-pub fn durable_streams_server::config::Config::from_sources(options: &durable_streams_server::config::ConfigLoadOptions) -> core::result::Result<Self, alloc::string::String>
+pub fn durable_streams_server::config::Config::bind_socket_addr(&self) -> core::result::Result<core::net::socket_addr::SocketAddr, durable_streams_server::config::ConfigValidationError>
+pub fn durable_streams_server::config::Config::from_env() -> core::result::Result<Self, durable_streams_server::config::ConfigLoadError>
+pub fn durable_streams_server::config::Config::from_sources(options: &durable_streams_server::config::ConfigLoadOptions) -> core::result::Result<Self, durable_streams_server::config::ConfigLoadError>
+pub fn durable_streams_server::config::Config::long_poll_timeout(&self) -> core::time::Duration
+pub fn durable_streams_server::config::Config::render_effective_json(&self) -> core::result::Result<alloc::string::String, serde_json::error::Error>
 pub fn durable_streams_server::config::Config::tls_enabled(&self) -> bool
-pub fn durable_streams_server::config::Config::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn durable_streams_server::config::Config::validate(&self) -> core::result::Result<(), durable_streams_server::config::ConfigValidationError>
 impl core::default::Default for durable_streams_server::config::Config
 pub fn durable_streams_server::config::Config::default() -> Self
 pub struct durable_streams_server::config::ConfigLoadOptions
 pub durable_streams_server::config::ConfigLoadOptions::config_dir: std::path::PathBuf
 pub durable_streams_server::config::ConfigLoadOptions::config_override: core::option::Option<std::path::PathBuf>
-pub durable_streams_server::config::ConfigLoadOptions::profile: alloc::string::String
+pub durable_streams_server::config::ConfigLoadOptions::profile: durable_streams_server::config::DeploymentProfile
 impl core::default::Default for durable_streams_server::config::ConfigLoadOptions
 pub fn durable_streams_server::config::ConfigLoadOptions::default() -> Self
+pub struct durable_streams_server::config::HttpConfig
+pub durable_streams_server::config::HttpConfig::cors_origins: alloc::string::String
+pub durable_streams_server::config::HttpConfig::stream_base_path: alloc::string::String
+pub struct durable_streams_server::config::LimitsConfig
+pub durable_streams_server::config::LimitsConfig::max_memory_bytes: u64
+pub durable_streams_server::config::LimitsConfig::max_stream_bytes: u64
+pub durable_streams_server::config::LimitsConfig::max_stream_name_bytes: usize
+pub durable_streams_server::config::LimitsConfig::max_stream_name_segments: usize
 pub struct durable_streams_server::config::LongPollTimeout(pub core::time::Duration)
+pub struct durable_streams_server::config::ObservabilityConfig
+pub durable_streams_server::config::ObservabilityConfig::rust_log: alloc::string::String
+pub struct durable_streams_server::config::ProxyConfig
+pub durable_streams_server::config::ProxyConfig::enabled: bool
+pub durable_streams_server::config::ProxyConfig::forwarded_headers: durable_streams_server::config::ForwardedHeadersMode
+pub durable_streams_server::config::ProxyConfig::identity: durable_streams_server::config::ProxyIdentityConfig
+pub durable_streams_server::config::ProxyConfig::trusted_proxies: alloc::vec::Vec<alloc::string::String>
+pub struct durable_streams_server::config::ProxyIdentityConfig
+pub durable_streams_server::config::ProxyIdentityConfig::header_name: core::option::Option<alloc::string::String>
+pub durable_streams_server::config::ProxyIdentityConfig::mode: durable_streams_server::config::ProxyIdentityMode
+pub durable_streams_server::config::ProxyIdentityConfig::require_tls: bool
+pub struct durable_streams_server::config::ServerConfig
+pub durable_streams_server::config::ServerConfig::bind_address: alloc::string::String
 pub struct durable_streams_server::config::SseReconnectInterval(pub u64)
+pub struct durable_streams_server::config::StorageConfig
+pub durable_streams_server::config::StorageConfig::acid_backend: durable_streams_server::config::AcidBackend
+pub durable_streams_server::config::StorageConfig::acid_shard_count: usize
+pub durable_streams_server::config::StorageConfig::data_dir: alloc::string::String
+pub durable_streams_server::config::StorageConfig::mode: durable_streams_server::config::StorageMode
+pub struct durable_streams_server::config::TransportConfig
+pub durable_streams_server::config::TransportConfig::connection: durable_streams_server::config::TransportConnectionConfig
+pub durable_streams_server::config::TransportConfig::http: durable_streams_server::config::TransportHttpConfig
+pub durable_streams_server::config::TransportConfig::mode: durable_streams_server::config::TransportMode
+pub durable_streams_server::config::TransportConfig::tls: durable_streams_server::config::TransportTlsConfig
+pub struct durable_streams_server::config::TransportConnectionConfig
+pub durable_streams_server::config::TransportConnectionConfig::long_poll_timeout_secs: u64
+pub durable_streams_server::config::TransportConnectionConfig::sse_reconnect_interval_secs: u64
+pub struct durable_streams_server::config::TransportHttpConfig
+pub durable_streams_server::config::TransportHttpConfig::versions: alloc::vec::Vec<durable_streams_server::config::HttpVersion>
+pub struct durable_streams_server::config::TransportTlsConfig
+pub durable_streams_server::config::TransportTlsConfig::alpn_protocols: alloc::vec::Vec<durable_streams_server::config::AlpnProtocol>
+pub durable_streams_server::config::TransportTlsConfig::cert_path: core::option::Option<alloc::string::String>
+pub durable_streams_server::config::TransportTlsConfig::client_ca_path: core::option::Option<alloc::string::String>
+pub durable_streams_server::config::TransportTlsConfig::key_path: core::option::Option<alloc::string::String>
+pub durable_streams_server::config::TransportTlsConfig::max_version: durable_streams_server::config::TlsVersion
+pub durable_streams_server::config::TransportTlsConfig::min_version: durable_streams_server::config::TlsVersion
+impl durable_streams_server::config::TransportTlsConfig
+pub fn durable_streams_server::config::TransportTlsConfig::has_server_credentials(&self) -> bool
 pub mod durable_streams_server::protocol
 pub mod durable_streams_server::protocol::error
 pub enum durable_streams_server::protocol::error::Error
@@ -197,6 +345,55 @@ pub struct durable_streams_server::router::ShutdownToken(pub tokio_util::sync::c
 pub const durable_streams_server::router::DEFAULT_STREAM_BASE_PATH: &str
 pub fn durable_streams_server::router::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config) -> axum::routing::Router
 pub fn durable_streams_server::router::build_router_with_ready<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, ready: core::option::Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> axum::routing::Router
+pub mod durable_streams_server::startup
+pub enum durable_streams_server::startup::StartupErrorKind
+pub durable_streams_server::startup::StartupErrorKind::Bind
+pub durable_streams_server::startup::StartupErrorKind::Bind::addr: core::net::socket_addr::SocketAddr
+pub durable_streams_server::startup::StartupErrorKind::Bind::source: std::io::error::Error
+pub durable_streams_server::startup::StartupErrorKind::ConfigLoad(durable_streams_server::config::ConfigLoadError)
+pub durable_streams_server::startup::StartupErrorKind::ConfigValidation(durable_streams_server::config::ConfigValidationError)
+pub durable_streams_server::startup::StartupErrorKind::Runtime(alloc::string::String)
+pub durable_streams_server::startup::StartupErrorKind::TlsContext(alloc::string::String)
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotFound
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotFound::path: alloc::string::String
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotReadable
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotReadable::path: alloc::string::String
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotReadable::reason: alloc::string::String
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotRegular
+pub durable_streams_server::startup::StartupErrorKind::TlsFileNotRegular::path: alloc::string::String
+pub enum durable_streams_server::startup::StartupPhase
+pub durable_streams_server::startup::StartupPhase::BindListener
+pub durable_streams_server::startup::StartupPhase::BuildTlsContext
+pub durable_streams_server::startup::StartupPhase::CheckTlsFiles
+pub durable_streams_server::startup::StartupPhase::LoadConfig
+pub durable_streams_server::startup::StartupPhase::ResolveTransport
+pub durable_streams_server::startup::StartupPhase::StartServer
+pub durable_streams_server::startup::StartupPhase::ValidateConfig
+impl core::fmt::Display for durable_streams_server::startup::StartupPhase
+pub fn durable_streams_server::startup::StartupPhase::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub enum durable_streams_server::startup::TlsFileStatus
+pub durable_streams_server::startup::TlsFileStatus::NotFound
+pub durable_streams_server::startup::TlsFileStatus::NotReadable(alloc::string::String)
+pub durable_streams_server::startup::TlsFileStatus::NotRegular
+pub durable_streams_server::startup::TlsFileStatus::Ok
+pub struct durable_streams_server::startup::StartupError
+pub durable_streams_server::startup::StartupError::kind: durable_streams_server::startup::StartupErrorKind
+pub durable_streams_server::startup::StartupError::phase: durable_streams_server::startup::StartupPhase
+impl durable_streams_server::startup::StartupError
+pub fn durable_streams_server::startup::StartupError::bind(addr: core::net::socket_addr::SocketAddr, source: std::io::error::Error) -> Self
+pub fn durable_streams_server::startup::StartupError::config_load(source: durable_streams_server::config::ConfigLoadError) -> Self
+pub fn durable_streams_server::startup::StartupError::config_validation(source: durable_streams_server::config::ConfigValidationError) -> Self
+pub fn durable_streams_server::startup::StartupError::runtime(message: impl core::convert::Into<alloc::string::String>) -> Self
+pub fn durable_streams_server::startup::StartupError::tls_context(message: impl core::convert::Into<alloc::string::String>) -> Self
+impl durable_streams_server::startup::StartupError
+pub fn durable_streams_server::startup::StartupError::new(phase: durable_streams_server::startup::StartupPhase, kind: durable_streams_server::startup::StartupErrorKind) -> Self
+pub fn durable_streams_server::startup::bind_tcp_listener(addr: core::net::socket_addr::SocketAddr) -> core::result::Result<std::net::tcp::TcpListener, durable_streams_server::startup::StartupError>
+pub fn durable_streams_server::startup::build_tls_server_config(config: &durable_streams_server::config::Config) -> core::result::Result<rustls::server::server_conn::ServerConfig, durable_streams_server::startup::StartupError>
+pub fn durable_streams_server::startup::check_tls_file(path: &str) -> durable_streams_server::startup::TlsFileStatus
+pub fn durable_streams_server::startup::log_phase(phase: durable_streams_server::startup::StartupPhase)
+pub fn durable_streams_server::startup::log_startup_failure(error: &durable_streams_server::startup::StartupError)
+pub fn durable_streams_server::startup::log_transport_summary(config: &durable_streams_server::config::Config)
+pub fn durable_streams_server::startup::preflight_tls_files(config: &durable_streams_server::config::Config) -> core::result::Result<(), durable_streams_server::startup::StartupError>
 pub mod durable_streams_server::storage
 pub mod durable_streams_server::storage::acid
 pub struct durable_streams_server::storage::acid::AcidStorage
@@ -420,6 +617,19 @@ pub durable_streams_server::transfer::TransferError::Io(std::io::error::Error)
 pub durable_streams_server::transfer::TransferError::Json(serde_json::error::Error)
 pub durable_streams_server::transfer::TransferError::Storage(durable_streams_server::protocol::error::Error)
 pub durable_streams_server::transfer::TransferError::UnsupportedVersion(u32)
+pub enum durable_streams_server::DeploymentProfile
+pub durable_streams_server::DeploymentProfile::Default
+pub durable_streams_server::DeploymentProfile::Dev
+pub durable_streams_server::DeploymentProfile::Named(alloc::string::String)
+pub durable_streams_server::DeploymentProfile::Prod
+pub durable_streams_server::DeploymentProfile::ProdMtls
+pub durable_streams_server::DeploymentProfile::ProdTls
+impl durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::as_str(&self) -> &str
+impl core::convert::From<&str> for durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::from(raw: &str) -> Self
+impl core::convert::From<alloc::string::String> for durable_streams_server::config::DeploymentProfile
+pub fn durable_streams_server::config::DeploymentProfile::from(raw: alloc::string::String) -> Self
 pub enum durable_streams_server::StorageMode
 pub durable_streams_server::StorageMode::Acid
 pub durable_streams_server::StorageMode::FileDurable
@@ -429,6 +639,8 @@ impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
 pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
+impl core::fmt::Display for durable_streams_server::config::StorageMode
+pub fn durable_streams_server::config::StorageMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct durable_streams_server::AcidStorage
 impl durable_streams_server::storage::acid::AcidStorage
 pub fn durable_streams_server::storage::acid::AcidStorage::new(root_dir: impl core::convert::Into<std::path::PathBuf>, shard_count: usize, max_total_bytes: u64, max_stream_bytes: u64, backend: durable_streams_server::config::AcidBackend) -> durable_streams_server::protocol::error::Result<Self>
@@ -449,33 +661,27 @@ pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub struct durable_streams_server::Config
-pub durable_streams_server::Config::acid_backend: durable_streams_server::config::AcidBackend
-pub durable_streams_server::Config::acid_shard_count: usize
-pub durable_streams_server::Config::cors_origins: alloc::string::String
-pub durable_streams_server::Config::data_dir: alloc::string::String
-pub durable_streams_server::Config::long_poll_timeout: core::time::Duration
-pub durable_streams_server::Config::max_memory_bytes: u64
-pub durable_streams_server::Config::max_stream_bytes: u64
-pub durable_streams_server::Config::max_stream_name_bytes: usize
-pub durable_streams_server::Config::max_stream_name_segments: usize
-pub durable_streams_server::Config::port: u16
-pub durable_streams_server::Config::rust_log: alloc::string::String
-pub durable_streams_server::Config::sse_reconnect_interval_secs: u64
-pub durable_streams_server::Config::storage_mode: durable_streams_server::config::StorageMode
-pub durable_streams_server::Config::stream_base_path: alloc::string::String
-pub durable_streams_server::Config::tls_cert_path: core::option::Option<alloc::string::String>
-pub durable_streams_server::Config::tls_key_path: core::option::Option<alloc::string::String>
+pub durable_streams_server::Config::http: durable_streams_server::config::HttpConfig
+pub durable_streams_server::Config::limits: durable_streams_server::config::LimitsConfig
+pub durable_streams_server::Config::observability: durable_streams_server::config::ObservabilityConfig
+pub durable_streams_server::Config::proxy: durable_streams_server::config::ProxyConfig
+pub durable_streams_server::Config::server: durable_streams_server::config::ServerConfig
+pub durable_streams_server::Config::storage: durable_streams_server::config::StorageConfig
+pub durable_streams_server::Config::transport: durable_streams_server::config::TransportConfig
 impl durable_streams_server::config::Config
-pub fn durable_streams_server::config::Config::from_env() -> core::result::Result<Self, alloc::string::String>
-pub fn durable_streams_server::config::Config::from_sources(options: &durable_streams_server::config::ConfigLoadOptions) -> core::result::Result<Self, alloc::string::String>
+pub fn durable_streams_server::config::Config::bind_socket_addr(&self) -> core::result::Result<core::net::socket_addr::SocketAddr, durable_streams_server::config::ConfigValidationError>
+pub fn durable_streams_server::config::Config::from_env() -> core::result::Result<Self, durable_streams_server::config::ConfigLoadError>
+pub fn durable_streams_server::config::Config::from_sources(options: &durable_streams_server::config::ConfigLoadOptions) -> core::result::Result<Self, durable_streams_server::config::ConfigLoadError>
+pub fn durable_streams_server::config::Config::long_poll_timeout(&self) -> core::time::Duration
+pub fn durable_streams_server::config::Config::render_effective_json(&self) -> core::result::Result<alloc::string::String, serde_json::error::Error>
 pub fn durable_streams_server::config::Config::tls_enabled(&self) -> bool
-pub fn durable_streams_server::config::Config::validate(&self) -> core::result::Result<(), alloc::string::String>
+pub fn durable_streams_server::config::Config::validate(&self) -> core::result::Result<(), durable_streams_server::config::ConfigValidationError>
 impl core::default::Default for durable_streams_server::config::Config
 pub fn durable_streams_server::config::Config::default() -> Self
 pub struct durable_streams_server::ConfigLoadOptions
 pub durable_streams_server::ConfigLoadOptions::config_dir: std::path::PathBuf
 pub durable_streams_server::ConfigLoadOptions::config_override: core::option::Option<std::path::PathBuf>
-pub durable_streams_server::ConfigLoadOptions::profile: alloc::string::String
+pub durable_streams_server::ConfigLoadOptions::profile: durable_streams_server::config::DeploymentProfile
 impl core::default::Default for durable_streams_server::config::ConfigLoadOptions
 pub fn durable_streams_server::config::ConfigLoadOptions::default() -> Self
 pub struct durable_streams_server::FileStorage
