@@ -20,7 +20,7 @@ versions = ["http1", "http2"] # http2 requires matching h2 ALPN below
 
 [transport.tls]
 # Set cert_path and key_path in your local override file or env.
-alpn_protocols = ["http/1.1", "h2"] # match transport.http.versions
+alpn_protocols = ["h2", "http/1.1"] # match transport.http.versions; h2 preferred
 # cert_path = "/etc/durable-streams/tls/server.crt"
 # key_path = "/etc/durable-streams/tls/server.key"
 # min_version = "1.2" # defaults are usually sufficient unless you need to pin them

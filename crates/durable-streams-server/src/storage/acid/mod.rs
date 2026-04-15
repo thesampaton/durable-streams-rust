@@ -190,9 +190,18 @@ impl AcidStorage {
     }
 
     fn find_stream_shard_index(&self, name: &str) -> Result<Option<usize>> {
+        let hashed_idx = self.shard_index(name);
+        if self.stream_exists_in_shard(hashed_idx, name)? {
+            return Ok(Some(hashed_idx));
+        }
+
         let mut found = None;
 
         for (idx, shard) in self.shards.iter().enumerate() {
+            if idx == hashed_idx {
+                continue;
+            }
+
             let txn = shard
                 .db
                 .begin_read()
@@ -211,6 +220,19 @@ impl AcidStorage {
         }
 
         Ok(found)
+    }
+
+    fn stream_exists_in_shard(&self, shard_idx: usize, name: &str) -> Result<bool> {
+        let shard = &self.shards[shard_idx];
+        let txn = shard
+            .db
+            .begin_read()
+            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
+        let streams = txn
+            .open_table(STREAMS)
+            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+
+        Ok(Self::read_stream_meta(&streams, name)?.is_some())
     }
 
     fn existing_shard_index(&self, name: &str) -> Result<usize> {

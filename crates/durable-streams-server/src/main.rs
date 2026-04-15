@@ -103,12 +103,20 @@ struct AppRuntime {
 }
 
 impl AppRuntime {
-    fn new(config: Config) -> Result<Self, StartupError> {
+    fn new(config: Config, profile: &DeploymentProfile) -> Result<Self, StartupError> {
         log_phase(StartupPhase::ValidateConfig);
         let addr = config
             .bind_socket_addr()
             .map_err(StartupError::config_validation)?;
         config.validate().map_err(StartupError::config_validation)?;
+        config
+            .validate_profile(profile)
+            .map_err(StartupError::config_validation)?;
+
+        for warning in config.warnings() {
+            tracing::warn!("{warning}");
+        }
+
         tracing::info!(
             bind_address = %addr,
             storage.mode = config.storage.mode.as_str(),
@@ -166,7 +174,7 @@ async fn main() {
                 .with(tracing_subscriber::fmt::layer())
                 .init();
 
-            if let Err(err) = run_serve(config).await {
+            if let Err(err) = run_serve(config, &load_options.profile).await {
                 log_startup_failure(&err);
                 std::process::exit(1);
             }
@@ -349,7 +357,36 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        let head_len = max.saturating_sub(3);
+        if head_len == 0 {
+            return "...".chars().take(max).collect();
+        }
+
+        let safe_end = s
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .take_while(|idx| *idx <= head_len)
+            .last()
+            .unwrap_or(0);
+
+        format!("{}...", &s[..safe_end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_respects_utf8_boundaries() {
+        assert_eq!(truncate("你好世界", 7), "你...");
+        assert_eq!(truncate("🙂🙂🙂", 6), "...");
+    }
+
+    #[test]
+    fn truncate_handles_small_limits() {
+        assert_eq!(truncate("abcdef", 2), "..");
+        assert_eq!(truncate("abcdef", 3), "...");
     }
 }
 
@@ -412,8 +449,8 @@ fn run_import(
 
 // ── Server ──────────────────────────────────────────────────────────
 
-async fn run_serve(config: Config) -> Result<(), StartupError> {
-    let runtime = AppRuntime::new(config)?;
+async fn run_serve(config: Config, profile: &DeploymentProfile) -> Result<(), StartupError> {
+    let runtime = AppRuntime::new(config, profile)?;
 
     let serve_result = match runtime.config.storage.mode {
         StorageMode::Memory => {

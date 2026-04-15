@@ -13,6 +13,9 @@ max_stream_name_segments = 8 # max "/"-separated path segments
 [http]
 cors_origins = "*" # "*" or comma-separated origins
 stream_base_path = "/v1/stream"
+# Set to true to acknowledge wildcard CORS and suppress the warning/error.
+# Required only if you intentionally want `cors_origins = "*"` in production.
+# allow_wildcard_cors = false
 
 [storage]
 mode = "memory" # memory | file-fast | file-durable | acid
@@ -33,7 +36,7 @@ sse_reconnect_interval_secs = 60 # 0 disables forced reconnects
 # [transport.tls]
 # min_version = "1.2" # tls/mtls only
 # max_version = "1.3" # tls/mtls only
-# alpn_protocols = ["http/1.1"] # add "h2" when transport.http.versions includes http2
+# alpn_protocols = ["http/1.1"] # auto-derived from transport.http.versions; h2 listed first when both enabled
 # cert_path = "/etc/durable-streams/tls/server.crt" # tls/mtls only
 # key_path = "/etc/durable-streams/tls/server.key" # tls/mtls only
 # client_ca_path = "/etc/durable-streams/tls/client-ca.crt" # mtls only

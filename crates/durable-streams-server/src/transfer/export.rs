@@ -52,18 +52,7 @@ pub fn export_streams<W: Write>(
 
         let read_result = storage.read(name, &Offset::start())?;
 
-        let messages: Vec<ExportedMessage> = read_result
-            .messages
-            .iter()
-            .enumerate()
-            .map(|(i, data)| {
-                let offset_str = Offset::new(i as u64, 0).to_string();
-                ExportedMessage {
-                    offset: offset_str,
-                    data_base64: BASE64.encode(data),
-                }
-            })
-            .collect();
+        let messages = exported_messages(&read_result.messages);
 
         total_messages += messages.len();
 
@@ -94,4 +83,50 @@ pub fn export_streams<W: Write>(
         streams_exported,
         messages_exported: total_messages,
     })
+}
+
+fn exported_messages(messages: &[bytes::Bytes]) -> Vec<ExportedMessage> {
+    let mut next_read_seq = 0_u64;
+    let mut next_byte_offset = 0_u64;
+
+    messages
+        .iter()
+        .map(|data| {
+            let exported = ExportedMessage {
+                offset: Offset::new(next_read_seq, next_byte_offset).to_string(),
+                data_base64: BASE64.encode(data),
+            };
+            next_read_seq = next_read_seq.saturating_add(1);
+            next_byte_offset = next_byte_offset.saturating_add(
+                u64::try_from(data.len()).expect("message length must fit in u64"),
+            );
+            exported
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exported_messages;
+    use crate::protocol::offset::Offset;
+    use bytes::Bytes;
+
+    #[test]
+    fn exported_messages_capture_real_byte_offsets() {
+        let exported = exported_messages(&[
+            Bytes::from_static(b"hi"),
+            Bytes::from_static(b"there"),
+            Bytes::from_static(b"!"),
+        ]);
+
+        let offsets: Vec<_> = exported.into_iter().map(|message| message.offset).collect();
+        assert_eq!(
+            offsets,
+            vec![
+                Offset::new(0, 0).to_string(),
+                Offset::new(1, 2).to_string(),
+                Offset::new(2, 7).to_string(),
+            ]
+        );
+    }
 }

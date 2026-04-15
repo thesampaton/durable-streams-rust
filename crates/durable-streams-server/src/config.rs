@@ -314,6 +314,9 @@ pub struct HttpConfig {
     pub cors_origins: String,
     /// Mount path for the protocol HTTP surface.
     pub stream_base_path: String,
+    /// When `true`, wildcard CORS (`"*"`) is accepted without warnings or
+    /// profile-level validation errors. Defaults to `false`.
+    pub allow_wildcard_cors: bool,
 }
 
 /// Persistence configuration.
@@ -528,7 +531,13 @@ pub enum ConfigValidationError {
     IdentityHeaderRequiresHeaderMode,
     #[error("proxy.identity.header_name is invalid: '{value}'")]
     InvalidIdentityHeaderName { value: String },
+    #[error(
+        "http.cors_origins='*' is not allowed for the '{profile}' deployment profile; \
+         set http.allow_wildcard_cors=true to override, or specify explicit origins"
+    )]
+    WildcardCorsOriginsProd { profile: String },
 }
+
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -568,6 +577,7 @@ struct LimitsConfigPatch {
 struct HttpConfigPatch {
     cors_origins: Option<String>,
     stream_base_path: Option<String>,
+    allow_wildcard_cors: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -765,6 +775,9 @@ impl Config {
         if let Some(stream_base_path) = patch.http.stream_base_path {
             self.http.stream_base_path = stream_base_path;
         }
+        if let Some(allow_wildcard_cors) = patch.http.allow_wildcard_cors {
+            self.http.allow_wildcard_cors = allow_wildcard_cors;
+        }
 
         if let Some(mode) = patch.storage.mode {
             self.storage.mode = mode;
@@ -909,6 +922,11 @@ impl Config {
         if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
             self.http.stream_base_path = stream_base_path;
         }
+        if let Some(allow_wildcard_cors) =
+            parse_env::<bool>(get, "DS_HTTP__ALLOW_WILDCARD_CORS")?
+        {
+            self.http.allow_wildcard_cors = allow_wildcard_cors;
+        }
 
         if let Some(storage_mode) = parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?
         {
@@ -1030,7 +1048,7 @@ impl Config {
             return Err(ConfigValidationError::MaxStreamNameSegmentsTooSmall);
         }
 
-        if self.storage.data_dir.trim().is_empty() {
+        if self.storage.mode != StorageMode::Memory && self.storage.data_dir.trim().is_empty() {
             return Err(ConfigValidationError::EmptyStorageDataDir {
                 mode: self.storage.mode,
             });
@@ -1153,6 +1171,52 @@ impl Config {
         Ok(())
     }
 
+    /// Deployment-profile-specific validation run after [`Config::validate`].
+    ///
+    /// Production profiles (`prod`, `prod-tls`, `prod-mtls`) reject wildcard
+    /// CORS unless the operator has explicitly set `http.allow_wildcard_cors`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigValidationError::WildcardCorsOriginsProd`] when a
+    /// production profile is active with `cors_origins = "*"` and the escape
+    /// hatch is not set.
+    pub fn validate_profile(
+        &self,
+        profile: &DeploymentProfile,
+    ) -> Result<(), ConfigValidationError> {
+        let is_prod = matches!(
+            profile,
+            DeploymentProfile::Prod | DeploymentProfile::ProdTls | DeploymentProfile::ProdMtls
+        );
+
+        if is_prod && self.http.cors_origins == "*" && !self.http.allow_wildcard_cors {
+            return Err(ConfigValidationError::WildcardCorsOriginsProd {
+                profile: profile.as_str().to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Non-fatal advisories about the current configuration.
+    ///
+    /// Returns human-readable warning strings that should be logged at startup
+    /// but do not block the server from starting. Currently checks for wildcard
+    /// CORS without an explicit opt-in via `http.allow_wildcard_cors`.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<String> {
+        let mut w = Vec::new();
+        if self.http.cors_origins == "*" && !self.http.allow_wildcard_cors {
+            w.push(
+                "http.cors_origins is set to '*' (allows all origins); \
+                 consider restricting for production use"
+                    .to_string(),
+            );
+        }
+        w
+    }
+
     /// True when direct TLS termination is enabled on this server.
     #[must_use]
     pub fn tls_enabled(&self) -> bool {
@@ -1201,6 +1265,7 @@ impl Default for Config {
             http: HttpConfig {
                 cors_origins: "*".to_string(),
                 stream_base_path: DEFAULT_STREAM_BASE_PATH.to_string(),
+                allow_wildcard_cors: false,
             },
             storage: StorageConfig {
                 mode: StorageMode::Memory,
@@ -1497,11 +1562,12 @@ fn parse_proxy_identity_mode_env(raw: &str) -> Option<ProxyIdentityMode> {
 
 fn default_alpn_protocols(versions: &[HttpVersion]) -> Vec<AlpnProtocol> {
     let mut protocols = Vec::new();
-    if versions.contains(&HttpVersion::Http1) {
-        protocols.push(AlpnProtocol::Http1_1);
-    }
+    // h2 first: conventional preference order for TLS ALPN negotiation.
     if versions.contains(&HttpVersion::Http2) {
         protocols.push(AlpnProtocol::H2);
+    }
+    if versions.contains(&HttpVersion::Http1) {
+        protocols.push(AlpnProtocol::Http1_1);
     }
     protocols
 }
@@ -1741,7 +1807,7 @@ mod tests {
         );
         assert_eq!(
             config.transport.tls.alpn_protocols,
-            vec![AlpnProtocol::Http1_1, AlpnProtocol::H2]
+            vec![AlpnProtocol::H2, AlpnProtocol::Http1_1]
         );
         assert_eq!(
             config.transport.tls.cert_path.as_deref(),
@@ -1797,7 +1863,7 @@ mod tests {
         );
         assert_eq!(
             config.transport.tls.alpn_protocols,
-            vec![AlpnProtocol::Http1_1, AlpnProtocol::H2]
+            vec![AlpnProtocol::H2, AlpnProtocol::Http1_1]
         );
     }
 
@@ -2131,5 +2197,111 @@ key_path = "/tmp/key.pem"
         for (config, expected) in invalid_cases {
             assert_eq!(config.validate().expect_err("config should fail"), expected);
         }
+    }
+
+    // ── Wildcard CORS warning / profile validation ─────────────────
+
+    #[test]
+    fn test_wildcard_cors_emits_warning() {
+        let config = Config::default();
+        assert_eq!(config.http.cors_origins, "*");
+        let warnings = config.warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("cors_origins"));
+    }
+
+    #[test]
+    fn test_allow_wildcard_cors_suppresses_warning() {
+        let config = Config {
+            http: HttpConfig {
+                allow_wildcard_cors: true,
+                ..Config::default().http
+            },
+            ..Config::default()
+        };
+        assert!(config.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_explicit_origins_no_warning() {
+        let config = Config {
+            http: HttpConfig {
+                cors_origins: "https://example.com".to_string(),
+                ..Config::default().http
+            },
+            ..Config::default()
+        };
+        assert!(config.warnings().is_empty());
+    }
+
+    #[test]
+    fn test_validate_profile_rejects_wildcard_cors_for_prod_profiles() {
+        let config = Config::default();
+        for profile in [
+            DeploymentProfile::Prod,
+            DeploymentProfile::ProdTls,
+            DeploymentProfile::ProdMtls,
+        ] {
+            let expected = ConfigValidationError::WildcardCorsOriginsProd {
+                profile: profile.as_str().to_string(),
+            };
+            assert_eq!(
+                config.validate_profile(&profile).expect_err("should fail"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_profile_allows_wildcard_cors_for_non_prod_profiles() {
+        let config = Config::default();
+        for profile in [
+            DeploymentProfile::Default,
+            DeploymentProfile::Dev,
+            DeploymentProfile::Named("staging".to_string()),
+        ] {
+            assert!(
+                config.validate_profile(&profile).is_ok(),
+                "non-prod profile {profile:?} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_profile_allows_wildcard_cors_with_escape_hatch() {
+        let config = Config {
+            http: HttpConfig {
+                allow_wildcard_cors: true,
+                ..Config::default().http
+            },
+            ..Config::default()
+        };
+        assert!(config.validate_profile(&DeploymentProfile::Prod).is_ok());
+        assert!(config.validate_profile(&DeploymentProfile::ProdTls).is_ok());
+        assert!(config.validate_profile(&DeploymentProfile::ProdMtls).is_ok());
+    }
+
+    #[test]
+    fn test_memory_mode_allows_empty_data_dir() {
+        let config = Config {
+            storage: StorageConfig {
+                data_dir: String::new(),
+                ..Config::default().storage
+            },
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_allow_wildcard_cors_env_override() {
+        let config = Config::from_sources_with_lookup(
+            &ConfigLoadOptions::default(),
+            &lookup(&[("DS_HTTP__ALLOW_WILDCARD_CORS", "true")]),
+        )
+        .expect("config from env");
+        assert!(config.http.allow_wildcard_cors);
+        assert!(config.warnings().is_empty());
+        assert!(config.validate_profile(&DeploymentProfile::Prod).is_ok());
     }
 }

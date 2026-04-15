@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   config model. Existing `Config` field access, config file structure, and
   string-based config/load validation handling may need to be updated when
   moving from `0.2.x`.
+- `http.stream_base_path` is now validated strictly and no longer accepts a
+  trailing slash except for the root path `/`. Existing configs such as
+  `"/v1/stream/"` must be updated.
 
 ### Added
 
