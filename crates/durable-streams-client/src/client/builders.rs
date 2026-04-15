@@ -125,6 +125,11 @@ impl ClientBuilder {
     }
 
     /// Build the configured client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the base URL is invalid, configuration validation
+    /// fails, or the underlying HTTP client cannot be constructed.
     pub fn build(self) -> Result<Client, Error> {
         if let Some(error) = self.pending_error {
             return Err(error);
@@ -225,6 +230,11 @@ impl CreateBuilder {
     /// 1. [`CreateBuilder::content_type`]
     /// 2. the client `default_content_type`
     /// 3. `application/octet-stream`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the server rejects the
+    /// stream creation.
     pub async fn send(self) -> Result<CreateOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
@@ -283,6 +293,10 @@ impl AppendBuilder {
     }
 
     /// Execute the append operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the server rejects the append.
     pub async fn send(self) -> Result<AppendOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
@@ -340,6 +354,10 @@ impl CloseBuilder {
     }
 
     /// Execute the close operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the server rejects the close.
     pub async fn send(self) -> Result<CloseOutcome, Error> {
         let stream = self.stream.clone();
         let request = self.into_raw();
@@ -436,6 +454,10 @@ impl ReadBuilder {
     }
 
     /// Execute the collected read operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the server rejects the read.
     pub async fn send(self) -> Result<ReadPage, Error> {
         let stream = self.stream.clone();
         let request = self.to_raw_request();
