@@ -32,6 +32,8 @@ chrono = { version = "0.4.44", features = ["serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+rustls = "0.23"
+rustls-pemfile = "2.2"
 async-stream = "0.3.6"
 futures-util = "0.3.32"
 redb = "4"

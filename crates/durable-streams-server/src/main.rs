@@ -1,8 +1,15 @@
-use axum_server::{Handle, tls_rustls::RustlsConfig};
+use axum_server::{
+    Handle, from_tcp,
+    tls_rustls::{RustlsConfig, from_tcp_rustls},
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use durable_streams_server::{
-    config::{Config, ConfigLoadOptions, StorageMode},
+    config::{Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode},
     router,
+    startup::{
+        StartupError, StartupPhase, bind_tcp_listener, build_tls_server_config, log_phase,
+        log_startup_failure, log_transport_summary, preflight_tls_files,
+    },
     storage::{Storage, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
     transfer::{
         export::{ExportOptions, export_streams},
@@ -11,7 +18,7 @@ use durable_streams_server::{
 };
 use std::fs;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -96,49 +103,35 @@ struct AppRuntime {
 }
 
 impl AppRuntime {
-    fn new(config: Config) -> Result<Self, String> {
-        let addr = format!("0.0.0.0:{}", config.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| format!("failed to parse bind address: {e}"))?;
-        Ok(Self { config, addr })
-    }
-
-    fn provision(&self) {
-        tracing::info!("Starting durable streams server on {}", self.addr);
+    fn new(config: Config) -> Result<Self, StartupError> {
+        log_phase(StartupPhase::ValidateConfig);
+        let addr = config
+            .bind_socket_addr()
+            .map_err(StartupError::config_validation)?;
+        config.validate().map_err(StartupError::config_validation)?;
         tracing::info!(
-            "Max memory: {} bytes, Max per stream: {} bytes",
-            self.config.max_memory_bytes,
-            self.config.max_stream_bytes
+            bind_address = %addr,
+            storage.mode = config.storage.mode.as_str(),
+            limits.max_memory_bytes = config.limits.max_memory_bytes,
+            limits.max_stream_bytes = config.limits.max_stream_bytes,
+            "configuration validated"
         );
-        tracing::info!("Storage mode: {}", self.config.storage_mode.as_str());
-        if self.config.tls_enabled() {
-            tracing::info!("Transport: direct TLS enabled");
-        } else {
-            tracing::info!("Transport: plain HTTP (terminate TLS at proxy/edge)");
-        }
-    }
 
-    fn validate(&self) -> Result<(), String> {
-        self.config.validate()?;
-        if let (Some(cert), Some(key)) = (&self.config.tls_cert_path, &self.config.tls_key_path) {
-            ensure_regular_file(cert)?;
-            ensure_regular_file(key)?;
+        log_phase(StartupPhase::ResolveTransport);
+        log_transport_summary(&config);
+
+        log_phase(StartupPhase::CheckTlsFiles);
+        preflight_tls_files(&config)?;
+        if config.tls_enabled() {
+            tracing::info!("TLS file preflight passed");
         }
-        Ok(())
+
+        Ok(Self { config, addr })
     }
 
     fn cleanup() {
         tracing::info!("Runtime cleanup completed");
     }
-}
-
-fn ensure_regular_file(path: &str) -> Result<(), String> {
-    let metadata = std::fs::metadata(Path::new(path))
-        .map_err(|e| format!("failed to stat path '{path}': {e}"))?;
-    if !metadata.is_file() {
-        return Err(format!("path is not a regular file: '{path}'"));
-    }
-    Ok(())
 }
 
 // ── Main ────────────────────────────────────────────────────────────
@@ -148,15 +141,17 @@ async fn main() {
     let cli = Cli::parse();
 
     let load_options = ConfigLoadOptions {
-        profile: cli.profile,
+        profile: DeploymentProfile::from(cli.profile),
         config_override: cli.config,
         ..ConfigLoadOptions::default()
     };
 
+    log_phase(StartupPhase::LoadConfig);
     let config = match Config::from_sources(&load_options) {
         Ok(config) => config,
         Err(err) => {
-            eprintln!("{err}");
+            let startup_err = StartupError::config_load(err);
+            eprintln!("{startup_err}");
             std::process::exit(1);
         }
     };
@@ -166,13 +161,13 @@ async fn main() {
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| config.rust_log.clone().into()),
+                        .unwrap_or_else(|_| config.observability.rust_log.clone().into()),
                 )
                 .with(tracing_subscriber::fmt::layer())
                 .init();
 
             if let Err(err) = run_serve(config).await {
-                tracing::error!("{err}");
+                log_startup_failure(&err);
                 std::process::exit(1);
             }
         }
@@ -207,17 +202,20 @@ fn run_with_storage<F>(config: &Config, f: F) -> Result<(), String>
 where
     F: FnOnce(&dyn Storage) -> Result<(), String>,
 {
-    match config.storage_mode {
+    match config.storage.mode {
         StorageMode::Memory => {
-            let storage = InMemoryStorage::new(config.max_memory_bytes, config.max_stream_bytes);
+            let storage = InMemoryStorage::new(
+                config.limits.max_memory_bytes,
+                config.limits.max_stream_bytes,
+            );
             f(&storage)
         }
         StorageMode::FileFast | StorageMode::FileDurable => {
-            let sync_on_append = config.storage_mode.sync_on_append();
+            let sync_on_append = config.storage.mode.sync_on_append();
             let storage = FileStorage::new(
-                &config.data_dir,
-                config.max_memory_bytes,
-                config.max_stream_bytes,
+                &config.storage.data_dir,
+                config.limits.max_memory_bytes,
+                config.limits.max_stream_bytes,
                 sync_on_append,
             )
             .map_err(|e| format!("Failed to initialize file storage: {e}"))?;
@@ -225,11 +223,11 @@ where
         }
         StorageMode::Acid => {
             let storage = AcidStorage::new(
-                &config.data_dir,
-                config.acid_shard_count,
-                config.max_memory_bytes,
-                config.max_stream_bytes,
-                config.acid_backend,
+                &config.storage.data_dir,
+                config.storage.acid_shard_count,
+                config.limits.max_memory_bytes,
+                config.limits.max_stream_bytes,
+                config.storage.acid_backend,
             )
             .map_err(|e| format!("Failed to initialize acid storage: {e}"))?;
             f(&storage)
@@ -414,53 +412,55 @@ fn run_import(
 
 // ── Server ──────────────────────────────────────────────────────────
 
-async fn run_serve(config: Config) -> Result<(), String> {
+async fn run_serve(config: Config) -> Result<(), StartupError> {
     let runtime = AppRuntime::new(config)?;
-    runtime.provision();
-    runtime.validate()?;
 
-    let serve_result = match runtime.config.storage_mode {
+    let serve_result = match runtime.config.storage.mode {
         StorageMode::Memory => {
             let storage = Arc::new(InMemoryStorage::new(
-                runtime.config.max_memory_bytes,
-                runtime.config.max_stream_bytes,
+                runtime.config.limits.max_memory_bytes,
+                runtime.config.limits.max_stream_bytes,
             ));
             serve(storage, &runtime).await
         }
         StorageMode::FileFast | StorageMode::FileDurable => {
-            let sync_on_append = runtime.config.storage_mode.sync_on_append();
+            let sync_on_append = runtime.config.storage.mode.sync_on_append();
             tracing::info!(
-                "File storage dir: {}, sync on append: {}",
-                runtime.config.data_dir,
-                sync_on_append
+                storage.dir = runtime.config.storage.data_dir,
+                storage.sync_on_append = sync_on_append,
+                "file storage initialized"
             );
             let storage = Arc::new(
                 FileStorage::new(
-                    &runtime.config.data_dir,
-                    runtime.config.max_memory_bytes,
-                    runtime.config.max_stream_bytes,
+                    &runtime.config.storage.data_dir,
+                    runtime.config.limits.max_memory_bytes,
+                    runtime.config.limits.max_stream_bytes,
                     sync_on_append,
                 )
-                .map_err(|e| format!("Failed to initialize file storage: {e}"))?,
+                .map_err(|e| {
+                    StartupError::runtime(format!("failed to initialize file storage: {e}"))
+                })?,
             );
             serve(storage, &runtime).await
         }
         StorageMode::Acid => {
             tracing::info!(
-                "Acid storage backend: {}, dir: {}, shards: {}",
-                runtime.config.acid_backend.as_str(),
-                runtime.config.data_dir,
-                runtime.config.acid_shard_count
+                storage.backend = runtime.config.storage.acid_backend.as_str(),
+                storage.dir = runtime.config.storage.data_dir,
+                storage.shards = runtime.config.storage.acid_shard_count,
+                "acid storage initialized"
             );
             let storage = Arc::new(
                 AcidStorage::new(
-                    &runtime.config.data_dir,
-                    runtime.config.acid_shard_count,
-                    runtime.config.max_memory_bytes,
-                    runtime.config.max_stream_bytes,
-                    runtime.config.acid_backend,
+                    &runtime.config.storage.data_dir,
+                    runtime.config.storage.acid_shard_count,
+                    runtime.config.limits.max_memory_bytes,
+                    runtime.config.limits.max_stream_bytes,
+                    runtime.config.storage.acid_backend,
                 )
-                .map_err(|e| format!("Failed to initialize acid storage: {e}"))?,
+                .map_err(|e| {
+                    StartupError::runtime(format!("failed to initialize acid storage: {e}"))
+                })?,
             );
             serve(storage, &runtime).await
         }
@@ -470,7 +470,10 @@ async fn run_serve(config: Config) -> Result<(), String> {
     serve_result
 }
 
-async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> Result<(), String> {
+async fn serve<S: Storage + 'static>(
+    storage: Arc<S>,
+    runtime: &AppRuntime,
+) -> Result<(), StartupError> {
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = CancellationToken::new();
     let app = router::build_router_with_ready(
@@ -484,25 +487,6 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
     // Storage is already initialised (new() is synchronous); mark ready.
     ready.store(true, Ordering::Release);
 
-    tracing::info!("Server listening on {}", runtime.addr);
-    if runtime.config.tls_enabled() {
-        tracing::info!("Health check: https://{}/healthz", runtime.addr);
-        tracing::info!("Readiness:    https://{}/readyz", runtime.addr);
-        tracing::info!(
-            "Protocol base: https://{}{}/",
-            runtime.addr,
-            runtime.config.stream_base_path
-        );
-    } else {
-        tracing::info!("Health check: http://{}/healthz", runtime.addr);
-        tracing::info!("Readiness:    http://{}/readyz", runtime.addr);
-        tracing::info!(
-            "Protocol base: http://{}{}/",
-            runtime.addr,
-            runtime.config.stream_base_path
-        );
-    }
-
     let shutdown_handle = handle.clone();
     tokio::spawn(async move {
         wait_for_shutdown_signal().await;
@@ -511,26 +495,62 @@ async fn serve<S: Storage + 'static>(storage: Arc<S>, runtime: &AppRuntime) -> R
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    if let (Some(cert_path), Some(key_path)) =
-        (&runtime.config.tls_cert_path, &runtime.config.tls_key_path)
-    {
-        let tls = RustlsConfig::from_pem_file(cert_path, key_path)
-            .await
-            .map_err(|e| format!("failed to load TLS config: {e}"))?;
-        axum_server::bind_rustls(runtime.addr, tls)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
-            .map_err(|e| format!("server error: {e}"))?;
-    } else {
-        axum_server::bind(runtime.addr)
-            .handle(handle)
-            .serve(app.into_make_service())
-            .await
-            .map_err(|e| format!("server error: {e}"))?;
+    match runtime.config.transport.mode {
+        TransportMode::Http => {
+            log_phase(StartupPhase::BindListener);
+            let listener = bind_tcp_listener(runtime.addr)?;
+            log_bound_endpoints(runtime);
+            log_phase(StartupPhase::StartServer);
+            from_tcp(listener)
+                .map_err(|error| StartupError::bind(runtime.addr, error))?
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(|e| StartupError::runtime(e.to_string()))?;
+        }
+        TransportMode::Tls | TransportMode::Mtls => {
+            log_phase(StartupPhase::BuildTlsContext);
+            let server_config = build_tls_server_config(&runtime.config)?;
+            let tls = RustlsConfig::from_config(Arc::new(server_config));
+            tracing::info!(
+                transport.mode = runtime.config.transport.mode.as_str(),
+                "TLS context built successfully"
+            );
+
+            log_phase(StartupPhase::BindListener);
+            let listener = bind_tcp_listener(runtime.addr)?;
+            log_bound_endpoints(runtime);
+            log_phase(StartupPhase::StartServer);
+            from_tcp_rustls(listener, tls)
+                .map_err(|error| StartupError::bind(runtime.addr, error))?
+                .handle(handle)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .map_err(|e| StartupError::runtime(e.to_string()))?;
+        }
     }
 
     Ok(())
+}
+
+fn log_bound_endpoints(runtime: &AppRuntime) {
+    let scheme = if runtime.config.tls_enabled() {
+        "https"
+    } else {
+        "http"
+    };
+    tracing::info!(
+        bind_address = %runtime.addr,
+        scheme,
+        "server listening"
+    );
+    tracing::info!("Health check: {scheme}://{}/healthz", runtime.addr);
+    tracing::info!("Readiness:    {scheme}://{}/readyz", runtime.addr);
+    tracing::info!(
+        "Protocol base: {scheme}://{}{}/",
+        runtime.addr,
+        runtime.config.http.stream_base_path
+    );
 }
 
 async fn wait_for_shutdown_signal() {

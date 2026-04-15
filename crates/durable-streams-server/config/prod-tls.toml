@@ -1,0 +1,34 @@
+# Production profile for direct TLS termination on the server.
+#
+# Typical use:
+# - clients connect directly to durable-streams-server over HTTPS
+# - backend proxy trust remains disabled unless explicitly enabled below
+
+[storage]
+mode = "file-durable" # memory | file-fast | file-durable | acid
+data_dir = "/var/lib/durable-streams" # used by file-fast, file-durable, acid
+
+[limits]
+max_memory_bytes = 536870912 # total in-process payload bytes
+max_stream_bytes = 268435456 # max bytes retained per stream
+
+[transport]
+mode = "tls" # http | tls | mtls
+
+[transport.http]
+versions = ["http1", "http2"] # http2 requires matching h2 ALPN below
+
+[transport.tls]
+# Set cert_path and key_path in your local override file or env.
+alpn_protocols = ["http/1.1", "h2"] # match transport.http.versions
+# cert_path = "/etc/durable-streams/tls/server.crt"
+# key_path = "/etc/durable-streams/tls/server.key"
+# min_version = "1.2" # defaults are usually sufficient unless you need to pin them
+# max_version = "1.3"
+
+# Example if a trusted proxy still sits in front of the TLS listener:
+#
+# [proxy]
+# enabled = true
+# forwarded_headers = "x-forwarded"
+# trusted_proxies = ["10.0.0.0/24"]

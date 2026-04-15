@@ -53,7 +53,7 @@ pub fn build_router_with_ready<S: Storage + 'static>(
     ready: Option<Arc<AtomicBool>>,
     shutdown: CancellationToken,
 ) -> Router {
-    let stream_base_path = Arc::<str>::from(config.stream_base_path.as_str());
+    let stream_base_path = Arc::<str>::from(config.http.stream_base_path.as_str());
     let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))
         .nest(
@@ -70,7 +70,7 @@ pub fn build_router_with_ready<S: Storage + 'static>(
     app.layer(axum_middleware::from_fn(
         middleware::telemetry::track_requests,
     ))
-    .layer(cors_layer(&config.cors_origins))
+    .layer(cors_layer(&config.http.cors_origins))
 }
 
 /// Build a CORS layer from the configured origins string.
@@ -114,14 +114,14 @@ fn protocol_routes<S: Storage + 'static>(
                 .delete(handlers::delete::delete_stream::<S>),
         )
         .layer(Extension(StreamNameLimits {
-            max_bytes: config.max_stream_name_bytes,
-            max_segments: config.max_stream_name_segments,
+            max_bytes: config.limits.max_stream_name_bytes,
+            max_segments: config.limits.max_stream_name_segments,
         }))
         .layer(Extension(ShutdownToken(shutdown)))
         .layer(Extension(SseReconnectInterval(
-            config.sse_reconnect_interval_secs,
+            config.transport.connection.sse_reconnect_interval_secs,
         )))
-        .layer(Extension(LongPollTimeout(config.long_poll_timeout)))
+        .layer(Extension(LongPollTimeout(config.long_poll_timeout())))
         .layer(Extension(StreamBasePath(stream_base_path)))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
