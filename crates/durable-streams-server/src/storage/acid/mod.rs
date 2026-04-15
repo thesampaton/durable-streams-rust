@@ -210,12 +210,10 @@ impl AcidStorage {
                 .open_table(STREAMS)
                 .map_err(|e| Self::storage_err("failed to open streams table", e))?;
 
-            if Self::read_stream_meta(&streams, name)?.is_some() {
-                if found.replace(idx).is_some() {
-                    return Err(Error::Storage(format!(
-                        "stream metadata exists in multiple shards for {name}"
-                    )));
-                }
+            if Self::read_stream_meta(&streams, name)?.is_some() && found.replace(idx).is_some() {
+                return Err(Error::Storage(format!(
+                    "stream metadata exists in multiple shards for {name}"
+                )));
             }
         }
 
@@ -481,6 +479,90 @@ impl AcidStorage {
             }
         }
         Ok(())
+    }
+
+    /// Read messages from the MESSAGES table for a non-forked stream, starting
+    /// from the given offset. Opens its own read transaction.
+    fn read_non_forked_table_messages(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        shard_idx: usize,
+    ) -> Result<Vec<Bytes>> {
+        let (start_read_seq, start_byte_offset) = if from_offset.is_start() {
+            (0_u64, 0_u64)
+        } else {
+            from_offset.parse_components().ok_or_else(|| {
+                Error::InvalidOffset("non-concrete offset in read range".to_string())
+            })?
+        };
+
+        let shard = &self.shards[shard_idx];
+        let txn = shard
+            .db
+            .begin_read()
+            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
+        let message_table = txn
+            .open_table(MESSAGES)
+            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+
+        let iter = message_table
+            .range((name, start_read_seq, start_byte_offset)..=(name, u64::MAX, u64::MAX))
+            .map_err(|e| Self::storage_err("failed to read stream range", e))?;
+
+        let mut messages = Vec::new();
+        for item in iter {
+            let (_, value) =
+                item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
+            messages.push(Bytes::copy_from_slice(value.value()));
+        }
+
+        Ok(messages)
+    }
+
+    /// Traverse the fork chain and collect all messages for a forked stream read.
+    fn collect_fork_chain_messages(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        fi: &ForkInfo,
+    ) -> Result<Vec<Bytes>> {
+        let mut all_messages: Vec<Bytes> = Vec::new();
+        if from_offset.is_start() || *from_offset < fi.fork_offset {
+            let plan = super::fork::build_read_plan(&fi.source_name, |segment_name| {
+                let shard_idx = self.find_stream_shard_index(segment_name).ok().flatten()?;
+                let shard = &self.shards[shard_idx];
+                let txn = shard.db.begin_read().ok()?;
+                let streams = txn.open_table(STREAMS).ok()?;
+                let meta = Self::read_stream_meta(&streams, segment_name).ok()??;
+                Some(meta.fork_info)
+            });
+
+            for (i, segment) in plan.iter().enumerate() {
+                let effective_up_to = if i == plan.len() - 1 {
+                    Some(&fi.fork_offset)
+                } else {
+                    segment.read_up_to.as_ref()
+                };
+                let effective_from = if i == 0 {
+                    from_offset
+                } else {
+                    &Offset::start()
+                };
+                let segment_msgs =
+                    self.read_messages_from_shard(&segment.name, effective_from, effective_up_to)?;
+                all_messages.extend(segment_msgs);
+            }
+        }
+
+        let fork_msgs = if from_offset.is_start() || *from_offset <= fi.fork_offset {
+            self.read_messages_from_shard(name, &fi.fork_offset, None)?
+        } else {
+            self.read_messages_from_shard(name, from_offset, None)?
+        };
+        all_messages.extend(fork_msgs);
+
+        Ok(all_messages)
     }
 
     fn begin_write_txn(db: &Database) -> Result<redb::WriteTransaction> {

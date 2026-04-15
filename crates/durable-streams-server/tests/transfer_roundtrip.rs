@@ -1,6 +1,6 @@
+use bytes::Bytes;
 use durable_streams_server::{
-    InMemoryStorage,
-    Storage,
+    InMemoryStorage, Storage,
     protocol::offset::Offset,
     storage::StreamConfig,
     transfer::{
@@ -9,7 +9,6 @@ use durable_streams_server::{
         import::{ConflictPolicy, ImportOptions, import_streams},
     },
 };
-use bytes::Bytes;
 
 #[test]
 fn export_uses_canonical_offsets_for_linear_streams() {

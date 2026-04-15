@@ -1,4 +1,3 @@
-use crate::config::{LongPollTimeout, SseReconnectInterval};
 use crate::protocol::cursor;
 use crate::protocol::error::Error;
 use crate::protocol::headers::names;
@@ -7,7 +6,7 @@ use crate::protocol::offset::Offset;
 use crate::protocol::problem::{Result, request_instance};
 use crate::protocol::sse::{self, ControlPayload};
 use crate::protocol::stream_name::StreamName;
-use crate::router::ShutdownToken;
+use crate::router::ReadStreamConfig;
 use crate::storage::{ReadResult, Storage};
 use axum::{
     Extension,
@@ -59,11 +58,14 @@ pub async fn read_stream<S: Storage + 'static>(
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Query(query): Query<ReadQuery>,
-    Extension(LongPollTimeout(timeout)): Extension<LongPollTimeout>,
-    Extension(SseReconnectInterval(reconnect_interval_secs)): Extension<SseReconnectInterval>,
-    Extension(ShutdownToken(shutdown)): Extension<ShutdownToken>,
+    Extension(read_config): Extension<ReadStreamConfig>,
     headers: HeaderMap,
 ) -> Result<Response> {
+    let ReadStreamConfig {
+        long_poll_timeout: timeout,
+        sse_reconnect_interval_secs: reconnect_interval_secs,
+        shutdown,
+    } = read_config;
     let instance = request_instance(&original_uri);
     let result = async {
         // Resolve offset: live modes require explicit offset, catch-up defaults to "-1"
@@ -92,11 +94,13 @@ pub async fn read_stream<S: Storage + 'static>(
                     let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
                     read_long_poll(
                         &storage,
-                        &name,
-                        &offset,
-                        &raw_offset,
-                        if_none_match,
-                        &content_type,
+                        &ReadContext {
+                            name: &name,
+                            offset: &offset,
+                            raw_offset: &raw_offset,
+                            if_none_match,
+                            content_type: &content_type,
+                        },
                         timeout,
                         shutdown,
                     )
@@ -156,18 +160,28 @@ fn read_catch_up<S: Storage>(
     Ok(build_data_response(&read_result, content_type, &etag, None))
 }
 
+struct ReadContext<'a> {
+    name: &'a str,
+    offset: &'a Offset,
+    raw_offset: &'a str,
+    if_none_match: Option<&'a str>,
+    content_type: &'a str,
+}
+
 /// Long-poll mode: wait for new data at tail, return immediately if data exists.
-#[allow(clippy::too_many_arguments)]
 async fn read_long_poll<S: Storage>(
     storage: &Arc<S>,
-    name: &str,
-    offset: &Offset,
-    raw_offset: &str,
-    if_none_match: Option<&str>,
-    content_type: &str,
+    ctx: &ReadContext<'_>,
     timeout: Duration,
     shutdown: CancellationToken,
 ) -> Result<Response> {
+    let ReadContext {
+        name,
+        offset,
+        raw_offset,
+        if_none_match,
+        content_type,
+    } = *ctx;
     // Subscribe BEFORE read to avoid missing notifications between read and subscribe
     let mut receiver = storage
         .subscribe(name)
@@ -256,8 +270,7 @@ fn read_sse<S: Storage + 'static>(
         name,
         read_result,
         receiver,
-        is_binary,
-        is_json,
+        SseEncoding { is_binary, is_json },
         reconnect_interval_secs,
         shutdown,
     );
@@ -276,20 +289,26 @@ fn read_sse<S: Storage + 'static>(
 
 /// Build a byte stream that yields raw SSE frame strings.
 ///
+/// SSE data encoding derived from the stream's content type.
+#[derive(Clone, Copy)]
+struct SseEncoding {
+    is_binary: bool,
+    is_json: bool,
+}
+
 /// Manages keep-alive, idle timeout, and the subscribe-before-read pattern.
-#[allow(clippy::too_many_arguments)]
 fn build_sse_byte_stream<S: Storage + 'static>(
     storage: Arc<S>,
     name: String,
     initial_read: ReadResult,
     mut receiver: tokio::sync::broadcast::Receiver<()>,
-    is_binary: bool,
-    is_json: bool,
+    encoding: SseEncoding,
     reconnect_interval_secs: u64,
     shutdown: CancellationToken,
 ) -> impl futures_util::stream::Stream<Item = std::result::Result<String, std::convert::Infallible>> + Send
 {
     async_stream::stream! {
+        let SseEncoding { is_binary, is_json } = encoding;
         let read_result = initial_read;
 
         // Emit initial data + control (JSON messages batched into one event)

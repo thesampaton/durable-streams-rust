@@ -136,14 +136,14 @@ mod tests {
 
     #[test]
     fn test_wrap_read_iter_single_message() {
-        let messages = vec![Bytes::from(r#"{"a":1}"#)];
+        let messages = [Bytes::from(r#"{"a":1}"#)];
         let result = wrap_read_iter(messages.iter());
         assert_eq!(result, Bytes::from(r#"[{"a":1}]"#));
     }
 
     #[test]
     fn test_wrap_read_iter_multiple_messages() {
-        let messages = vec![
+        let messages = [
             Bytes::from(r#"{"a":1}"#),
             Bytes::from(r#"{"b":2}"#),
             Bytes::from(r#"{"c":3}"#),

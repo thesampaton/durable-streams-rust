@@ -111,7 +111,7 @@ async fn spawn_server_with_tls_config(config: Config) -> u16 {
     listening.port()
 }
 
-/// Build a rustls ClientConfig that trusts the test CA (no client cert).
+/// Build a rustls `ClientConfig` that trusts the test CA (no client cert).
 fn build_ca_trusting_client_config() -> ClientConfig {
     install_tls_provider();
     let roots = load_ca_roots();
@@ -120,7 +120,7 @@ fn build_ca_trusting_client_config() -> ClientConfig {
         .with_no_client_auth()
 }
 
-/// Build a rustls ClientConfig with the trusted client cert (for mTLS).
+/// Build a rustls `ClientConfig` with the trusted client cert (for mTLS).
 fn build_mtls_client_config() -> ClientConfig {
     install_tls_provider();
     let roots = load_ca_roots();
@@ -132,7 +132,7 @@ fn build_mtls_client_config() -> ClientConfig {
         .expect("failed to build mTLS client config")
 }
 
-/// Build a rustls ClientConfig with an untrusted client cert (self-signed).
+/// Build a rustls `ClientConfig` with an untrusted client cert (self-signed).
 fn build_untrusted_client_config() -> ClientConfig {
     install_tls_provider();
     let roots = load_ca_roots();
@@ -182,7 +182,7 @@ fn load_pem_key(path: &str) -> rustls::pki_types::PrivateKeyDer<'static> {
         .expect("no key found in file")
 }
 
-/// Do a raw TLS GET /healthz using a specific ClientConfig.
+/// Do a raw TLS GET /healthz using a specific `ClientConfig`.
 async fn tls_raw_get_health(port: u16, client_config: ClientConfig) -> std::io::Result<String> {
     let connector = TlsConnector::from(Arc::new(client_config));
     let tcp = TcpStream::connect(("127.0.0.1", port)).await?;

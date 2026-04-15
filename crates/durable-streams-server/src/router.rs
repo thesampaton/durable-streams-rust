@@ -2,7 +2,7 @@
 //!
 //! [`build_router`] is the main embedding entry point for library consumers.
 
-use crate::config::{Config, LongPollTimeout, SseReconnectInterval};
+use crate::config::Config;
 use crate::middleware::proxy_trust::ProxyTrustState;
 use crate::protocol::stream_name::StreamNameLimits;
 use crate::{handlers, middleware, storage::Storage};
@@ -19,6 +19,17 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 /// when the server begins a graceful shutdown.
 #[derive(Clone)]
 pub struct ShutdownToken(pub CancellationToken);
+
+/// Combined read-stream configuration extracted as a single axum `Extension`.
+///
+/// Groups the long-poll timeout, SSE reconnect interval, and shutdown token
+/// so handlers that need all three only consume one extractor slot.
+#[derive(Clone)]
+pub(crate) struct ReadStreamConfig {
+    pub(crate) long_poll_timeout: std::time::Duration,
+    pub(crate) sse_reconnect_interval_secs: u64,
+    pub(crate) shutdown: CancellationToken,
+}
 
 /// Default mount path for the Durable Streams protocol routes.
 pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
@@ -123,11 +134,11 @@ fn protocol_routes<S: Storage + 'static>(
             max_bytes: config.limits.max_stream_name_bytes,
             max_segments: config.limits.max_stream_name_segments,
         }))
-        .layer(Extension(ShutdownToken(shutdown)))
-        .layer(Extension(SseReconnectInterval(
-            config.transport.connection.sse_reconnect_interval_secs,
-        )))
-        .layer(Extension(LongPollTimeout(config.long_poll_timeout())))
+        .layer(Extension(ReadStreamConfig {
+            long_poll_timeout: config.long_poll_timeout(),
+            sse_reconnect_interval_secs: config.transport.connection.sse_reconnect_interval_secs,
+            shutdown,
+        }))
         .layer(Extension(StreamBasePath(stream_base_path)))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,

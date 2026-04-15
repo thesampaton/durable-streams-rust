@@ -36,10 +36,11 @@ fn assert_running_on_nightly() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    Err(format!(
+    Err(
         "public API snapshot test requires a nightly toolchain; run `cargo +nightly test -p durable-streams-server --test public_api -- --ignored`"
+            .to_string()
+            .into(),
     )
-    .into())
 }
 
 fn snapshot_path() -> PathBuf {

@@ -97,9 +97,8 @@ fn exported_messages(messages: &[bytes::Bytes]) -> Vec<ExportedMessage> {
                 data_base64: BASE64.encode(data),
             };
             next_read_seq = next_read_seq.saturating_add(1);
-            next_byte_offset = next_byte_offset.saturating_add(
-                u64::try_from(data.len()).expect("message length must fit in u64"),
-            );
+            next_byte_offset = next_byte_offset
+                .saturating_add(u64::try_from(data.len()).expect("message length must fit in u64"));
             exported
         })
         .collect()

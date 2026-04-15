@@ -373,23 +373,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::truncate;
-
-    #[test]
-    fn truncate_respects_utf8_boundaries() {
-        assert_eq!(truncate("你好世界", 7), "你...");
-        assert_eq!(truncate("🙂🙂🙂", 6), "...");
-    }
-
-    #[test]
-    fn truncate_handles_small_limits() {
-        assert_eq!(truncate("abcdef", 2), "..");
-        assert_eq!(truncate("abcdef", 3), "...");
-    }
-}
-
 // ── Export command ───────────────────────────────────────────────────
 
 fn run_export(
@@ -616,5 +599,22 @@ async fn wait_for_shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_respects_utf8_boundaries() {
+        assert_eq!(truncate("你好世界", 7), "你...");
+        assert_eq!(truncate("🙂🙂🙂", 6), "...");
+    }
+
+    #[test]
+    fn truncate_handles_small_limits() {
+        assert_eq!(truncate("abcdef", 2), "..");
+        assert_eq!(truncate("abcdef", 3), "...");
     }
 }

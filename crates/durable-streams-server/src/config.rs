@@ -538,7 +538,6 @@ pub enum ConfigValidationError {
     WildcardCorsOriginsProd { profile: String },
 }
 
-
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct ConfigPatch {
@@ -750,125 +749,152 @@ impl Config {
     }
 
     fn apply_patch(&mut self, patch: ConfigPatch, ctx: &mut MergeContext) {
-        if let Some(bind_address) = patch.server.bind_address {
-            self.server.bind_address = bind_address;
-        } else if let Some(port) = patch.server.port {
+        self.apply_server_patch(&patch.server);
+        self.apply_limits_patch(&patch.limits);
+        self.apply_http_patch(&patch.http);
+        self.apply_storage_patch(&patch.storage);
+        self.apply_transport_patch(&patch.transport, &patch.tls, &patch.server, ctx);
+        self.apply_proxy_patch(&patch.proxy);
+
+        let rust_log = patch.observability.rust_log.or(patch.log.rust_log);
+        if let Some(rust_log) = rust_log {
+            self.observability.rust_log = rust_log;
+        }
+    }
+
+    fn apply_server_patch(&mut self, patch: &ServerConfigPatch) {
+        if let Some(bind_address) = &patch.bind_address {
+            self.server.bind_address.clone_from(bind_address);
+        } else if let Some(port) = patch.port {
             self.server.bind_address = format!("0.0.0.0:{port}");
         }
+    }
 
-        if let Some(max_memory_bytes) = patch.limits.max_memory_bytes {
+    fn apply_limits_patch(&mut self, patch: &LimitsConfigPatch) {
+        if let Some(max_memory_bytes) = patch.max_memory_bytes {
             self.limits.max_memory_bytes = max_memory_bytes;
         }
-        if let Some(max_stream_bytes) = patch.limits.max_stream_bytes {
+        if let Some(max_stream_bytes) = patch.max_stream_bytes {
             self.limits.max_stream_bytes = max_stream_bytes;
         }
-        if let Some(max_stream_name_bytes) = patch.limits.max_stream_name_bytes {
+        if let Some(max_stream_name_bytes) = patch.max_stream_name_bytes {
             self.limits.max_stream_name_bytes = max_stream_name_bytes;
         }
-        if let Some(max_stream_name_segments) = patch.limits.max_stream_name_segments {
+        if let Some(max_stream_name_segments) = patch.max_stream_name_segments {
             self.limits.max_stream_name_segments = max_stream_name_segments;
         }
+    }
 
-        if let Some(cors_origins) = patch.http.cors_origins {
-            self.http.cors_origins = cors_origins;
+    fn apply_http_patch(&mut self, patch: &HttpConfigPatch) {
+        if let Some(cors_origins) = &patch.cors_origins {
+            self.http.cors_origins.clone_from(cors_origins);
         }
-        if let Some(stream_base_path) = patch.http.stream_base_path {
-            self.http.stream_base_path = stream_base_path;
+        if let Some(stream_base_path) = &patch.stream_base_path {
+            self.http.stream_base_path.clone_from(stream_base_path);
         }
-        if let Some(allow_wildcard_cors) = patch.http.allow_wildcard_cors {
+        if let Some(allow_wildcard_cors) = patch.allow_wildcard_cors {
             self.http.allow_wildcard_cors = allow_wildcard_cors;
         }
+    }
 
-        if let Some(mode) = patch.storage.mode {
+    fn apply_storage_patch(&mut self, patch: &StorageConfigPatch) {
+        if let Some(mode) = patch.mode {
             self.storage.mode = mode;
         }
-        if let Some(data_dir) = patch.storage.data_dir {
-            self.storage.data_dir = data_dir;
+        if let Some(data_dir) = &patch.data_dir {
+            self.storage.data_dir.clone_from(data_dir);
         }
-        if let Some(acid_shard_count) = patch.storage.acid_shard_count {
+        if let Some(acid_shard_count) = patch.acid_shard_count {
             self.storage.acid_shard_count = acid_shard_count;
         }
-        if let Some(acid_backend) = patch.storage.acid_backend {
+        if let Some(acid_backend) = patch.acid_backend {
             self.storage.acid_backend = acid_backend;
         }
+    }
 
-        if let Some(mode) = patch.transport.mode {
+    fn apply_transport_patch(
+        &mut self,
+        patch: &TransportConfigPatch,
+        legacy_tls: &LegacyTlsPatch,
+        server_patch: &ServerConfigPatch,
+        ctx: &mut MergeContext,
+    ) {
+        if let Some(mode) = patch.mode {
             self.transport.mode = mode;
             ctx.explicit_transport_mode = true;
         }
-        if let Some(versions) = patch.transport.http.versions {
-            self.transport.http.versions = versions;
+        if let Some(versions) = &patch.http.versions {
+            self.transport.http.versions.clone_from(versions);
             self.transport.tls.alpn_protocols =
                 default_alpn_protocols(&self.transport.http.versions);
         }
 
-        let legacy_tls_cert_path = patch.tls.cert_path;
-        let legacy_tls_key_path = patch.tls.key_path;
+        let legacy_tls_cert_path = &legacy_tls.cert_path;
+        let legacy_tls_key_path = &legacy_tls.key_path;
         let saw_legacy_tls = legacy_tls_cert_path.is_some() || legacy_tls_key_path.is_some();
-        let tls_cert_path = patch.transport.tls.cert_path.or(legacy_tls_cert_path);
-        let tls_key_path = patch.transport.tls.key_path.or(legacy_tls_key_path);
+        let tls_cert_path = patch
+            .tls
+            .cert_path
+            .as_ref()
+            .or(legacy_tls_cert_path.as_ref());
+        let tls_key_path = patch.tls.key_path.as_ref().or(legacy_tls_key_path.as_ref());
         if tls_cert_path.is_some() || tls_key_path.is_some() {
             ctx.legacy_tls_seen |= saw_legacy_tls;
         }
         if let Some(cert_path) = tls_cert_path {
-            self.transport.tls.cert_path = Some(cert_path);
+            self.transport.tls.cert_path = Some(cert_path.clone());
         }
         if let Some(key_path) = tls_key_path {
-            self.transport.tls.key_path = Some(key_path);
+            self.transport.tls.key_path = Some(key_path.clone());
         }
-        if let Some(client_ca_path) = patch.transport.tls.client_ca_path {
-            self.transport.tls.client_ca_path = Some(client_ca_path);
+        if let Some(client_ca_path) = &patch.tls.client_ca_path {
+            self.transport.tls.client_ca_path = Some(client_ca_path.clone());
         }
-        if let Some(min_version) = patch.transport.tls.min_version {
+        if let Some(min_version) = patch.tls.min_version {
             self.transport.tls.min_version = min_version;
         }
-        if let Some(max_version) = patch.transport.tls.max_version {
+        if let Some(max_version) = patch.tls.max_version {
             self.transport.tls.max_version = max_version;
         }
-        if let Some(alpn_protocols) = patch.transport.tls.alpn_protocols {
-            self.transport.tls.alpn_protocols = alpn_protocols;
+        if let Some(alpn_protocols) = &patch.tls.alpn_protocols {
+            self.transport.tls.alpn_protocols.clone_from(alpn_protocols);
         }
 
         let long_poll_timeout_secs = patch
-            .transport
             .connection
             .long_poll_timeout_secs
-            .or(patch.server.long_poll_timeout_secs);
+            .or(server_patch.long_poll_timeout_secs);
         if let Some(long_poll_timeout_secs) = long_poll_timeout_secs {
             self.transport.connection.long_poll_timeout_secs = long_poll_timeout_secs;
         }
 
         let sse_reconnect_interval_secs = patch
-            .transport
             .connection
             .sse_reconnect_interval_secs
-            .or(patch.server.sse_reconnect_interval_secs);
+            .or(server_patch.sse_reconnect_interval_secs);
         if let Some(sse_reconnect_interval_secs) = sse_reconnect_interval_secs {
             self.transport.connection.sse_reconnect_interval_secs = sse_reconnect_interval_secs;
         }
+    }
 
-        if let Some(enabled) = patch.proxy.enabled {
+    fn apply_proxy_patch(&mut self, patch: &ProxyConfigPatch) {
+        if let Some(enabled) = patch.enabled {
             self.proxy.enabled = enabled;
         }
-        if let Some(forwarded_headers) = patch.proxy.forwarded_headers {
+        if let Some(forwarded_headers) = patch.forwarded_headers {
             self.proxy.forwarded_headers = forwarded_headers;
         }
-        if let Some(trusted_proxies) = patch.proxy.trusted_proxies {
-            self.proxy.trusted_proxies = trusted_proxies;
+        if let Some(trusted_proxies) = &patch.trusted_proxies {
+            self.proxy.trusted_proxies.clone_from(trusted_proxies);
         }
-        if let Some(mode) = patch.proxy.identity.mode {
+        if let Some(mode) = patch.identity.mode {
             self.proxy.identity.mode = mode;
         }
-        if let Some(header_name) = patch.proxy.identity.header_name {
-            self.proxy.identity.header_name = Some(header_name);
+        if let Some(header_name) = &patch.identity.header_name {
+            self.proxy.identity.header_name = Some(header_name.clone());
         }
-        if let Some(require_tls) = patch.proxy.identity.require_tls {
+        if let Some(require_tls) = patch.identity.require_tls {
             self.proxy.identity.require_tls = require_tls;
-        }
-
-        let rust_log = patch.observability.rust_log.or(patch.log.rust_log);
-        if let Some(rust_log) = rust_log {
-            self.observability.rust_log = rust_log;
         }
     }
 
@@ -877,6 +903,26 @@ impl Config {
         &mut self,
         get: &impl Fn(&str) -> Option<String>,
         ctx: &mut MergeContext,
+    ) -> Result<(), ConfigLoadError> {
+        self.apply_server_env(get)?;
+        self.apply_limits_env(get)?;
+        self.apply_http_env(get)?;
+        self.apply_storage_env(get)?;
+        self.apply_transport_env(get, ctx)?;
+        self.apply_proxy_env(get)?;
+
+        if let Some(rust_log) =
+            get("DS_OBSERVABILITY__RUST_LOG").or_else(|| get("DS_LOG__RUST_LOG"))
+        {
+            self.observability.rust_log = rust_log;
+        }
+
+        Ok(())
+    }
+
+    fn apply_server_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
     ) -> Result<(), ConfigLoadError> {
         if let Some(bind_address) = get("DS_SERVER__BIND_ADDRESS") {
             self.server.bind_address = bind_address;
@@ -899,6 +945,13 @@ impl Config {
             self.transport.connection.sse_reconnect_interval_secs = sse_reconnect_interval_secs;
         }
 
+        Ok(())
+    }
+
+    fn apply_limits_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigLoadError> {
         if let Some(max_memory_bytes) = parse_env::<u64>(get, "DS_LIMITS__MAX_MEMORY_BYTES")? {
             self.limits.max_memory_bytes = max_memory_bytes;
         }
@@ -915,19 +968,29 @@ impl Config {
         {
             self.limits.max_stream_name_segments = max_stream_name_segments;
         }
+        Ok(())
+    }
 
+    fn apply_http_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigLoadError> {
         if let Some(cors_origins) = get("DS_HTTP__CORS_ORIGINS") {
             self.http.cors_origins = cors_origins;
         }
         if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
             self.http.stream_base_path = stream_base_path;
         }
-        if let Some(allow_wildcard_cors) =
-            parse_env::<bool>(get, "DS_HTTP__ALLOW_WILDCARD_CORS")?
-        {
+        if let Some(allow_wildcard_cors) = parse_env::<bool>(get, "DS_HTTP__ALLOW_WILDCARD_CORS")? {
             self.http.allow_wildcard_cors = allow_wildcard_cors;
         }
+        Ok(())
+    }
 
+    fn apply_storage_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigLoadError> {
         if let Some(storage_mode) = parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?
         {
             self.storage.mode = storage_mode;
@@ -943,7 +1006,14 @@ impl Config {
         {
             self.storage.acid_backend = acid_backend;
         }
+        Ok(())
+    }
 
+    fn apply_transport_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+        ctx: &mut MergeContext,
+    ) -> Result<(), ConfigLoadError> {
         if let Some(mode) = parse_env_with(get, "DS_TRANSPORT__MODE", parse_transport_mode_env)? {
             self.transport.mode = mode;
             ctx.explicit_transport_mode = true;
@@ -988,7 +1058,13 @@ impl Config {
         )? {
             self.transport.tls.alpn_protocols = alpn_protocols;
         }
+        Ok(())
+    }
 
+    fn apply_proxy_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigLoadError> {
         if let Some(enabled) = parse_env::<bool>(get, "DS_PROXY__ENABLED")? {
             self.proxy.enabled = enabled;
         }
@@ -1015,13 +1091,6 @@ impl Config {
         if let Some(require_tls) = parse_env::<bool>(get, "DS_PROXY__IDENTITY__REQUIRE_TLS")? {
             self.proxy.identity.require_tls = require_tls;
         }
-
-        if let Some(rust_log) =
-            get("DS_OBSERVABILITY__RUST_LOG").or_else(|| get("DS_LOG__RUST_LOG"))
-        {
-            self.observability.rust_log = rust_log;
-        }
-
         Ok(())
     }
 
@@ -1034,7 +1103,14 @@ impl Config {
         validate_socket_addr(&self.server.bind_address)?;
         validate_cors_origins(&self.http.cors_origins)?;
         validate_stream_base_path(&self.http.stream_base_path)?;
+        self.validate_limits()?;
+        self.validate_storage()?;
+        self.validate_transport()?;
+        validate_proxy(self)?;
+        Ok(())
+    }
 
+    fn validate_limits(&self) -> Result<(), ConfigValidationError> {
         if self.limits.max_memory_bytes == 0 {
             return Err(ConfigValidationError::MaxMemoryBytesTooSmall);
         }
@@ -1047,7 +1123,10 @@ impl Config {
         if self.limits.max_stream_name_segments == 0 {
             return Err(ConfigValidationError::MaxStreamNameSegmentsTooSmall);
         }
+        Ok(())
+    }
 
+    fn validate_storage(&self) -> Result<(), ConfigValidationError> {
         if self.storage.mode != StorageMode::Memory && self.storage.data_dir.trim().is_empty() {
             return Err(ConfigValidationError::EmptyStorageDataDir {
                 mode: self.storage.mode,
@@ -1058,7 +1137,10 @@ impl Config {
         {
             return Err(ConfigValidationError::InvalidAcidShardCount);
         }
+        Ok(())
+    }
 
+    fn validate_transport(&self) -> Result<(), ConfigValidationError> {
         if self.transport.connection.long_poll_timeout_secs == 0 {
             return Err(ConfigValidationError::LongPollTimeoutTooSmall);
         }
@@ -1088,6 +1170,12 @@ impl Config {
             }
         }
 
+        self.validate_transport_mode_tls()?;
+        self.validate_alpn_protocols()?;
+        Ok(())
+    }
+
+    fn validate_transport_mode_tls(&self) -> Result<(), ConfigValidationError> {
         match self.transport.mode {
             TransportMode::Http => {
                 if self.transport.tls.cert_path.is_some() {
@@ -1144,7 +1232,10 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
 
+    fn validate_alpn_protocols(&self) -> Result<(), ConfigValidationError> {
         let expected_alpn = default_alpn_protocols(&self.transport.http.versions);
         for (version, alpn) in expected_alpn.iter().map(|alpn| {
             let version = match alpn {
@@ -1166,8 +1257,6 @@ impl Config {
                 return Err(ConfigValidationError::UnexpectedAlpnProtocol { alpn: *alpn });
             }
         }
-
-        validate_proxy(self)?;
         Ok(())
     }
 
@@ -1320,7 +1409,7 @@ pub struct SseReconnectInterval(pub u64);
 
 fn built_in_profile_patch(profile: &DeploymentProfile) -> Option<ConfigPatch> {
     match profile {
-        DeploymentProfile::Default => None,
+        DeploymentProfile::Default | DeploymentProfile::Named(_) => None,
         DeploymentProfile::Dev => Some(ConfigPatch {
             server: ServerConfigPatch {
                 bind_address: Some("127.0.0.1:4437".to_string()),
@@ -1387,7 +1476,6 @@ fn built_in_profile_patch(profile: &DeploymentProfile) -> Option<ConfigPatch> {
             },
             ..ConfigPatch::default()
         }),
-        DeploymentProfile::Named(_) => None,
     }
 }
 
@@ -2043,9 +2131,17 @@ key_path = "/tmp/key.pem"
         }
     }
 
+    fn assert_invalid_configs(
+        invalid_cases: impl IntoIterator<Item = (Config, ConfigValidationError)>,
+    ) {
+        for (config, expected) in invalid_cases {
+            assert_eq!(config.validate().expect_err("config should fail"), expected);
+        }
+    }
+
     #[test]
-    fn test_validate_rejects_invalid_config_matrix() {
-        let invalid_cases = [
+    fn test_validate_rejects_http_transport_tls_misconfigurations() {
+        assert_invalid_configs([
             (
                 Config {
                     transport: TransportConfig {
@@ -2095,6 +2191,12 @@ key_path = "/tmp/key.pem"
                 },
                 ConfigValidationError::HttpModeDoesNotSupportHttp2,
             ),
+        ]);
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_tls_ranges_and_proxy_headers() {
+        assert_invalid_configs([
             (
                 Config {
                     transport: TransportConfig {
@@ -2139,6 +2241,12 @@ key_path = "/tmp/key.pem"
                     value: "not-a-cidr".to_string(),
                 },
             ),
+        ]);
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_proxy_identity_requirements() {
+        assert_invalid_configs([
             (
                 Config {
                     transport: TransportConfig {
@@ -2192,11 +2300,7 @@ key_path = "/tmp/key.pem"
                 },
                 ConfigValidationError::HeaderIdentityRequiresHeaderName,
             ),
-        ];
-
-        for (config, expected) in invalid_cases {
-            assert_eq!(config.validate().expect_err("config should fail"), expected);
-        }
+        ]);
     }
 
     // ── Wildcard CORS warning / profile validation ─────────────────
@@ -2278,7 +2382,11 @@ key_path = "/tmp/key.pem"
         };
         assert!(config.validate_profile(&DeploymentProfile::Prod).is_ok());
         assert!(config.validate_profile(&DeploymentProfile::ProdTls).is_ok());
-        assert!(config.validate_profile(&DeploymentProfile::ProdMtls).is_ok());
+        assert!(
+            config
+                .validate_profile(&DeploymentProfile::ProdMtls)
+                .is_ok()
+        );
     }
 
     #[test]

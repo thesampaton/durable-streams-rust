@@ -322,6 +322,54 @@ impl InMemoryStorage {
 
         Ok(())
     }
+
+    /// Read messages from a forked stream by combining source chain with local data.
+    ///
+    /// The caller must have already extracted fork info and local messages from
+    /// the stream entry (and dropped the lock if needed before calling this).
+    fn assemble_fork_read(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        fi: &super::ForkInfo,
+        fork_messages_data: Vec<Bytes>,
+        next_offset: Offset,
+        closed: bool,
+    ) -> Result<ReadResult> {
+        let mut all_messages: Vec<Bytes> = Vec::new();
+        if from_offset.is_start() || *from_offset < fi.fork_offset {
+            let source_messages =
+                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
+            all_messages.extend(source_messages);
+        }
+
+        if from_offset.is_start() || *from_offset <= fi.fork_offset {
+            all_messages.extend(fork_messages_data);
+        } else {
+            let stream_arc = self
+                .get_stream(name)
+                .ok_or_else(|| Error::NotFound(name.to_string()))?;
+            let stream = stream_arc.read().expect("stream lock poisoned");
+            let start_idx = match stream
+                .messages
+                .binary_search_by(|m| m.offset.cmp(from_offset))
+            {
+                Ok(idx) | Err(idx) => idx,
+            };
+            let msgs: Vec<Bytes> = stream.messages[start_idx..]
+                .iter()
+                .map(|m| m.data.clone())
+                .collect();
+            all_messages.extend(msgs);
+        }
+
+        Ok(ReadResult {
+            messages: all_messages,
+            next_offset,
+            at_tail: true,
+            closed,
+        })
+    }
 }
 
 impl Storage for InMemoryStorage {
@@ -458,8 +506,8 @@ impl Storage for InMemoryStorage {
 
         if !needs_ttl_renewal {
             let stream = stream_arc.read().expect("stream lock poisoned");
-
             let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+
             if from_offset.is_now() {
                 return Ok(ReadResult {
                     messages: Vec::new(),
@@ -479,39 +527,14 @@ impl Storage for InMemoryStorage {
                 stream.messages.iter().map(|m| m.data.clone()).collect();
             drop(stream);
 
-            let mut all_messages: Vec<Bytes> = Vec::new();
-            if from_offset.is_start() || *from_offset < fi.fork_offset {
-                let source_messages =
-                    self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
-                all_messages.extend(source_messages);
-            }
-
-            if from_offset.is_start() || *from_offset <= fi.fork_offset {
-                all_messages.extend(fork_messages_data);
-            } else {
-                let stream_arc2 = self
-                    .get_stream(name)
-                    .ok_or_else(|| Error::NotFound(name.to_string()))?;
-                let stream2 = stream_arc2.read().expect("stream lock poisoned");
-                let start_idx = match stream2
-                    .messages
-                    .binary_search_by(|m| m.offset.cmp(from_offset))
-                {
-                    Ok(idx) | Err(idx) => idx,
-                };
-                let msgs: Vec<Bytes> = stream2.messages[start_idx..]
-                    .iter()
-                    .map(|m| m.data.clone())
-                    .collect();
-                all_messages.extend(msgs);
-            }
-
-            return Ok(ReadResult {
-                messages: all_messages,
+            return self.assemble_fork_read(
+                name,
+                from_offset,
+                &fi,
+                fork_messages_data,
                 next_offset,
-                at_tail: true,
                 closed,
-            });
+            );
         }
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
@@ -534,40 +557,17 @@ impl Storage for InMemoryStorage {
                 stream.messages.iter().map(|m| m.data.clone()).collect();
             drop(stream);
 
-            let mut all_messages: Vec<Bytes> = Vec::new();
-            if from_offset.is_start() || *from_offset < fi.fork_offset {
-                let source_messages =
-                    self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
-                all_messages.extend(source_messages);
-            }
-
-            if from_offset.is_start() || *from_offset <= fi.fork_offset {
-                all_messages.extend(fork_messages_data);
-            } else {
-                let stream_arc2 = self
-                    .get_stream(name)
-                    .ok_or_else(|| Error::NotFound(name.to_string()))?;
-                let stream2 = stream_arc2.read().expect("stream lock poisoned");
-                let start_idx = match stream2
-                    .messages
-                    .binary_search_by(|m| m.offset.cmp(from_offset))
-                {
-                    Ok(idx) | Err(idx) => idx,
-                };
-                let msgs: Vec<Bytes> = stream2.messages[start_idx..]
-                    .iter()
-                    .map(|m| m.data.clone())
-                    .collect();
-                all_messages.extend(msgs);
-            }
+            let result = self.assemble_fork_read(
+                name,
+                from_offset,
+                &fi,
+                fork_messages_data,
+                next_offset,
+                closed,
+            )?;
 
             stream = stream_arc.write().expect("stream lock poisoned");
-            ReadResult {
-                messages: all_messages,
-                next_offset,
-                at_tail: true,
-                closed,
-            }
+            result
         };
 
         super::fork::renew_ttl(&mut stream.config);

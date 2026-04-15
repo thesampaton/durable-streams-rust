@@ -99,9 +99,9 @@ impl From<&ProblemDetails> for ProblemTelemetry {
 /// Builder for structured error responses with protocol-specific headers.
 #[derive(Debug, Clone)]
 pub struct ProblemResponse {
-    problem: ProblemDetails,
+    problem: Box<ProblemDetails>,
     headers: HeaderMap,
-    telemetry: Option<ProblemTelemetry>,
+    telemetry: Option<Box<ProblemTelemetry>>,
 }
 
 /// Response result alias for handlers that emit structured problem details.
@@ -112,7 +112,7 @@ impl ProblemResponse {
     #[must_use]
     pub fn new(problem: ProblemDetails) -> Self {
         Self {
-            problem,
+            problem: Box::new(problem),
             headers: HeaderMap::new(),
             telemetry: None,
         }
@@ -145,7 +145,7 @@ impl ProblemResponse {
     /// Attach explicit telemetry metadata that differs from the public problem payload.
     #[must_use]
     pub fn with_telemetry(mut self, telemetry: ProblemTelemetry) -> Self {
-        self.telemetry = Some(telemetry);
+        self.telemetry = Some(Box::new(telemetry));
         self
     }
 }
@@ -156,9 +156,10 @@ impl ProblemResponse {
 /// do not expose proxy or load-balancer host configuration to clients.
 #[must_use]
 pub fn request_instance(OriginalUri(uri): &OriginalUri) -> String {
-    uri.path_and_query()
-        .map(|value| value.as_str().to_string())
-        .unwrap_or_else(|| uri.path().to_string())
+    uri.path_and_query().map_or_else(
+        || uri.path().to_string(),
+        |value| value.as_str().to_string(),
+    )
 }
 
 impl IntoResponse for ProblemResponse {
@@ -167,7 +168,7 @@ impl IntoResponse for ProblemResponse {
             StatusCode::from_u16(self.problem.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
         let telemetry = self
             .telemetry
-            .unwrap_or_else(|| ProblemTelemetry::from(&self.problem));
+            .map_or_else(|| ProblemTelemetry::from(&*self.problem), |t| *t);
         let body = match serde_json::to_vec(&self.problem) {
             Ok(body) => body,
             Err(_) => br#"{"type":"/errors/internal","title":"Internal Server Error","status":500,"code":"INTERNAL_ERROR"}"#.to_vec(),

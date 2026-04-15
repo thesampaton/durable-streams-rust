@@ -229,6 +229,11 @@ fn decode_hex_16(bytes: &[u8]) -> Option<u64> {
 }
 
 /// Serialize an `Offset` as its canonical string representation.
+///
+/// # Errors
+///
+/// Returns an error if the underlying serializer fails to serialize the
+/// string representation.
 pub fn serialize_offset<S: serde::Serializer>(
     offset: &Offset,
     s: S,
@@ -237,6 +242,11 @@ pub fn serialize_offset<S: serde::Serializer>(
 }
 
 /// Deserialize an `Offset` from its canonical string representation.
+///
+/// # Errors
+///
+/// Returns an error if the underlying deserializer fails to produce a
+/// string, or if the string cannot be parsed as a valid `Offset`.
 pub fn deserialize_offset<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Offset, D::Error> {

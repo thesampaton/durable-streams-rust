@@ -870,6 +870,73 @@ impl FileStorage {
 
         Ok(())
     }
+
+    /// Read messages from a non-forked stream using the in-memory index.
+    fn read_local_file_messages(
+        stream: &StreamEntry,
+        from_offset: &Offset,
+        next_offset: Offset,
+    ) -> Result<ReadResult> {
+        let start_idx = if from_offset.is_start() {
+            0
+        } else {
+            match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
+                Ok(idx) | Err(idx) => idx,
+            }
+        };
+
+        let index_slice = &stream.index[start_idx..];
+        let messages = Self::read_messages(&stream.file, index_slice)?;
+        let at_tail = start_idx + messages.len() >= stream.index.len();
+
+        Ok(ReadResult {
+            messages,
+            next_offset,
+            at_tail,
+            closed: stream.closed,
+        })
+    }
+
+    /// Read the local portion of a forked stream's messages from disk.
+    fn read_fork_local_messages(
+        stream: &StreamEntry,
+        from_offset: &Offset,
+        fork_offset: &Offset,
+    ) -> Result<Vec<Bytes>> {
+        if from_offset.is_start() || *from_offset <= *fork_offset {
+            Self::read_messages(&stream.file, &stream.index)
+        } else {
+            let start_idx = match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
+                Ok(idx) | Err(idx) => idx,
+            };
+            Self::read_messages(&stream.file, &stream.index[start_idx..])
+        }
+    }
+
+    /// Combine source chain messages with fork-local messages into a read result.
+    fn assemble_fork_read(
+        &self,
+        from_offset: &Offset,
+        fi: &super::ForkInfo,
+        fork_local_messages: Vec<Bytes>,
+        next_offset: Offset,
+        closed: bool,
+    ) -> Result<ReadResult> {
+        let mut all_messages: Vec<Bytes> = Vec::new();
+        if from_offset.is_start() || *from_offset < fi.fork_offset {
+            let source_messages =
+                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset)?;
+            all_messages.extend(source_messages);
+        }
+        all_messages.extend(fork_local_messages);
+
+        Ok(ReadResult {
+            messages: all_messages,
+            next_offset,
+            at_tail: true,
+            closed,
+        })
+    }
 }
 
 impl Storage for FileStorage {
@@ -1015,54 +1082,22 @@ impl Storage for FileStorage {
             }
 
             if stream.fork_info.is_none() {
-                let start_idx = if from_offset.is_start() {
-                    0
-                } else {
-                    match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                        Ok(idx) | Err(idx) => idx,
-                    }
-                };
-
-                let index_slice = &stream.index[start_idx..];
-                let messages = Self::read_messages(&stream.file, index_slice)?;
-                let at_tail = start_idx + messages.len() >= stream.index.len();
-
-                return Ok(ReadResult {
-                    messages,
-                    next_offset,
-                    at_tail,
-                    closed: stream.closed,
-                });
+                return Self::read_local_file_messages(&stream, from_offset, next_offset);
             }
 
             let fi = stream.fork_info.clone().expect("checked above");
             let closed = stream.closed;
-            let fork_local_messages: Vec<Bytes> = if from_offset.is_start()
-                || *from_offset <= fi.fork_offset
-            {
-                Self::read_messages(&stream.file, &stream.index)?
-            } else {
-                let start_idx = match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                    Ok(idx) | Err(idx) => idx,
-                };
-                Self::read_messages(&stream.file, &stream.index[start_idx..])?
-            };
+            let fork_local_messages =
+                Self::read_fork_local_messages(&stream, from_offset, &fi.fork_offset)?;
             drop(stream);
 
-            let mut all_messages: Vec<Bytes> = Vec::new();
-            if from_offset.is_start() || *from_offset < fi.fork_offset {
-                let source_messages =
-                    self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset)?;
-                all_messages.extend(source_messages);
-            }
-            all_messages.extend(fork_local_messages);
-
-            return Ok(ReadResult {
-                messages: all_messages,
+            return self.assemble_fork_read(
+                from_offset,
+                &fi,
+                fork_local_messages,
                 next_offset,
-                at_tail: true,
                 closed,
-            });
+            );
         }
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
@@ -1081,57 +1116,21 @@ impl Storage for FileStorage {
         }
 
         if stream.fork_info.is_none() {
-            let start_idx = if from_offset.is_start() {
-                0
-            } else {
-                match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                    Ok(idx) | Err(idx) => idx,
-                }
-            };
-
-            let index_slice = &stream.index[start_idx..];
-            let messages = Self::read_messages(&stream.file, index_slice)?;
-            let at_tail = start_idx + messages.len() >= stream.index.len();
-            let closed = stream.closed;
+            let result = Self::read_local_file_messages(&stream, from_offset, next_offset)?;
             super::fork::renew_ttl(&mut stream.config);
             self.write_metadata_for(name, &stream)?;
-            return Ok(ReadResult {
-                messages,
-                next_offset,
-                at_tail,
-                closed,
-            });
+            return Ok(result);
         }
 
         let fi = stream.fork_info.clone().expect("checked above");
         let closed = stream.closed;
-        let fork_local_messages: Vec<Bytes> =
-            if from_offset.is_start() || *from_offset <= fi.fork_offset {
-                Self::read_messages(&stream.file, &stream.index)?
-            } else {
-                let start_idx = match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                    Ok(idx) | Err(idx) => idx,
-                };
-                Self::read_messages(&stream.file, &stream.index[start_idx..])?
-            };
+        let fork_local_messages =
+            Self::read_fork_local_messages(&stream, from_offset, &fi.fork_offset)?;
         super::fork::renew_ttl(&mut stream.config);
         self.write_metadata_for(name, &stream)?;
         drop(stream);
 
-        let mut all_messages: Vec<Bytes> = Vec::new();
-        if from_offset.is_start() || *from_offset < fi.fork_offset {
-            let source_messages =
-                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset)?;
-            all_messages.extend(source_messages);
-        }
-        all_messages.extend(fork_local_messages);
-
-        Ok(ReadResult {
-            messages: all_messages,
-            next_offset,
-            at_tail: true,
-            closed,
-        })
+        self.assemble_fork_read(from_offset, &fi, fork_local_messages, next_offset, closed)
     }
 
     fn delete(&self, name: &str) -> Result<()> {

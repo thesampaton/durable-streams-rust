@@ -1,16 +1,27 @@
-use super::*;
+use super::{
+    AcidStorage, Bytes, ForkInfo, MESSAGES, Offset, ProducerState, Result, STREAMS,
+    StoredStreamMeta, StreamConfig, StreamState,
+};
 use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
 use crate::storage::{
-    CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ProducerCheck, ReadResult,
-    Storage, StreamMetadata, check_producer, cleanup_stale_producers, fork, is_stream_expired,
-    validate_content_type, validate_seq,
+    CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendResult, ProducerCheck,
+    ReadResult, Storage, StreamMetadata, check_producer, cleanup_stale_producers, fork,
+    is_stream_expired, validate_content_type, validate_seq,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
 use tracing::warn;
+
+/// Result of checking for an existing fork on a cross-shard database.
+enum CrossShardForkResult {
+    /// Proceed with creation; carries `(removed_expired_bytes, removed_parent)`.
+    Continue(u64, Option<String>),
+    /// The fork already exists; the caller should return `AlreadyExists`.
+    AlreadyExists,
+}
 
 impl Storage for AcidStorage {
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
@@ -235,232 +246,10 @@ impl Storage for AcidStorage {
         };
 
         if !needs_ttl_renewal {
-            let shard = &self.shards[shard_idx];
-            let txn = shard
-                .db
-                .begin_read()
-                .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
-
-            let streams = txn
-                .open_table(STREAMS)
-                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-
-            let meta = Self::read_stream_meta(&streams, name)?
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-            let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
-
-            if from_offset.is_now() {
-                return Ok(ReadResult {
-                    messages: Vec::new(),
-                    next_offset,
-                    at_tail: true,
-                    closed: meta.closed,
-                });
-            }
-
-            if meta.fork_info.is_none() {
-                let message_table = txn
-                    .open_table(MESSAGES)
-                    .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-
-                let (start_read_seq, start_byte_offset) = if from_offset.is_start() {
-                    (0_u64, 0_u64)
-                } else {
-                    from_offset.parse_components().ok_or_else(|| {
-                        Error::InvalidOffset("non-concrete offset in read range".to_string())
-                    })?
-                };
-
-                let iter = message_table
-                    .range((name, start_read_seq, start_byte_offset)..=(name, u64::MAX, u64::MAX))
-                    .map_err(|e| Self::storage_err("failed to read stream range", e))?;
-
-                let mut messages = Vec::new();
-                for item in iter {
-                    let (_, value) =
-                        item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
-                    messages.push(Bytes::copy_from_slice(value.value()));
-                }
-
-                return Ok(ReadResult {
-                    messages,
-                    next_offset,
-                    at_tail: true,
-                    closed: meta.closed,
-                });
-            }
-
-            let fi = meta.fork_info.clone().expect("checked above");
-            let closed = meta.closed;
-            drop(streams);
-            drop(txn);
-
-            let mut all_messages: Vec<Bytes> = Vec::new();
-            if from_offset.is_start() || *from_offset < fi.fork_offset {
-                let plan = fork::build_read_plan(&fi.source_name, |segment_name| {
-                    let shard_idx = self.find_stream_shard_index(segment_name).ok().flatten()?;
-                    let shard = &self.shards[shard_idx];
-                    let txn = shard.db.begin_read().ok()?;
-                    let streams = txn.open_table(STREAMS).ok()?;
-                    let meta = Self::read_stream_meta(&streams, segment_name).ok()??;
-                    Some(meta.fork_info)
-                });
-
-                for (i, segment) in plan.iter().enumerate() {
-                    let effective_up_to = if i == plan.len() - 1 {
-                        Some(&fi.fork_offset)
-                    } else {
-                        segment.read_up_to.as_ref()
-                    };
-                    let effective_from = if i == 0 {
-                        from_offset
-                    } else {
-                        &Offset::start()
-                    };
-                    let segment_msgs = self.read_messages_from_shard(
-                        &segment.name,
-                        effective_from,
-                        effective_up_to,
-                    )?;
-                    all_messages.extend(segment_msgs);
-                }
-            }
-
-            let fork_msgs = if from_offset.is_start() || *from_offset <= fi.fork_offset {
-                self.read_messages_from_shard(name, &fi.fork_offset, None)?
-            } else {
-                self.read_messages_from_shard(name, from_offset, None)?
-            };
-            all_messages.extend(fork_msgs);
-
-            return Ok(ReadResult {
-                messages: all_messages,
-                next_offset,
-                at_tail: true,
-                closed,
-            });
+            return self.read_without_ttl_renewal(name, from_offset, shard_idx);
         }
 
-        let shard = &self.shards[shard_idx];
-        let txn = Self::begin_write_txn(&shard.db)?;
-        let mut streams = txn
-            .open_table(STREAMS)
-            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-        let mut meta = Self::read_stream_meta(&streams, name)?
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-        fork::check_stream_access(&meta.config, meta.state, name)?;
-
-        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
-        let result = if from_offset.is_now() {
-            ReadResult {
-                messages: Vec::new(),
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            }
-        } else if meta.fork_info.is_none() {
-            let message_table = txn
-                .open_table(MESSAGES)
-                .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-
-            let (start_read_seq, start_byte_offset) = if from_offset.is_start() {
-                (0_u64, 0_u64)
-            } else {
-                from_offset.parse_components().ok_or_else(|| {
-                    Error::InvalidOffset("non-concrete offset in read range".to_string())
-                })?
-            };
-
-            let iter = message_table
-                .range((name, start_read_seq, start_byte_offset)..=(name, u64::MAX, u64::MAX))
-                .map_err(|e| Self::storage_err("failed to read stream range", e))?;
-
-            let mut messages = Vec::new();
-            for item in iter {
-                let (_, value) =
-                    item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
-                messages.push(Bytes::copy_from_slice(value.value()));
-            }
-
-            ReadResult {
-                messages,
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            }
-        } else {
-            let fi = meta.fork_info.clone().expect("checked above");
-            let closed = meta.closed;
-            drop(streams);
-            drop(txn);
-
-            let mut all_messages: Vec<Bytes> = Vec::new();
-            if from_offset.is_start() || *from_offset < fi.fork_offset {
-                let plan = fork::build_read_plan(&fi.source_name, |segment_name| {
-                    let shard_idx = self.find_stream_shard_index(segment_name).ok().flatten()?;
-                    let shard = &self.shards[shard_idx];
-                    let txn = shard.db.begin_read().ok()?;
-                    let streams = txn.open_table(STREAMS).ok()?;
-                    let meta = Self::read_stream_meta(&streams, segment_name).ok()??;
-                    Some(meta.fork_info)
-                });
-
-                for (i, segment) in plan.iter().enumerate() {
-                    let effective_up_to = if i == plan.len() - 1 {
-                        Some(&fi.fork_offset)
-                    } else {
-                        segment.read_up_to.as_ref()
-                    };
-                    let effective_from = if i == 0 {
-                        from_offset
-                    } else {
-                        &Offset::start()
-                    };
-                    let segment_msgs = self.read_messages_from_shard(
-                        &segment.name,
-                        effective_from,
-                        effective_up_to,
-                    )?;
-                    all_messages.extend(segment_msgs);
-                }
-            }
-
-            let fork_msgs = if from_offset.is_start() || *from_offset <= fi.fork_offset {
-                self.read_messages_from_shard(name, &fi.fork_offset, None)?
-            } else {
-                self.read_messages_from_shard(name, from_offset, None)?
-            };
-            all_messages.extend(fork_msgs);
-
-            let shard = &self.shards[shard_idx];
-            let txn = Self::begin_write_txn(&shard.db)?;
-            let mut streams = txn
-                .open_table(STREAMS)
-                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-            let mut meta = Self::read_stream_meta(&streams, name)?
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-            fork::renew_ttl(&mut meta.config);
-            Self::write_stream_meta(&mut streams, name, &meta)?;
-            drop(streams);
-            txn.commit()
-                .map_err(|e| Self::storage_err("failed to commit ttl renewal", e))?;
-
-            return Ok(ReadResult {
-                messages: all_messages,
-                next_offset,
-                at_tail: true,
-                closed,
-            });
-        };
-
-        fork::renew_ttl(&mut meta.config);
-        Self::write_stream_meta(&mut streams, name, &meta)?;
-        drop(streams);
-        txn.commit()
-            .map_err(|e| Self::storage_err("failed to commit ttl renewal", e))?;
-
-        Ok(result)
+        self.read_with_ttl_renewal(name, from_offset, shard_idx)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -745,26 +534,14 @@ impl Storage for AcidStorage {
             }
 
             let mut meta = Self::new_stream_meta(config);
-
-            if batch_bytes > 0 {
-                if meta.total_bytes + batch_bytes > self.max_stream_bytes {
-                    return Err(Error::StreamSizeLimitExceeded);
-                }
-                for data in &messages {
-                    let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-                    message_table
-                        .insert(
-                            (name, meta.next_read_seq, meta.next_byte_offset),
-                            data.as_ref(),
-                        )
-                        .map_err(|e| {
-                            Self::storage_err("failed to append create-with-data message", e)
-                        })?;
-                    meta.next_read_seq += 1;
-                    meta.next_byte_offset += len;
-                    meta.total_bytes += len;
-                }
-            }
+            Self::write_initial_messages(
+                name,
+                &messages,
+                batch_bytes,
+                self.max_stream_bytes,
+                &mut meta,
+                &mut message_table,
+            )?;
 
             if should_close {
                 meta.closed = true;
@@ -1028,55 +805,13 @@ impl Storage for AcidStorage {
             resolved_offset.clone(),
         );
 
-        let mut removed_expired_bytes = 0_u64;
-        let mut removed_expired_parent = None;
-        if let Some(existing_shard_idx) = self.find_stream_shard_index(name)?
-            && existing_shard_idx != source_shard_idx
-        {
-            let existing_shard = &self.shards[existing_shard_idx];
-            let existing_txn = Self::begin_write_txn(&existing_shard.db)?;
-            let mut existing_streams = existing_txn
-                .open_table(STREAMS)
-                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-            let mut existing_messages = existing_txn
-                .open_table(MESSAGES)
-                .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-
-            if let Some(existing) = Self::read_stream_meta(&existing_streams, name)? {
-                match fork::evaluate_fork_create(
-                    name,
-                    &existing.config,
-                    existing.fork_info.as_ref(),
-                    existing.state,
-                    existing.ref_count,
-                    &fork_spec,
-                ) {
-                    fork::ExistingCreateDisposition::RemoveExpired => {
-                        removed_expired_bytes = existing.total_bytes;
-                        removed_expired_parent =
-                            existing.fork_info.clone().map(|info| info.source_name);
-                        Self::delete_stream_messages(&mut existing_messages, name)?;
-                        existing_streams
-                            .remove(name)
-                            .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
-                        drop(existing_messages);
-                        drop(existing_streams);
-                        existing_txn.commit().map_err(|e| {
-                            Self::storage_err(
-                                "failed to commit expired cross-shard fork removal",
-                                e,
-                            )
-                        })?;
-                    }
-                    fork::ExistingCreateDisposition::AlreadyExists => {
-                        return Ok(CreateStreamResult::AlreadyExists);
-                    }
-                    fork::ExistingCreateDisposition::Conflict(err) => {
-                        return Err(err);
-                    }
+        let (mut removed_expired_bytes, mut removed_expired_parent) =
+            match self.remove_cross_shard_existing_fork(name, source_shard_idx, &fork_spec)? {
+                CrossShardForkResult::Continue(bytes, parent) => (bytes, parent),
+                CrossShardForkResult::AlreadyExists => {
+                    return Ok(CreateStreamResult::AlreadyExists);
                 }
-            }
-        }
+            };
 
         let shard = &self.shards[source_shard_idx];
         let txn = Self::begin_write_txn(&shard.db)?;
@@ -1117,10 +852,255 @@ impl Storage for AcidStorage {
             }
         }
 
+        let fork_meta = Self::build_fork_stored_meta(&fork_spec, &config, &resolved_offset);
+        Self::write_stream_meta(&mut streams, name, &fork_meta)?;
+        source_meta.ref_count += 1;
+        Self::write_stream_meta(&mut streams, source_name, &source_meta)?;
+        drop(messages);
+        drop(streams);
+        txn.commit()
+            .map_err(|e| Self::storage_err("failed to commit create fork", e))?;
+
+        self.cleanup_expired_and_notify(name, removed_expired_bytes, removed_expired_parent)?;
+
+        Ok(CreateStreamResult::Created)
+    }
+}
+
+/// Private helpers extracted from long `Storage` trait methods.
+impl AcidStorage {
+    /// Read path when the stream has no TTL (read-only transaction).
+    fn read_without_ttl_renewal(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        shard_idx: usize,
+    ) -> Result<ReadResult> {
+        let shard = &self.shards[shard_idx];
+        let txn = shard
+            .db
+            .begin_read()
+            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
+
+        let streams = txn
+            .open_table(STREAMS)
+            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+
+        let meta = Self::read_stream_meta(&streams, name)?
+            .ok_or_else(|| Error::NotFound(name.to_string()))?;
+
+        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
+
+        if from_offset.is_now() {
+            return Ok(ReadResult {
+                messages: Vec::new(),
+                next_offset,
+                at_tail: true,
+                closed: meta.closed,
+            });
+        }
+
+        if meta.fork_info.is_none() {
+            drop(streams);
+            drop(txn);
+            let messages = self.read_non_forked_table_messages(name, from_offset, shard_idx)?;
+
+            return Ok(ReadResult {
+                messages,
+                next_offset,
+                at_tail: true,
+                closed: meta.closed,
+            });
+        }
+
+        let fi = meta.fork_info.clone().expect("checked above");
+        let closed = meta.closed;
+        drop(streams);
+        drop(txn);
+
+        let all_messages = self.collect_fork_chain_messages(name, from_offset, &fi)?;
+
+        Ok(ReadResult {
+            messages: all_messages,
+            next_offset,
+            at_tail: true,
+            closed,
+        })
+    }
+
+    /// Read path when the stream has a TTL that needs renewal (write transaction).
+    fn read_with_ttl_renewal(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        shard_idx: usize,
+    ) -> Result<ReadResult> {
+        let shard = &self.shards[shard_idx];
+        let txn = Self::begin_write_txn(&shard.db)?;
+        let mut streams = txn
+            .open_table(STREAMS)
+            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+        let mut meta = Self::read_stream_meta(&streams, name)?
+            .ok_or_else(|| Error::NotFound(name.to_string()))?;
+        fork::check_stream_access(&meta.config, meta.state, name)?;
+
+        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
+        let result = if from_offset.is_now() {
+            ReadResult {
+                messages: Vec::new(),
+                next_offset,
+                at_tail: true,
+                closed: meta.closed,
+            }
+        } else if meta.fork_info.is_none() {
+            let messages = self.read_non_forked_table_messages(name, from_offset, shard_idx)?;
+
+            ReadResult {
+                messages,
+                next_offset,
+                at_tail: true,
+                closed: meta.closed,
+            }
+        } else {
+            let fi = meta.fork_info.clone().expect("checked above");
+            let closed = meta.closed;
+            drop(streams);
+            drop(txn);
+
+            let all_messages = self.collect_fork_chain_messages(name, from_offset, &fi)?;
+
+            let shard = &self.shards[shard_idx];
+            let txn = Self::begin_write_txn(&shard.db)?;
+            let mut streams = txn
+                .open_table(STREAMS)
+                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+            let mut meta = Self::read_stream_meta(&streams, name)?
+                .ok_or_else(|| Error::NotFound(name.to_string()))?;
+            fork::renew_ttl(&mut meta.config);
+            Self::write_stream_meta(&mut streams, name, &meta)?;
+            drop(streams);
+            txn.commit()
+                .map_err(|e| Self::storage_err("failed to commit ttl renewal", e))?;
+
+            return Ok(ReadResult {
+                messages: all_messages,
+                next_offset,
+                at_tail: true,
+                closed,
+            });
+        };
+
+        fork::renew_ttl(&mut meta.config);
+        Self::write_stream_meta(&mut streams, name, &meta)?;
+        drop(streams);
+        txn.commit()
+            .map_err(|e| Self::storage_err("failed to commit ttl renewal", e))?;
+
+        Ok(result)
+    }
+
+    /// Write initial messages into the MESSAGES table during stream creation.
+    fn write_initial_messages(
+        name: &str,
+        messages: &[Bytes],
+        batch_bytes: u64,
+        max_stream_bytes: u64,
+        meta: &mut StoredStreamMeta,
+        message_table: &mut redb::Table<'_, (&str, u64, u64), &[u8]>,
+    ) -> Result<()> {
+        if batch_bytes == 0 {
+            return Ok(());
+        }
+        if meta.total_bytes + batch_bytes > max_stream_bytes {
+            return Err(Error::StreamSizeLimitExceeded);
+        }
+        for data in messages {
+            let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            message_table
+                .insert(
+                    (name, meta.next_read_seq, meta.next_byte_offset),
+                    data.as_ref(),
+                )
+                .map_err(|e| Self::storage_err("failed to append create-with-data message", e))?;
+            meta.next_read_seq += 1;
+            meta.next_byte_offset += len;
+            meta.total_bytes += len;
+        }
+        Ok(())
+    }
+
+    /// Check and remove an existing fork that lives on a different shard than
+    /// the source stream. Returns removed bytes/parent info, or
+    /// `Ok(Some(result))` to signal the caller should return early.
+    #[allow(clippy::type_complexity)]
+    fn remove_cross_shard_existing_fork(
+        &self,
+        name: &str,
+        source_shard_idx: usize,
+        fork_spec: &ForkCreateSpec,
+    ) -> Result<CrossShardForkResult> {
+        let Some(existing_shard_idx) = self.find_stream_shard_index(name)? else {
+            return Ok(CrossShardForkResult::Continue(0, None));
+        };
+        if existing_shard_idx == source_shard_idx {
+            return Ok(CrossShardForkResult::Continue(0, None));
+        }
+
+        let existing_shard = &self.shards[existing_shard_idx];
+        let existing_txn = Self::begin_write_txn(&existing_shard.db)?;
+        let mut existing_streams = existing_txn
+            .open_table(STREAMS)
+            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+        let mut existing_messages = existing_txn
+            .open_table(MESSAGES)
+            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+
+        let Some(existing) = Self::read_stream_meta(&existing_streams, name)? else {
+            return Ok(CrossShardForkResult::Continue(0, None));
+        };
+
+        match fork::evaluate_fork_create(
+            name,
+            &existing.config,
+            existing.fork_info.as_ref(),
+            existing.state,
+            existing.ref_count,
+            fork_spec,
+        ) {
+            fork::ExistingCreateDisposition::RemoveExpired => {
+                let removed_bytes = existing.total_bytes;
+                let removed_parent = existing.fork_info.clone().map(|info| info.source_name);
+                Self::delete_stream_messages(&mut existing_messages, name)?;
+                existing_streams
+                    .remove(name)
+                    .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
+                drop(existing_messages);
+                drop(existing_streams);
+                existing_txn.commit().map_err(|e| {
+                    Self::storage_err("failed to commit expired cross-shard fork removal", e)
+                })?;
+                Ok(CrossShardForkResult::Continue(
+                    removed_bytes,
+                    removed_parent,
+                ))
+            }
+            fork::ExistingCreateDisposition::AlreadyExists => {
+                Ok(CrossShardForkResult::AlreadyExists)
+            }
+            fork::ExistingCreateDisposition::Conflict(err) => Err(err),
+        }
+    }
+
+    /// Construct the `StoredStreamMeta` for a new fork stream.
+    fn build_fork_stored_meta(
+        fork_spec: &ForkCreateSpec,
+        config: &StreamConfig,
+        resolved_offset: &Offset,
+    ) -> StoredStreamMeta {
         let (fork_read_seq, fork_byte_offset) =
             resolved_offset.parse_components().unwrap_or((0, 0));
-        let fork_meta = StoredStreamMeta {
-            config: fork_spec.config,
+        StoredStreamMeta {
+            config: fork_spec.config.clone(),
             closed: config.created_closed,
             next_read_seq: fork_read_seq,
             next_byte_offset: fork_byte_offset,
@@ -1130,22 +1110,21 @@ impl Storage for AcidStorage {
             last_seq: None,
             producers: HashMap::new(),
             fork_info: Some(ForkInfo {
-                source_name: fork_spec.source_name,
-                fork_offset: resolved_offset,
+                source_name: fork_spec.source_name.clone(),
+                fork_offset: resolved_offset.clone(),
             }),
             ref_count: 0,
             state: StreamState::Active,
-        };
+        }
+    }
 
-        Self::write_stream_meta(&mut streams, name, &fork_meta)?;
-        source_meta.ref_count += 1;
-        Self::write_stream_meta(&mut streams, source_name, &source_meta)?;
-
-        drop(messages);
-        drop(streams);
-        txn.commit()
-            .map_err(|e| Self::storage_err("failed to commit create fork", e))?;
-
+    /// Clean up expired stream bytes and notify after a successful create/fork.
+    fn cleanup_expired_and_notify(
+        &self,
+        name: &str,
+        removed_expired_bytes: u64,
+        removed_expired_parent: Option<String>,
+    ) -> Result<()> {
         if removed_expired_bytes > 0 {
             self.saturating_sub_total_bytes(removed_expired_bytes);
             self.drop_notifier(name);
@@ -1153,9 +1132,7 @@ impl Storage for AcidStorage {
                 self.cascade_delete_acid(&parent)?;
             }
         }
-
         self.notifier_sender(name);
-
-        Ok(CreateStreamResult::Created)
+        Ok(())
     }
 }
