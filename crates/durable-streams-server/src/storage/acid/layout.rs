@@ -200,18 +200,21 @@ impl AcidStorage {
 
             let shard_names = entries
                 .iter()
-                .map(|(stream_name, _)| stream_name.clone())
+                .map(|(stream_name, _)| stream_name.as_str())
                 .collect::<std::collections::HashSet<_>>();
 
-            for (stream_name, meta) in entries {
+            for (stream_name, meta) in &entries {
                 if let Some(fork_info) = &meta.fork_info
-                    && !shard_names.contains(&fork_info.source_name)
+                    && !shard_names.contains(fork_info.source_name.as_str())
                 {
                     return Err(Error::Storage(format!(
                         "legacy cross-shard fork lineage requires migration: {stream_name} -> {}",
                         fork_info.source_name
                     )));
                 }
+            }
+
+            for (stream_name, meta) in entries {
                 if is_stream_expired(&meta.config) {
                     expired.push((stream_name, meta));
                 } else {
@@ -236,23 +239,22 @@ impl AcidStorage {
             .map_err(|e| Self::storage_err("failed to open messages table", e))?;
 
         let mut parents_to_cascade: Vec<String> = Vec::new();
-        for (name, meta) in &expired {
+        for (name, mut meta) in expired {
             match fork::evaluate_expired_cleanup(meta.ref_count) {
                 fork::DeleteDisposition::Tombstone => {
-                    let mut updated = meta.clone();
-                    updated.state = StreamState::Tombstone;
-                    Self::write_stream_meta(&mut streams, name, &updated)?;
+                    meta.state = StreamState::Tombstone;
+                    Self::write_stream_meta(&mut streams, &name, &meta)?;
                     live_bytes = live_bytes.saturating_add(meta.total_bytes);
                 }
                 fork::DeleteDisposition::HardDelete => {
-                    Self::delete_stream_messages(&mut messages, name)?;
+                    Self::delete_stream_messages(&mut messages, &name)?;
                     streams
                         .remove(name.as_str())
                         .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
-                    if let Some(fork_info) = &meta.fork_info {
-                        parents_to_cascade.push(fork_info.source_name.clone());
+                    if let Some(fork_info) = meta.fork_info {
+                        parents_to_cascade.push(fork_info.source_name);
                     }
-                    self.drop_notifier(name);
+                    self.drop_notifier(&name);
                 }
             }
         }

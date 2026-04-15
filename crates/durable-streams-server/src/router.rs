@@ -79,7 +79,7 @@ pub fn build_router_with_ready<S: Storage + 'static>(
             .layer(Extension(flag));
     }
 
-    let proxy_trust_state = ProxyTrustState::from_config(config);
+    let proxy_trust_state = Arc::new(ProxyTrustState::from_config(config));
 
     app.layer(axum_middleware::from_fn(
         middleware::telemetry::track_requests,

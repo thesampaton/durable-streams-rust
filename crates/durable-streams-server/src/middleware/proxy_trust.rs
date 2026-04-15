@@ -19,6 +19,7 @@ use axum::{
     response::Response,
 };
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 // ── Header constants ──────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ impl ProxyTrustState {
 /// Reads `ConnectInfo<SocketAddr>` directly from request extensions
 /// (inserted by `axum::serve` or `into_make_service_with_connect_info`).
 pub(crate) async fn enforce_proxy_trust(
-    state: ProxyTrustState,
+    state: Arc<ProxyTrustState>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -265,7 +266,7 @@ pub(crate) async fn enforce_proxy_trust(
         request.headers_mut().remove(header);
     }
 
-    let origin = request_origin(&request, &state, peer_ip, trusted);
+    let origin = request_origin(&request, state.as_ref(), peer_ip, trusted);
     request.extensions_mut().insert(origin);
 
     next.run(request).await
