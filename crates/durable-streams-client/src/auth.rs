@@ -30,7 +30,6 @@ impl AuthConfig {
 
     pub(crate) fn validate(&self) -> Result<(), crate::Error> {
         match self {
-            Self::None => Ok(()),
             Self::Bearer { token } if token.trim().is_empty() => Err(
                 crate::Error::invalid_argument("auth bearer token must not be empty"),
             ),

@@ -50,6 +50,11 @@ impl Default for IdempotentProducerConfig {
 
 impl IdempotentProducerConfig {
     /// Validate producer configuration before construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the producer ID is empty, the epoch is negative,
+    /// or batch size limits are zero.
     pub fn validate(&self) -> Result<(), Error> {
         if self.producer_id.trim().is_empty() {
             return Err(Error::invalid_argument("producerId must not be empty"));
@@ -62,12 +67,12 @@ impl IdempotentProducerConfig {
                 "maxBatchBytes must be greater than zero",
             ));
         }
-        if let Some(max_batch_items) = self.max_batch_items {
-            if max_batch_items == 0 {
-                return Err(Error::invalid_argument(
-                    "maxBatchItems must be greater than zero",
-                ));
-            }
+        if let Some(max_batch_items) = self.max_batch_items
+            && max_batch_items == 0
+        {
+            return Err(Error::invalid_argument(
+                "maxBatchItems must be greater than zero",
+            ));
         }
         Ok(())
     }
@@ -88,6 +93,10 @@ pub struct IdempotentProducer {
 
 impl IdempotentProducer {
     /// Create a producer bound to one stream path and content type.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the producer configuration is invalid.
     pub fn new(
         client: Client,
         path: impl Into<String>,
@@ -123,6 +132,11 @@ impl IdempotentProducer {
     }
 
     /// Append one payload and advance the local producer sequence on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the append or the producer is
+    /// fenced and auto-claim is exhausted.
     pub async fn append(&self, body: Vec<u8>) -> Result<crate::model::AppendResponse, Error> {
         let span = trace::producer_span("producer_append", &self.path);
         async {
@@ -132,7 +146,7 @@ impl IdempotentProducer {
             let response = self
                 .append_with_state(&mut state, Bytes::from(body))
                 .await?;
-            state.acked_server_offset = response.next_offset.clone();
+            state.acked_server_offset.clone_from(&response.next_offset);
             state.next_seq += 1;
             debug!(
                 event = "producer.append_completed",
@@ -149,6 +163,11 @@ impl IdempotentProducer {
     ///
     /// JSON content types are wrapped into one JSON array. Other content types
     /// are concatenated as raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if JSON serialization fails or the server rejects
+    /// the append.
     pub async fn append_batch(
         &self,
         bodies: &[Vec<u8>],
@@ -177,6 +196,11 @@ impl IdempotentProducer {
     /// This is the producer-oriented counterpart to the shared JSON ingest
     /// loader: callers can normalize input into `serde_json::Value` items and
     /// then send them as one durable-streams JSON append.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the content type is not `application/json`, JSON
+    /// serialization fails, or the server rejects the append.
     pub async fn append_json_values(
         &self,
         values: &[serde_json::Value],
@@ -191,6 +215,11 @@ impl IdempotentProducer {
     }
 
     /// Close the stream using the current producer state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the close or the producer is
+    /// fenced and auto-claim is exhausted.
     pub async fn close(
         &self,
         body: Option<Vec<u8>>,
@@ -209,9 +238,9 @@ impl IdempotentProducer {
                         &self.options,
                         Some(self.content_type.as_str()),
                         Some(ProducerHeaders {
-                            producer_id: self.config.producer_id.as_str(),
-                            producer_epoch: state.epoch,
-                            producer_seq: state.next_seq,
+                            id: self.config.producer_id.as_str(),
+                            epoch: state.epoch,
+                            seq: state.next_seq,
                         }),
                         body,
                     )
@@ -250,7 +279,12 @@ impl IdempotentProducer {
     /// Release the producer handle without sending any protocol call.
     ///
     /// This currently exists as an explicit lifecycle no-op for API symmetry.
-    pub async fn detach(&self) -> Result<(), Error> {
+    ///
+    /// # Errors
+    ///
+    /// Currently always returns `Ok(())`. The signature reserves the right to
+    /// return errors in future versions.
+    pub fn detach(&self) -> Result<(), Error> {
         Ok(())
     }
 
@@ -286,9 +320,9 @@ impl IdempotentProducer {
                     Some(self.content_type.as_str()),
                     None,
                     Some(ProducerHeaders {
-                        producer_id: self.config.producer_id.as_str(),
-                        producer_epoch: state.epoch,
-                        producer_seq: state.next_seq,
+                        id: self.config.producer_id.as_str(),
+                        epoch: state.epoch,
+                        seq: state.next_seq,
                     }),
                     body.clone(),
                 )
@@ -329,9 +363,9 @@ impl IdempotentProducer {
                     &self.options,
                     Some(self.content_type.as_str()),
                     Some(ProducerHeaders {
-                        producer_id: self.config.producer_id.as_str(),
-                        producer_epoch: state.epoch,
-                        producer_seq: state.next_seq,
+                        id: self.config.producer_id.as_str(),
+                        epoch: state.epoch,
+                        seq: state.next_seq,
                     }),
                     body.clone(),
                 )

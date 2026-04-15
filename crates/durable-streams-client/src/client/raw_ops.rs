@@ -22,6 +22,16 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::{Instrument, Span, debug, error};
 
+/// Groups the fixed, per-call parameters for [`Client::send_retrying_request`]
+/// so the function stays under the clippy argument-count threshold.
+struct RetryableRequest {
+    operation: &'static str,
+    stream_id: String,
+    method: Method,
+    url: Url,
+    expected: &'static [StatusCode],
+}
+
 impl Client {
     /// Start building a client with ergonomic fluent configuration.
     #[must_use]
@@ -30,6 +40,11 @@ impl Client {
     }
 
     /// Build a client from validated configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration validation fails, the proxy URL is
+    /// invalid, or the underlying HTTP client cannot be constructed.
     pub fn from_config(config: ClientConfig) -> Result<Self, Error> {
         config.validate()?;
 
@@ -47,8 +62,8 @@ impl Client {
         let _guard = span.enter();
         debug!(
             event = "client.constructing",
-            "transport.connect_timeout_ms" = config.transport.connect_timeout.as_millis() as u64,
-            "transport.request_timeout_ms" = config.transport.request_timeout.as_millis() as u64,
+            "transport.connect_timeout_ms" = u64::try_from(config.transport.connect_timeout.as_millis()).unwrap_or(u64::MAX),
+            "transport.request_timeout_ms" = u64::try_from(config.transport.request_timeout.as_millis()).unwrap_or(u64::MAX),
             "transport.proxy_enabled" = config.transport.proxy_url.is_some(),
             user_agent = config.transport.user_agent.as_str()
         );
@@ -84,6 +99,11 @@ impl Client {
     }
 
     /// Alias for [`Client::from_config`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if configuration validation fails or the HTTP client
+    /// cannot be constructed. See [`Client::from_config`].
     pub fn new(config: ClientConfig) -> Result<Self, Error> {
         Self::from_config(config)
     }
@@ -149,11 +169,7 @@ impl Client {
 
     async fn send_retrying_request<F>(
         &self,
-        operation: &'static str,
-        stream_id: &str,
-        method: Method,
-        url: Url,
-        expected: &[StatusCode],
+        req: &RetryableRequest,
         options: &RequestOptions,
         mut customize: F,
     ) -> Result<reqwest::Response, Error>
@@ -162,12 +178,10 @@ impl Client {
     {
         self.retry_policy()
             .run(|| {
-                let operation = operation;
-                let stream_id = stream_id;
-                let method = method.clone();
-                let url = url.clone();
+                let method = req.method.clone();
+                let url = req.url.clone();
                 let span =
-                    trace::http_request_span(operation, stream_id, &method, &url, self.auth_type());
+                    trace::http_request_span(req.operation, &req.stream_id, &method, &url, self.auth_type());
                 let builder = span.in_scope(|| {
                     debug!(event = "request.started");
                     customize(self.request(method, url, options))
@@ -180,7 +194,7 @@ impl Client {
                         event = "response.received",
                         "http.status_code" = status.as_u16()
                     );
-                    if expected.contains(&status) {
+                    if req.expected.contains(&status) {
                         Ok(response)
                     } else {
                         let error = Error::from(response_error(response).await);
@@ -220,6 +234,11 @@ impl Client {
     ///
     /// Maps to `PUT /v1/stream/{name}` and returns the created or idempotently
     /// reused stream state, including the next offset when the server provides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream URL cannot be constructed or the server
+    /// returns an unexpected status code.
     pub async fn create_raw(
         &self,
         path: &str,
@@ -237,13 +256,16 @@ impl Client {
                 let url = self.stream_url(path, &request.options)?;
                 let ttl_seconds = request.ttl_seconds.map(|value| value.to_string());
                 let body = request.body.clone();
+                let req = RetryableRequest {
+                    operation: "create_stream",
+                    stream_id: path.to_string(),
+                    method: Method::PUT,
+                    url,
+                    expected: &[StatusCode::OK, StatusCode::CREATED],
+                };
                 let response = self
                     .send_retrying_request(
-                        "create_stream",
-                        path,
-                        Method::PUT,
-                        url,
-                        &[StatusCode::OK, StatusCode::CREATED],
+                        &req,
                         &request.options,
                         |mut builder| {
                             builder = builder.header(CONTENT_TYPE, &request.content_type);
@@ -292,6 +314,11 @@ impl Client {
     }
 
     /// Fetch metadata for an existing stream without reading message bodies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEAD request fails or the server returns an
+    /// error status.
     pub async fn connect_raw(
         &self,
         path: &str,
@@ -348,6 +375,11 @@ impl Client {
     ///
     /// When `request.producer` is set, the append uses the protocol's idempotent
     /// producer headers and returns any acknowledged producer sequence state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream URL cannot be constructed or the server
+    /// rejects the append.
     pub async fn append_raw(
         &self,
         path: &str,
@@ -359,9 +391,9 @@ impl Client {
             request.content_type.as_deref(),
             request.stream_seq.as_deref(),
             request.producer.as_ref().map(|producer| ProducerHeaders {
-                producer_id: producer.producer_id.as_str(),
-                producer_epoch: producer.producer_epoch,
-                producer_seq: producer.producer_seq,
+                id: producer.producer_id.as_str(),
+                epoch: producer.producer_epoch,
+                seq: producer.producer_seq,
             }),
             request.body.clone(),
         )
@@ -389,18 +421,21 @@ impl Client {
                 let url = self.stream_url(path, options)?;
                 let producer_headers = producer.map(|value| {
                     (
-                        value.producer_id,
-                        value.producer_epoch.to_string(),
-                        value.producer_seq.to_string(),
+                        value.id,
+                        value.epoch.to_string(),
+                        value.seq.to_string(),
                     )
                 });
+                let req = RetryableRequest {
+                    operation: "append_stream",
+                    stream_id: path.to_string(),
+                    method: Method::POST,
+                    url,
+                    expected: &[StatusCode::OK, StatusCode::NO_CONTENT],
+                };
                 let response = self
                     .send_retrying_request(
-                        "append_stream",
-                        path,
-                        Method::POST,
-                        url,
-                        &[StatusCode::OK, StatusCode::NO_CONTENT],
+                        &req,
                         options,
                         |mut builder| {
                             if let Some(content_type) = content_type {
@@ -452,6 +487,11 @@ impl Client {
     }
 
     /// Close a stream, optionally including a final body payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream URL cannot be constructed, the server
+    /// rejects the close, or the response is missing the final offset header.
     pub async fn close_raw(
         &self,
         path: &str,
@@ -462,9 +502,9 @@ impl Client {
             &request.options,
             request.content_type.as_deref(),
             request.producer.as_ref().map(|producer| ProducerHeaders {
-                producer_id: producer.producer_id.as_str(),
-                producer_epoch: producer.producer_epoch,
-                producer_seq: producer.producer_seq,
+                id: producer.producer_id.as_str(),
+                epoch: producer.producer_epoch,
+                seq: producer.producer_seq,
             }),
             request.body.clone(),
         )
@@ -491,18 +531,21 @@ impl Client {
                 let url = self.stream_url(path, options)?;
                 let producer_headers = producer.map(|value| {
                     (
-                        value.producer_id,
-                        value.producer_epoch.to_string(),
-                        value.producer_seq.to_string(),
+                        value.id,
+                        value.epoch.to_string(),
+                        value.seq.to_string(),
                     )
                 });
+                let req = RetryableRequest {
+                    operation: "close_stream",
+                    stream_id: path.to_string(),
+                    method: Method::POST,
+                    url,
+                    expected: &[StatusCode::OK, StatusCode::NO_CONTENT],
+                };
                 let response = self
                     .send_retrying_request(
-                        "close_stream",
-                        path,
-                        Method::POST,
-                        url,
-                        &[StatusCode::OK, StatusCode::NO_CONTENT],
+                        &req,
                         options,
                         |mut builder| {
                             builder = builder.header(STREAM_CLOSED, "true");
@@ -585,6 +628,11 @@ impl Client {
     }
 
     /// Read from a stream in catch-up, long-poll, or SSE-backed collection mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HEAD request fails or the server returns an
+    /// error status.
     pub async fn head_raw(&self, path: &str, request: &HeadRequest) -> Result<HeadResponse, Error> {
         let span = trace::client_operation_span(
             "head_stream",
@@ -617,6 +665,11 @@ impl Client {
     }
 
     /// Delete a stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream URL cannot be constructed or the server
+    /// rejects the deletion.
     pub async fn delete_raw(
         &self,
         path: &str,
@@ -670,6 +723,11 @@ impl Client {
     ///
     /// For `live = sse`, this method consumes the SSE stream and returns the
     /// collected chunks rather than exposing the raw event stream directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the read URL cannot be constructed, the server
+    /// returns an error status, or the response body cannot be collected.
     pub async fn read_raw(&self, path: &str, request: &ReadRequest) -> Result<ReadResponse, Error> {
         let span = trace::client_operation_span(
             "read_stream",
@@ -754,7 +812,8 @@ impl Client {
                         payload: None,
                     }));
                 }
-                current_request.timeout = Some(budget - elapsed);
+                current_request.timeout =
+                    Some(budget.checked_sub(elapsed).unwrap_or_default());
             }
 
             let response = self
@@ -904,6 +963,7 @@ impl Client {
     ///
     /// The returned [`Subscription`] can be polled with [`Subscription::next`]
     /// or aborted explicitly with [`Subscription::abort`].
+    #[must_use]
     pub fn subscribe_raw(&self, path: &str, request: SubscribeRequest) -> Subscription {
         let client = self.clone();
         let path = path.to_string();
@@ -988,7 +1048,7 @@ impl Client {
     ) -> reqwest::RequestBuilder {
         let mut builder = self.inner.http.request(method, url);
         builder = self.apply_default_headers(builder);
-        builder = self.apply_request_headers(builder, options);
+        builder = Self::apply_request_headers(builder, options);
         self.apply_auth(builder)
     }
 
@@ -1001,7 +1061,6 @@ impl Client {
     }
 
     fn apply_request_headers(
-        &self,
         mut builder: reqwest::RequestBuilder,
         options: &RequestOptions,
     ) -> reqwest::RequestBuilder {

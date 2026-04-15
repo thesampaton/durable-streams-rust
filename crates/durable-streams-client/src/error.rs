@@ -22,7 +22,7 @@ pub enum Error {
     Transport(#[from] reqwest::Error),
     /// HTTP response error with protocol context.
     #[error("{0}")]
-    Http(#[from] HttpError),
+    Http(Box<HttpError>),
     /// I/O failure used by configuration and conformance glue.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -66,15 +66,13 @@ impl Error {
     #[must_use]
     pub fn kind(&self) -> ErrorKind {
         match self {
-            Self::InvalidArgument(_) => ErrorKind::InvalidArgument,
-            Self::Config(_) => ErrorKind::Config,
+            Self::InvalidArgument(_) | Self::Url(_) => ErrorKind::InvalidArgument,
+            Self::Config(_) | Self::Toml(_) => ErrorKind::Config,
             Self::Transport(error) if error.is_timeout() => ErrorKind::Timeout,
             Self::Transport(_) => ErrorKind::Network,
             Self::Http(error) => error.kind,
             Self::Io(_) => ErrorKind::Io,
             Self::Json(_) | Self::Parse(_) | Self::Base64(_) => ErrorKind::Parse,
-            Self::Toml(_) => ErrorKind::Config,
-            Self::Url(_) => ErrorKind::InvalidArgument,
         }
     }
 
@@ -165,3 +163,9 @@ impl std::fmt::Display for HttpError {
 }
 
 impl std::error::Error for HttpError {}
+
+impl From<HttpError> for Error {
+    fn from(error: HttpError) -> Self {
+        Self::Http(Box::new(error))
+    }
+}

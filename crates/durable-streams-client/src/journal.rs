@@ -34,6 +34,11 @@ pub struct JournalStreamIdentity {
 
 impl JournalStreamIdentity {
     /// Construct and validate a stream identity for JSON journaling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is empty or the content type is not
+    /// `application/json`.
     pub fn new(path: impl Into<String>, content_type: impl Into<String>) -> Result<Self, Error> {
         let stream = Self {
             path: path.into(),
@@ -131,6 +136,12 @@ impl JsonJournal {
     ///
     /// Existing files are replayed immediately to rebuild committed records and
     /// derive the last persisted server offset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the stream identity is invalid, the file cannot be
+    /// opened, or replay encounters a version mismatch or stream identity
+    /// conflict.
     pub fn open(path: impl AsRef<Path>, stream: JournalStreamIdentity) -> Result<Self, Error> {
         stream.validate()?;
         let path = path.as_ref().to_path_buf();
@@ -184,6 +195,7 @@ impl JsonJournal {
     /// Borrow only the persisted JSON payloads.
     ///
     /// Values are returned in committed local sequence order.
+    #[must_use]
     pub fn values(&self) -> impl ExactSizeIterator<Item = &Value> + '_ {
         self.records.iter().map(|record| &record.payload)
     }
@@ -199,12 +211,22 @@ impl JsonJournal {
     /// All values in the batch share the same durable `next_offset`. Replay
     /// only advances the resume offset once the full batch has been observed,
     /// which avoids moving the cursor past partially written trailing data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch length exceeds `u32::MAX`, JSON
+    /// serialization fails, or the underlying file write fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the batch length exceeds `u64::MAX` (only possible on
+    /// platforms where `usize` is wider than 64 bits).
     pub fn append_values(
         &mut self,
         direction: JournalDirection,
         values: impl IntoIterator<Item = Value>,
         next_offset: Option<String>,
-        producer: Option<ProducerJournalProgress>,
+        producer: Option<&ProducerJournalProgress>,
     ) -> Result<Vec<JournalRecord>, Error> {
         let values = values.into_iter().collect::<Vec<_>>();
         if values.is_empty() {
@@ -235,7 +257,7 @@ impl JsonJournal {
                 next_offset: next_offset.clone(),
                 observed_at: now,
                 persisted_at: now,
-                producer: producer.clone(),
+                producer: producer.cloned(),
             };
             let line = serde_json::to_vec(&record)?;
             self.file.write_all(&line)?;
@@ -246,7 +268,7 @@ impl JsonJournal {
         self.file.flush()?;
         self.file.sync_data()?;
 
-        self.next_local_seq += appended.len() as u64;
+        self.next_local_seq += u64::try_from(appended.len()).expect("appended count fits in u64");
         self.next_batch_seq += 1;
         if let Some(offset) = appended
             .last()
@@ -293,9 +315,8 @@ fn replay_journal(path: &Path, stream: &JournalStreamIdentity) -> Result<ReplayS
             continue;
         }
 
-        let record = match serde_json::from_slice::<JournalRecord>(line) {
-            Ok(record) => record,
-            Err(_) => break,
+        let Ok(record) = serde_json::from_slice::<JournalRecord>(line) else {
+            break;
         };
         if record.version != JOURNAL_RECORD_VERSION {
             return Err(Error::parse(format!(
@@ -312,17 +333,17 @@ fn replay_journal(path: &Path, stream: &JournalStreamIdentity) -> Result<ReplayS
         parsed.push(record);
     }
 
-    let mut state = commit_valid_prefix(parsed)?;
+    let mut state = commit_valid_prefix(parsed);
     state.valid_bytes = u64::try_from(complete_len).unwrap_or(u64::MAX);
     Ok(state)
 }
 
-fn commit_valid_prefix(records: Vec<JournalRecord>) -> Result<ReplayState, Error> {
+fn commit_valid_prefix(records: Vec<JournalRecord>) -> ReplayState {
     let mut state = ReplayState::default();
     let mut pending = Vec::new();
     let mut pending_batch_seq = 0_u64;
     let mut pending_batch_len = 0_u32;
-    let mut pending_next_offset = None::<Option<String>>;
+    let mut pending_next_offset: Option<String> = None;
 
     for record in records {
         let expected_local_seq = state.records.len() as u64 + pending.len() as u64;
@@ -336,7 +357,7 @@ fn commit_valid_prefix(records: Vec<JournalRecord>) -> Result<ReplayState, Error
             }
             pending_batch_seq = record.batch_seq;
             pending_batch_len = record.batch_len;
-            pending_next_offset = Some(record.next_offset.clone());
+            pending_next_offset.clone_from(&record.next_offset);
         } else if record.batch_seq != pending_batch_seq {
             if pending.len() != usize::try_from(pending_batch_len).expect("u32 fits in usize") {
                 break;
@@ -352,10 +373,10 @@ fn commit_valid_prefix(records: Vec<JournalRecord>) -> Result<ReplayState, Error
             }
             pending_batch_seq = record.batch_seq;
             pending_batch_len = record.batch_len;
-            pending_next_offset = Some(record.next_offset.clone());
-        } else if record.batch_index != pending.len() as u32
+            pending_next_offset.clone_from(&record.next_offset);
+        } else if record.batch_index != u32::try_from(pending.len()).expect("batch fits in u32")
             || record.batch_len != pending_batch_len
-            || pending_next_offset.as_ref() != Some(&record.next_offset)
+            || pending_next_offset != record.next_offset
         {
             break;
         }
@@ -374,20 +395,20 @@ fn commit_valid_prefix(records: Vec<JournalRecord>) -> Result<ReplayState, Error
         );
     }
 
-    Ok(state)
+    state
 }
 
 fn commit_batch(
     state: &mut ReplayState,
     pending: &mut Vec<JournalRecord>,
     batch_seq: u64,
-    next_offset: Option<Option<String>>,
+    next_offset: Option<String>,
 ) {
-    if let Some(offset) = next_offset.flatten() {
+    if let Some(offset) = next_offset {
         state.resume_offset = Some(offset);
     }
     state.next_batch_seq = batch_seq + 1;
-    state.next_local_seq += pending.len() as u64;
+    state.next_local_seq += u64::try_from(pending.len()).expect("pending fits in u64");
     state.records.append(pending);
 }
 
@@ -505,7 +526,7 @@ mod tests {
                 JournalDirection::Outbound,
                 vec![json!({"id": 7})],
                 Some("9".to_string()),
-                Some(ProducerJournalProgress {
+                Some(&ProducerJournalProgress {
                     producer_id: "producer-a".to_string(),
                     epoch: 3,
                     next_seq: 11,

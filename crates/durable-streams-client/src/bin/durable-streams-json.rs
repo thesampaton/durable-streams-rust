@@ -215,7 +215,7 @@ async fn send(command: SendCommand) -> Result<(), Box<dyn Error>> {
             JournalDirection::Outbound,
             input.into_values(),
             response.next_offset.clone(),
-            Some(progress.clone()),
+            Some(&progress),
         )?;
     }
 
