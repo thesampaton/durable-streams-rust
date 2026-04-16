@@ -21,6 +21,21 @@ If you touch conformance harness plumbing, also verify the shell entrypoints:
 bash -n scripts/conformance/*.sh
 ```
 
+## Optional: local pre-commit formatter
+
+CI is the source of truth for format checks. If you'd prefer `cargo fmt`
+to run automatically on each commit (useful when committing outside the
+IDE), opt in with a one-off config change:
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
+The hook at `scripts/git-hooks/pre-commit` auto-formats staged Rust files
+and re-stages only the files that were originally staged. Bypass for a
+single commit with `git commit --no-verify`. Uninstall with
+`git config --unset core.hooksPath`.
+
 ## Standards Governance
 
 When protocol or conformance alignment changes, update the relevant records

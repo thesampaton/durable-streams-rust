@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook: auto-format staged Rust files with `cargo fmt`.
+#
+# This hook is opt-in — CI remains the source of truth for format checks.
+# Install (once per clone):
+#     git config core.hooksPath scripts/git-hooks
+# Uninstall:
+#     git config --unset core.hooksPath
+# Bypass for a single commit:
+#     git commit --no-verify
+#
+# Behaviour:
+#   - Fast-exits if no staged Rust files, or if everything is already
+#     formatted.
+#   - Otherwise runs `cargo fmt --all`, then re-stages ONLY the files
+#     that were originally staged (not any unrelated reformatting).
+#   - Unstaged tracked edits are stashed around the format step so the
+#     commit captures exactly the content you staged.
+
+set -euo pipefail
+
+# Ensure Homebrew-installed cargo is reachable when git invokes hooks
+# from GUI clients or editors that do not inherit a login-shell PATH.
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+
+if ! command -v cargo >/dev/null; then
+  echo "pre-commit: 'cargo' not found on PATH; install Rust or bypass with --no-verify" >&2
+  exit 1
+fi
+
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs' || true)
+if [ -z "$staged_rs" ]; then
+  exit 0
+fi
+
+# Fast path: content is already formatted.
+if cargo fmt --all -- --check >/dev/null 2>&1; then
+  exit 0
+fi
+
+echo "pre-commit: applying cargo fmt..."
+
+# Stash unstaged tracked changes so `cargo fmt` operates on exactly the
+# content being committed. Untracked files are left in place.
+stashed=0
+if ! git diff --quiet; then
+  git stash push --keep-index --quiet -m "pre-commit:$(date +%s)"
+  stashed=1
+fi
+
+cleanup() {
+  if [ "$stashed" -eq 1 ]; then
+    git stash pop --quiet || echo "pre-commit: could not pop stash — check 'git stash list'" >&2
+  fi
+}
+trap cleanup EXIT
+
+cargo fmt --all
+
+# Re-stage only the files that were originally staged. Any incidental
+# reformatting of unrelated files remains unstaged in the working tree.
+# shellcheck disable=SC2086
+echo "$staged_rs" | xargs git add --
+
+count=$(echo "$staged_rs" | wc -l | tr -d ' ')
+echo "pre-commit: reformatted and re-staged ${count} file(s)"
