@@ -62,8 +62,10 @@ impl Client {
         let _guard = span.enter();
         debug!(
             event = "client.constructing",
-            "transport.connect_timeout_ms" = u64::try_from(config.transport.connect_timeout.as_millis()).unwrap_or(u64::MAX),
-            "transport.request_timeout_ms" = u64::try_from(config.transport.request_timeout.as_millis()).unwrap_or(u64::MAX),
+            "transport.connect_timeout_ms" =
+                u64::try_from(config.transport.connect_timeout.as_millis()).unwrap_or(u64::MAX),
+            "transport.request_timeout_ms" =
+                u64::try_from(config.transport.request_timeout.as_millis()).unwrap_or(u64::MAX),
             "transport.proxy_enabled" = config.transport.proxy_url.is_some(),
             user_agent = config.transport.user_agent.as_str()
         );
@@ -180,8 +182,13 @@ impl Client {
             .run(|| {
                 let method = req.method.clone();
                 let url = req.url.clone();
-                let span =
-                    trace::http_request_span(req.operation, &req.stream_id, &method, &url, self.auth_type());
+                let span = trace::http_request_span(
+                    req.operation,
+                    &req.stream_id,
+                    &method,
+                    &url,
+                    self.auth_type(),
+                );
                 let builder = span.in_scope(|| {
                     debug!(event = "request.started");
                     customize(self.request(method, url, options))
@@ -264,26 +271,22 @@ impl Client {
                     expected: &[StatusCode::OK, StatusCode::CREATED],
                 };
                 let response = self
-                    .send_retrying_request(
-                        &req,
-                        &request.options,
-                        |mut builder| {
-                            builder = builder.header(CONTENT_TYPE, &request.content_type);
-                            if let Some(ttl_seconds) = ttl_seconds.as_deref() {
-                                builder = builder.header(STREAM_TTL, ttl_seconds);
-                            }
-                            if let Some(expires_at) = &request.expires_at {
-                                builder = builder.header(STREAM_EXPIRES_AT, expires_at);
-                            }
-                            if request.closed {
-                                builder = builder.header(STREAM_CLOSED, "true");
-                            }
-                            if let Some(body) = &body {
-                                builder = builder.body(body.clone());
-                            }
-                            builder
-                        },
-                    )
+                    .send_retrying_request(&req, &request.options, |mut builder| {
+                        builder = builder.header(CONTENT_TYPE, &request.content_type);
+                        if let Some(ttl_seconds) = ttl_seconds.as_deref() {
+                            builder = builder.header(STREAM_TTL, ttl_seconds);
+                        }
+                        if let Some(expires_at) = &request.expires_at {
+                            builder = builder.header(STREAM_EXPIRES_AT, expires_at);
+                        }
+                        if request.closed {
+                            builder = builder.header(STREAM_CLOSED, "true");
+                        }
+                        if let Some(body) = &body {
+                            builder = builder.body(body.clone());
+                        }
+                        builder
+                    })
                     .await?;
                 Ok(CreateStreamResponse {
                     status: response.status().as_u16(),
@@ -419,13 +422,8 @@ impl Client {
             debug!(event = "operation.started");
             let result = async {
                 let url = self.stream_url(path, options)?;
-                let producer_headers = producer.map(|value| {
-                    (
-                        value.id,
-                        value.epoch.to_string(),
-                        value.seq.to_string(),
-                    )
-                });
+                let producer_headers = producer
+                    .map(|value| (value.id, value.epoch.to_string(), value.seq.to_string()));
                 let req = RetryableRequest {
                     operation: "append_stream",
                     stream_id: path.to_string(),
@@ -434,27 +432,22 @@ impl Client {
                     expected: &[StatusCode::OK, StatusCode::NO_CONTENT],
                 };
                 let response = self
-                    .send_retrying_request(
-                        &req,
-                        options,
-                        |mut builder| {
-                            if let Some(content_type) = content_type {
-                                builder = builder.header(CONTENT_TYPE, content_type);
-                            }
-                            if let Some(stream_seq) = stream_seq {
-                                builder = builder.header(STREAM_SEQ, stream_seq);
-                            }
-                            if let Some((producer_id, producer_epoch, producer_seq)) =
-                                &producer_headers
-                            {
-                                builder = builder
-                                    .header(PRODUCER_ID, *producer_id)
-                                    .header(PRODUCER_EPOCH, producer_epoch.as_str())
-                                    .header(PRODUCER_SEQ, producer_seq.as_str());
-                            }
-                            builder.body(body.clone())
-                        },
-                    )
+                    .send_retrying_request(&req, options, |mut builder| {
+                        if let Some(content_type) = content_type {
+                            builder = builder.header(CONTENT_TYPE, content_type);
+                        }
+                        if let Some(stream_seq) = stream_seq {
+                            builder = builder.header(STREAM_SEQ, stream_seq);
+                        }
+                        if let Some((producer_id, producer_epoch, producer_seq)) = &producer_headers
+                        {
+                            builder = builder
+                                .header(PRODUCER_ID, *producer_id)
+                                .header(PRODUCER_EPOCH, producer_epoch.as_str())
+                                .header(PRODUCER_SEQ, producer_seq.as_str());
+                        }
+                        builder.body(body.clone())
+                    })
                     .await?;
                 Ok(AppendResponse {
                     status: response.status().as_u16(),
@@ -529,13 +522,8 @@ impl Client {
             debug!(event = "operation.started");
             let result = async {
                 let url = self.stream_url(path, options)?;
-                let producer_headers = producer.map(|value| {
-                    (
-                        value.id,
-                        value.epoch.to_string(),
-                        value.seq.to_string(),
-                    )
-                });
+                let producer_headers = producer
+                    .map(|value| (value.id, value.epoch.to_string(), value.seq.to_string()));
                 let req = RetryableRequest {
                     operation: "close_stream",
                     stream_id: path.to_string(),
@@ -544,28 +532,23 @@ impl Client {
                     expected: &[StatusCode::OK, StatusCode::NO_CONTENT],
                 };
                 let response = self
-                    .send_retrying_request(
-                        &req,
-                        options,
-                        |mut builder| {
-                            builder = builder.header(STREAM_CLOSED, "true");
-                            if let Some(content_type) = content_type {
-                                builder = builder.header(CONTENT_TYPE, content_type);
-                            }
-                            if let Some((producer_id, producer_epoch, producer_seq)) =
-                                &producer_headers
-                            {
-                                builder = builder
-                                    .header(PRODUCER_ID, *producer_id)
-                                    .header(PRODUCER_EPOCH, producer_epoch.as_str())
-                                    .header(PRODUCER_SEQ, producer_seq.as_str());
-                            }
-                            if let Some(body) = &body {
-                                builder = builder.body(body.clone());
-                            }
-                            builder
-                        },
-                    )
+                    .send_retrying_request(&req, options, |mut builder| {
+                        builder = builder.header(STREAM_CLOSED, "true");
+                        if let Some(content_type) = content_type {
+                            builder = builder.header(CONTENT_TYPE, content_type);
+                        }
+                        if let Some((producer_id, producer_epoch, producer_seq)) = &producer_headers
+                        {
+                            builder = builder
+                                .header(PRODUCER_ID, *producer_id)
+                                .header(PRODUCER_EPOCH, producer_epoch.as_str())
+                                .header(PRODUCER_SEQ, producer_seq.as_str());
+                        }
+                        if let Some(body) = &body {
+                            builder = builder.body(body.clone());
+                        }
+                        builder
+                    })
                     .await?;
                 let final_offset = header_value(&response, STREAM_NEXT_OFFSET)
                     .ok_or_else(|| Error::parse("missing Stream-Next-Offset header"))?;
@@ -812,8 +795,7 @@ impl Client {
                         payload: None,
                     }));
                 }
-                current_request.timeout =
-                    Some(budget.checked_sub(elapsed).unwrap_or_default());
+                current_request.timeout = Some(budget.checked_sub(elapsed).unwrap_or_default());
             }
 
             let response = self

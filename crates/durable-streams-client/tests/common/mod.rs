@@ -24,8 +24,10 @@ pub async fn spawn_test_server() -> String {
 }
 
 pub fn client(base_url: &str) -> Client {
-    let mut config = ClientConfig::default();
-    config.base_url = url::Url::parse(base_url).expect("base url");
+    let config = ClientConfig {
+        base_url: url::Url::parse(base_url).expect("base url"),
+        ..ClientConfig::default()
+    };
     Client::new(config).expect("client config should be valid")
 }
 
