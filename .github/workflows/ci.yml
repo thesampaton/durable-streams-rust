@@ -1,19 +1,56 @@
 name: CI
 
 on:
-  workflow_dispatch: # manual-only for now
+  pull_request:
+    branches: [trunk]
+  push:
+    branches: [trunk]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  cargo-check:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy (pedantic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Workspace Cargo.toml sets `clippy::pedantic = warn` for both crates,
+      # and the server crate re-declares it locally. `-D warnings` turns that
+      # into a hard gate.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  check:
     name: cargo check (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         toolchain:
-          - 1.89.0
+          - "1.89.0"
           - stable
-
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -22,29 +59,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
 
-  cargo-test:
-    name: cargo test (stable)
+  test:
+    name: cargo test
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  server-conformance:
-    name: server conformance (stable)
+  doc:
+    name: cargo doc
     runs-on: ubuntu-latest
-
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+
+  server-conformance:
+    name: server conformance (memory backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: "20"

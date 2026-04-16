@@ -1,0 +1,46 @@
+name: Release PR (changelog)
+
+# Maintains a standing "release PR" against trunk that reflects the
+# current `[Unreleased]` state of each managed crate's CHANGELOG.md.
+#
+# This workflow ONLY runs the `release-pr` subcommand — it never publishes
+# to crates.io and never creates tags or GitHub releases. The `release-plz.toml`
+# config is also configured for `publish = false`, `git_tag_enable = false`,
+# and `git_release_enable = false` as belt-and-suspenders so even a
+# misconfigured future workflow step can't accidentally publish.
+#
+# When you actually want to release:
+#   1. Merge the open release PR (bumps version + finalises CHANGELOG on trunk).
+#   2. Tag the commit with `<crate>-v<version>` and push the tag.
+#      The Pre-release workflow will run against the tag for validation.
+#   3. Publish manually (or add a separate `release-plz release` workflow
+#      once trusted-publishing is configured).
+
+on:
+  push:
+    branches: [trunk]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release-pr
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

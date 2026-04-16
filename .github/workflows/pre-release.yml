@@ -1,0 +1,73 @@
+name: Pre-release
+
+# Heavier gates that are not part of the PR path because they either
+# require a nightly toolchain, take longer than the main CI loop, or
+# exercise the matrix of backends needed before a release.
+#
+# Runs manually via "Run workflow" in the Actions tab, or automatically
+# when a per-crate release tag is pushed (for example
+# `durable-streams-server-v0.3.1`).
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "durable-streams-server-v*"
+      - "durable-streams-client-v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  server-public-api:
+    name: server public API snapshot (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-server-public-api.sh
+
+  server-conformance-backends:
+    name: server conformance (${{ matrix.backend.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: memory
+            env: {}
+          - name: file-fast
+            env:
+              DS_STORAGE__MODE: file-fast
+          - name: acid-memory
+            env:
+              DS_STORAGE__MODE: acid
+              DS_STORAGE__ACID_BACKEND: memory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm install
+      - env: ${{ matrix.backend.env }}
+        run: ./scripts/conformance/run-server-suite.sh
+
+  client-conformance:
+    name: client conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: Swatinem/rust-cache@v2
+      - run: npm install
+      - run: ./scripts/conformance/run-client-suite.sh --fail-fast
