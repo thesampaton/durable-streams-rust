@@ -12,7 +12,6 @@ use durable_streams_server::storage::{
     CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
     StreamConfig, StreamMetadata, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
 };
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -52,37 +51,78 @@ impl StorageTestBackend {
     }
 }
 
-/// All four storage backends.
-pub const ALL_BACKENDS: [StorageTestBackend; 4] = [
-    StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
-    StorageTestBackend::Acid,
-    StorageTestBackend::AcidInMemory,
-];
-
-/// Run a test closure against each backend in `backends`, wrapping each
-/// iteration in `catch_unwind` so a failure names the backend that broke.
-pub fn with_each_backend(
-    backends: &[StorageTestBackend],
-    label: &str,
-    test: impl Fn(StorageTestBackend) + RefUnwindSafe,
-) {
-    for &backend in backends {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "{label} failed for backend={}: {panic_msg}",
-                backend.as_str()
-            );
+/// Expand a block of `#[test]` functions into one `mod` per storage backend.
+///
+/// Each generated module defines a `const BACKEND: StorageTestBackend = ...`
+/// identifying the backend under test, so the body can call
+/// `create_test_storage(BACKEND)` etc. without a closure parameter.
+///
+/// `cargo test` then reports each `(test, backend)` pair as its own case
+/// (e.g. `memory::my_test`, `acid::my_test`), which isolates failures and
+/// drops the manual `"backend={}"` assertion suffixes.
+#[macro_export]
+macro_rules! storage_backend_tests {
+    ($($body:tt)*) => {
+        mod memory {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::StorageTestBackend =
+                $crate::common::StorageTestBackend::Memory;
+            $($body)*
         }
-    }
+        mod file_durable {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::StorageTestBackend =
+                $crate::common::StorageTestBackend::FileDurable;
+            $($body)*
+        }
+        mod acid {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::StorageTestBackend =
+                $crate::common::StorageTestBackend::Acid;
+            $($body)*
+        }
+        mod acid_in_memory {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::StorageTestBackend =
+                $crate::common::StorageTestBackend::AcidInMemory;
+            $($body)*
+        }
+    };
+}
+
+/// Expand a block of `#[tokio::test]` functions into one `mod` per HTTP
+/// backend (the subset of storage backends that participate in HTTP parity).
+///
+/// Each generated module defines a `const BACKEND: HttpTestBackend = ...`
+/// that the body can feed to `spawn_test_server_for_backend(BACKEND)`.
+#[macro_export]
+macro_rules! http_backend_tests {
+    ($($body:tt)*) => {
+        mod memory {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::HttpTestBackend =
+                $crate::common::HttpTestBackend::Memory;
+            $($body)*
+        }
+        mod acid {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $crate::common::HttpTestBackend =
+                $crate::common::HttpTestBackend::Acid;
+            $($body)*
+        }
+    };
 }
 
 pub enum TestStorage {

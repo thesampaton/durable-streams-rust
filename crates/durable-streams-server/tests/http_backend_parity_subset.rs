@@ -1,15 +1,13 @@
 mod common;
 
-use common::{HttpTestBackend, spawn_test_server_for_backend, test_client, unique_stream_name};
+use common::{spawn_test_server_for_backend, test_client, unique_stream_name};
 
 // File-durable uses the same HTTP/router layer as memory; backend parity for
 // file behavior is enforced in direct storage contract tests.
-const BACKENDS: [HttpTestBackend; 2] = [HttpTestBackend::Memory, HttpTestBackend::Acid];
-
-#[tokio::test]
-async fn parity_create_idempotency_and_config_mismatch() {
-    for backend in BACKENDS {
-        let (base_url, _port) = spawn_test_server_for_backend(backend).await;
+http_backend_tests! {
+    #[tokio::test]
+    async fn parity_create_idempotency_and_config_mismatch() {
+        let (base_url, _port) = spawn_test_server_for_backend(BACKEND).await;
         let client = test_client();
         let stream = unique_stream_name();
 
@@ -37,12 +35,10 @@ async fn parity_create_idempotency_and_config_mismatch() {
             .expect("config mismatch request failed");
         assert_eq!(mismatch.status(), 409);
     }
-}
 
-#[tokio::test]
-async fn parity_append_read_and_offset_resume() {
-    for backend in BACKENDS {
-        let (base_url, _port) = spawn_test_server_for_backend(backend).await;
+    #[tokio::test]
+    async fn parity_append_read_and_offset_resume() {
+        let (base_url, _port) = spawn_test_server_for_backend(BACKEND).await;
         let client = test_client();
         let stream = unique_stream_name();
 
@@ -100,12 +96,10 @@ async fn parity_append_read_and_offset_resume() {
         assert_eq!(resumed.status(), 200);
         assert_eq!(resumed.text().await.expect("resumed body failed"), "second");
     }
-}
 
-#[tokio::test]
-async fn parity_producer_duplicate_gap_and_fencing() {
-    for backend in BACKENDS {
-        let (base_url, _port) = spawn_test_server_for_backend(backend).await;
+    #[tokio::test]
+    async fn parity_producer_duplicate_gap_and_fencing() {
+        let (base_url, _port) = spawn_test_server_for_backend(BACKEND).await;
         let client = test_client();
         let stream = unique_stream_name();
 
@@ -176,12 +170,10 @@ async fn parity_producer_duplicate_gap_and_fencing() {
             .expect("producer fenced request failed");
         assert_eq!(fenced.status(), 403);
     }
-}
 
-#[tokio::test]
-async fn parity_close_and_ttl_expiry() {
-    for backend in BACKENDS {
-        let (base_url, _port) = spawn_test_server_for_backend(backend).await;
+    #[tokio::test]
+    async fn parity_close_and_ttl_expiry() {
+        let (base_url, _port) = spawn_test_server_for_backend(BACKEND).await;
         let client = test_client();
         let stream = unique_stream_name();
 

@@ -8,15 +8,11 @@
 mod common;
 
 use bytes::Bytes;
-use common::{
-    ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits,
-    with_each_backend,
-};
+use common::{create_test_storage, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
 use std::collections::{HashMap, HashSet};
-use std::panic::RefUnwindSafe;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -24,18 +20,14 @@ fn plain_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-fn for_all_backends(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    with_each_backend(&ALL_BACKENDS, "concurrent stress", test);
-}
+storage_backend_tests! {
+    // ---------------------------------------------------------------------------
+    // 1. Concurrent writers + concurrent readers on the same stream
+    // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// 1. Concurrent writers + concurrent readers on the same stream
-// ---------------------------------------------------------------------------
-
-#[test]
-fn concurrent_readers_and_writers_no_torn_reads() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn concurrent_readers_and_writers_no_torn_reads() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -102,24 +94,16 @@ fn concurrent_readers_and_writers_no_torn_reads() {
 
         // After all writers finish, total should be exactly 400 messages
         let read = storage.read("s", &Offset::start()).unwrap();
-        assert_eq!(
-            read.messages.len(),
-            400,
-            "backend={}: expected 400 messages, got {}",
-            backend.as_str(),
-            read.messages.len()
-        );
-    });
-}
+        assert_eq!(read.messages.len(), 400);
+    }
 
-// ---------------------------------------------------------------------------
-// 2. Read-after-write visibility
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 2. Read-after-write visibility
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn read_after_write_visibility() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn read_after_write_visibility() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -134,23 +118,20 @@ fn read_after_write_visibility() {
             let read = storage.read("s", &Offset::start()).unwrap();
             assert!(
                 read.messages.len() > i,
-                "backend={}: after append {i}, expected at least {} messages but got {}",
-                backend.as_str(),
+                "after append {i}, expected at least {} messages but got {}",
                 i + 1,
                 read.messages.len()
             );
         }
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 3. Concurrent create_stream_with_data race
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 3. Concurrent create_stream_with_data race
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn concurrent_create_stream_with_data_race() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn concurrent_create_stream_with_data_race() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         let barrier = Arc::new(Barrier::new(4));
@@ -190,34 +171,22 @@ fn concurrent_create_stream_with_data_race() {
             })
             .count();
 
-        assert_eq!(
-            created_count,
-            1,
-            "backend={}: exactly one Created expected, got {created_count}",
-            backend.as_str()
-        );
-        assert_eq!(
-            exists_count,
-            3,
-            "backend={}: three AlreadyExists expected, got {exists_count}",
-            backend.as_str()
-        );
+        assert_eq!(created_count, 1);
+        assert_eq!(exists_count, 3);
 
         // No corruption: should have exactly 1 message
         let read = storage.read("race", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
         assert_eq!(read.messages[0], Bytes::from("data"));
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 4. Delete during active read
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 4. Delete during active read
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn delete_during_concurrent_reads() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn delete_during_concurrent_reads() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -276,17 +245,15 @@ fn delete_during_concurrent_reads() {
 
         // Stream should be gone
         assert!(!storage.exists("s"));
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 5. Subscribe + close race
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 5. Subscribe + close race
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn subscribe_receives_close_notification() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn subscribe_receives_close_notification() {
+        let handle = create_test_storage(BACKEND);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -295,11 +262,7 @@ fn subscribe_receives_close_notification() {
             .unwrap();
 
         let rx = storage.subscribe("s");
-        assert!(
-            rx.is_some(),
-            "backend={}: subscribe should succeed",
-            backend.as_str()
-        );
+        assert!(rx.is_some());
         let mut rx = rx.unwrap();
 
         // Close the stream -- this should send a notification
@@ -308,22 +271,16 @@ fn subscribe_receives_close_notification() {
         // The subscriber should receive the notification
         // Use try_recv since the notification was sent synchronously
         let received = rx.try_recv();
-        assert!(
-            received.is_ok(),
-            "backend={}: subscriber should receive close notification",
-            backend.as_str()
-        );
-    });
-}
+        assert!(received.is_ok());
+    }
 
-// ---------------------------------------------------------------------------
-// 6. Broadcast channel saturation (lagged receiver)
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 6. Broadcast channel saturation (lagged receiver)
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn broadcast_channel_saturation_does_not_deadlock() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn broadcast_channel_saturation_does_not_deadlock() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -350,24 +307,22 @@ fn broadcast_channel_saturation_does_not_deadlock() {
                 | tokio::sync::broadcast::error::TryRecvError::Empty,
             ) => {}
             Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
-                panic!("backend={}: channel should not be closed", backend.as_str());
+                panic!("channel should not be closed");
             }
         }
 
         // Storage should still be functional
         let read = storage.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 30);
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 7. Concurrent appends produce unique monotonic offsets
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 7. Concurrent appends produce unique monotonic offsets
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn concurrent_appends_produce_unique_monotonic_offsets() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn concurrent_appends_produce_unique_monotonic_offsets() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -397,28 +352,20 @@ fn concurrent_appends_produce_unique_monotonic_offsets() {
 
         // All offsets must be unique
         let unique: HashSet<_> = all_offsets.iter().map(|o| o.as_str().to_string()).collect();
-        assert_eq!(
-            unique.len(),
-            400,
-            "backend={}: expected 400 unique offsets, got {}",
-            backend.as_str(),
-            unique.len()
-        );
+        assert_eq!(unique.len(), 400);
 
         // Final read should have exactly 400 messages
         let read = storage.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 400);
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 8. total_bytes consistency under concurrent appends
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 8. total_bytes consistency under concurrent appends
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn total_bytes_consistent_after_concurrent_appends() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn total_bytes_consistent_after_concurrent_appends() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -445,24 +392,17 @@ fn total_bytes_consistent_after_concurrent_appends() {
 
         // 4 threads * 50 messages * 100 bytes = 20,000 bytes
         let meta = storage.head("s").unwrap();
-        assert_eq!(
-            meta.total_bytes,
-            20_000,
-            "backend={}: stream total_bytes should be exactly 20000",
-            backend.as_str()
-        );
+        assert_eq!(meta.total_bytes, 20_000);
         assert_eq!(meta.message_count, 200);
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 9. Concurrent create + delete does not corrupt state
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 9. Concurrent create + delete does not corrupt state
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn concurrent_create_delete_no_corruption() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn concurrent_create_delete_no_corruption() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         let barrier = Arc::new(Barrier::new(4));
@@ -500,17 +440,15 @@ fn concurrent_create_delete_no_corruption() {
 
         // No assertion on specific state -- the test passes if there are no panics,
         // deadlocks, or data corruption.
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 10. Concurrent reads from different offsets
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 10. Concurrent reads from different offsets
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn concurrent_reads_from_different_offsets() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn concurrent_reads_from_different_offsets() {
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = Arc::new(handle.storage);
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -552,5 +490,5 @@ fn concurrent_reads_from_different_offsets() {
         for t in threads {
             t.join().expect("should not panic");
         }
-    });
+    }
 }
