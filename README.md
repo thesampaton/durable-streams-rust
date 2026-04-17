@@ -125,8 +125,10 @@ The workspace MSRV is **Rust 1.89**.
 - Each crate declares `rust-version = "1.89"`.
 - CI validates `cargo check --workspace --all-targets` on Rust `1.89.0` and on
   current stable.
-- CI also runs `cargo clippy --workspace --all-targets` with workspace-level
-  `clippy::pedantic` enabled as a standing baseline.
+- CI enforces `cargo clippy -- -D warnings` with workspace-level
+  `clippy::pedantic` on `durable-streams-server`; the same lints run
+  advisory on `durable-streams-client` until that crate is ready for
+  strict enforcement.
 - The MSRV may be raised deliberately over time, but only as an explicit policy
   change.
 
@@ -138,6 +140,14 @@ Per-crate release tags follow `<crate-name>-v<version>`, matching
 - Most recent server release: `durable-streams-server-v0.3.0`.
 - `crates/durable-streams-client` is currently unpublished
   (`publish = false`) and not yet tagged.
+
+A standing "release PR" is maintained automatically by
+[`release-plz`](https://release-plz.ieni.dev/) against `trunk`. It
+reflects the current `[Unreleased]` CHANGELOG state and proposes a
+version bump derived from Conventional Commit prefixes since the
+last tag. To cut a release, review and merge that PR, then tag and
+publish — see [CONTRIBUTING.md](CONTRIBUTING.md#releasing) for the
+full process.
 
 ## Quick Start
 
