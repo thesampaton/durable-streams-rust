@@ -51,6 +51,52 @@ impl StorageTestBackend {
     }
 }
 
+/// Expand a block of tests into one `mod` per backend mapping.
+///
+/// This supports small backend subsets that do not use `StorageTestBackend`
+/// directly but still benefit from per-backend test enumeration.
+#[macro_export]
+macro_rules! backend_tests {
+    (
+        type $backend_ty:ty;
+        $($name:ident => $backend:path),+ $(,)?;
+        $($body:tt)*
+    ) => {
+        $crate::backend_tests! {
+            @expand
+            [$backend_ty]
+            [$($body)*]
+            $($name => $backend),+
+        }
+    };
+    (
+        @expand
+        [$backend_ty:ty]
+        [$($body:tt)*]
+        $name:ident => $backend:path $(, $rest_name:ident => $rest_backend:path)*
+    ) => {
+        mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+            #[allow(dead_code)]
+            const BACKEND: $backend_ty = $backend;
+            $($body)*
+        }
+        $crate::backend_tests! {
+            @expand
+            [$backend_ty]
+            [$($body)*]
+            $($rest_name => $rest_backend),*
+        }
+    };
+    (
+        @expand
+        [$backend_ty:ty]
+        [$($body:tt)*]
+    ) => {
+    };
+}
+
 /// Expand a block of `#[test]` functions into one `mod` per storage backend.
 ///
 /// Each generated module defines a `const BACKEND: StorageTestBackend = ...`

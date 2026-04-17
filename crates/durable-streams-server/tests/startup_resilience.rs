@@ -15,7 +15,6 @@ use durable_streams_server::storage::acid::AcidStorage;
 use durable_streams_server::storage::file::FileStorage;
 use durable_streams_server::storage::{Storage, StreamConfig};
 use std::fs;
-use std::panic::{AssertUnwindSafe, RefUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -57,8 +56,6 @@ impl DurableBackend {
     }
 }
 
-const DURABLE_BACKENDS: [DurableBackend; 2] = [DurableBackend::File, DurableBackend::Acid];
-
 /// Open (or create) a durable storage instance at the given root.
 fn open_durable(backend: DurableBackend, root: &Path) -> Box<dyn Storage> {
     match backend {
@@ -67,36 +64,21 @@ fn open_durable(backend: DurableBackend, root: &Path) -> Box<dyn Storage> {
     }
 }
 
-fn with_each_durable_backend(test: impl Fn(DurableBackend) + RefUnwindSafe) {
-    for backend in DURABLE_BACKENDS {
-        let result = catch_unwind(AssertUnwindSafe(|| test(backend)));
-        if let Err(payload) = result {
-            let panic_msg = if let Some(msg) = payload.downcast_ref::<&str>() {
-                (*msg).to_string()
-            } else if let Some(msg) = payload.downcast_ref::<String>() {
-                msg.clone()
-            } else {
-                "non-string panic payload".to_string()
-            };
-            panic!(
-                "startup resilience failed for backend={}: {panic_msg}",
-                backend.as_str()
-            );
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 1. Durable storage startup with many streams (file + acid)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn durable_startup_with_100_streams() {
-    with_each_durable_backend(|backend| {
-        let root = unique_dir(&format!("many-{}", backend.as_str()));
+backend_tests! {
+    type DurableBackend;
+    file => DurableBackend::File,
+    acid => DurableBackend::Acid;
+
+    #[test]
+    fn durable_startup_with_100_streams() {
+        let root = unique_dir(&format!("many-{}", BACKEND.as_str()));
         let expected_total;
         {
-            let s = open_durable(backend, &root);
+            let s = open_durable(BACKEND, &root);
             for i in 0..100 {
                 let name = format!("stream-{i:03}");
                 s.create_stream(&name, plain_config()).unwrap();
@@ -108,7 +90,7 @@ fn durable_startup_with_100_streams() {
             assert!(expected_total > 0);
         }
 
-        let restored = open_durable(backend, &root);
+        let restored = open_durable(BACKEND, &root);
         let meta = restored.list_streams().unwrap();
         let restored_total = meta.iter().map(|(_, m)| m.total_bytes).sum::<u64>();
         assert_eq!(
@@ -126,18 +108,16 @@ fn durable_startup_with_100_streams() {
             );
             assert_eq!(read.messages[0], Bytes::from(format!("data-{i}")));
         }
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 2. Durable storage starts clean on empty directory (file + acid)
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 2. Durable storage starts clean on empty directory (file + acid)
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn durable_starts_clean_on_empty_directory() {
-    with_each_durable_backend(|backend| {
-        let root = unique_dir(&format!("empty-{}", backend.as_str()));
-        let s = open_durable(backend, &root);
+    #[test]
+    fn durable_starts_clean_on_empty_directory() {
+        let root = unique_dir(&format!("empty-{}", BACKEND.as_str()));
+        let s = open_durable(BACKEND, &root);
 
         let meta = s.list_streams().unwrap();
         assert!(meta.is_empty());
@@ -147,7 +127,7 @@ fn durable_starts_clean_on_empty_directory() {
 
         let read = s.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
-    });
+    }
 }
 
 // ---------------------------------------------------------------------------
