@@ -373,26 +373,25 @@ impl Storage for InMemoryStorage {
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        if let Some(stream_arc) = streams.get(name) {
+        let action = if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_root_create(
+            super::fork::resolve_root_create(
                 name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
+                Some((&stream.config, stream.state, stream.ref_count)),
                 &config,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name);
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+            )?
+        } else {
+            super::fork::resolve_root_create(name, None, &config)?
+        };
+
+        match action {
+            super::fork::RootCreateAction::AlreadyExists => {
+                return Ok(CreateStreamResult::AlreadyExists);
             }
+            super::fork::RootCreateAction::CreateAfterExpiredCleanup => {
+                self.remove_for_recreate(&mut streams, name);
+            }
+            super::fork::RootCreateAction::Create => {}
         }
 
         let entry = StreamEntry::new(config);
@@ -709,32 +708,30 @@ impl Storage for InMemoryStorage {
     ) -> Result<super::CreateWithDataResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        if let Some(stream_arc) = streams.get(name) {
+        let action = if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_root_create(
+            let action = super::fork::resolve_root_create(
                 name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
+                Some((&stream.config, stream.state, stream.ref_count)),
                 &config,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name);
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-                    let closed = stream.closed;
-                    return Ok(super::CreateWithDataResult {
-                        status: CreateStreamResult::AlreadyExists,
-                        next_offset,
-                        closed,
-                    });
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+            )?;
+            if matches!(action, super::fork::RootCreateAction::AlreadyExists) {
+                return Ok(super::CreateWithDataResult {
+                    status: CreateStreamResult::AlreadyExists,
+                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                    closed: stream.closed,
+                });
             }
+            action
+        } else {
+            super::fork::resolve_root_create(name, None, &config)?
+        };
+
+        if matches!(
+            action,
+            super::fork::RootCreateAction::CreateAfterExpiredCleanup
+        ) {
+            self.remove_for_recreate(&mut streams, name);
         }
 
         let mut entry = StreamEntry::new(config);

@@ -139,6 +139,43 @@ pub(crate) enum ExistingCreateDisposition {
     Conflict(Error),
 }
 
+/// Resolved action for a root-create call after evaluating any existing stream.
+pub(crate) enum RootCreateAction {
+    /// No existing stream at this path — caller should create a fresh entry.
+    Create,
+    /// Existing stream has expired and its storage must be reclaimed before
+    /// the new entry is written.
+    CreateAfterExpiredCleanup,
+    /// Existing stream matches the requested config — caller should return an
+    /// idempotent success.
+    AlreadyExists,
+}
+
+/// Resolve `evaluate_root_create` into a three-state action for the caller.
+///
+/// Returns `Err(..)` directly for conflict dispositions so callers don't
+/// have to match the full `ExistingCreateDisposition` enum at every call site.
+pub(crate) fn resolve_root_create(
+    name: &str,
+    existing: Option<(&StreamConfig, StreamState, u32)>,
+    requested_config: &StreamConfig,
+) -> Result<RootCreateAction> {
+    let Some((existing_config, existing_state, existing_ref_count)) = existing else {
+        return Ok(RootCreateAction::Create);
+    };
+    match evaluate_root_create(
+        name,
+        existing_config,
+        existing_state,
+        existing_ref_count,
+        requested_config,
+    ) {
+        ExistingCreateDisposition::RemoveExpired => Ok(RootCreateAction::CreateAfterExpiredCleanup),
+        ExistingCreateDisposition::AlreadyExists => Ok(RootCreateAction::AlreadyExists),
+        ExistingCreateDisposition::Conflict(err) => Err(err),
+    }
+}
+
 /// Decide how `PUT` should behave for an existing non-fork stream path.
 #[must_use]
 pub(crate) fn evaluate_root_create(
