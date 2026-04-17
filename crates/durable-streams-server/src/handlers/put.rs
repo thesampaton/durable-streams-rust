@@ -1,9 +1,11 @@
+use crate::handlers::common::{
+    StreamResponse, extract_messages, parse_stream_closed, read_body, with_instance,
+};
 use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
-use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::{ProblemResponse, Result, request_instance};
+use crate::protocol::problem::{ProblemResponse, Result};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
 use crate::storage::{CreateStreamResult, CreateWithDataResult, Storage, StreamConfig};
@@ -11,7 +13,7 @@ use axum::{
     Extension,
     body::Body,
     extract::{OriginalUri, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
@@ -29,12 +31,6 @@ use std::sync::Arc;
 /// Returns error if Content-Type is explicitly provided but empty,
 /// both TTL and Expires-At are provided, TTL format is invalid, or stream
 /// exists with different configuration.
-///
-/// # Panics
-///
-/// Panics if validated content-type or offset strings fail to parse into
-/// header values, which should never happen with valid inputs.
-#[allow(clippy::too_many_lines)]
 pub async fn create_stream<S: Storage>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
@@ -44,183 +40,165 @@ pub async fn create_stream<S: Storage>(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response> {
-    let instance = request_instance(&original_uri);
-    let result = async {
-        // Read body (PUT may include initial data)
-        let body_bytes =
-            axum::body::to_bytes(body, usize::MAX)
-                .await
-                .map_err(|e| Error::InvalidHeader {
-                    header: "Content-Length".to_string(),
-                    reason: format!("Failed to read body: {e}"),
-                })?;
+    with_instance(original_uri, || async move {
+        let body_bytes = read_body(body).await?;
+        let normalized_ct = parse_content_type(&headers)?;
+        let created_closed = parse_stream_closed(&headers);
+        let config = build_config(&headers, normalized_ct.clone(), created_closed)?;
 
-        // Parse Content-Type: optional, defaults to application/octet-stream
-        let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
-
-        // Reject explicitly-provided but empty Content-Type
-        if let Some(ct) = content_type
-            && ct.trim().is_empty()
-        {
-            return Err(ProblemResponse::from(Error::InvalidHeader {
-                header: "Content-Type".to_string(),
-                reason: "empty value".to_string(),
-            }));
-        }
-
-        let normalized_ct = content_type.map_or_else(
-            || "application/octet-stream".to_string(),
-            headers::normalize_content_type,
-        );
-
-        // Parse optional TTL
-        let ttl_seconds =
-            if let Some(ttl_value) = headers.get(names::STREAM_TTL).and_then(|v| v.to_str().ok()) {
-                Some(headers::parse_ttl(ttl_value)?)
-            } else {
-                None
-            };
-
-        // Parse optional Expires-At
-        let expires_at = if let Some(expires_value) = headers
-            .get(names::STREAM_EXPIRES_AT)
-            .and_then(|v| v.to_str().ok())
-        {
-            Some(headers::parse_expires_at(expires_value)?)
-        } else {
-            None
-        };
-
-        // Reject both TTL and Expires-At
-        if ttl_seconds.is_some() && expires_at.is_some() {
-            return Err(ProblemResponse::from(Error::ConflictingExpiration));
-        }
-
-        // Parse optional Stream-Closed
-        let created_closed = headers
-            .get(names::STREAM_CLOSED)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(headers::parse_bool);
-
-        // Build stream config
-        let mut config = StreamConfig::new(normalized_ct.clone());
-
-        if let Some(ttl) = ttl_seconds {
-            let expires_at =
-                Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
-            config = config.with_expires_at(expires_at);
-            config = config.with_ttl(ttl);
-        } else if let Some(expires) = expires_at {
-            config = config.with_expires_at(expires);
-        }
-
-        if created_closed {
-            config = config.with_created_closed(true);
-        }
-
-        // ── Fork branch ──────────────────────────────────────────────
-        let forked_from = headers
-            .get(names::STREAM_FORKED_FROM)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-        let fork_offset_raw = headers
-            .get(names::STREAM_FORK_OFFSET)
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-
-        if let Some(forked_from_value) = forked_from {
-            // Strip stream_base_path prefix to get the source stream name
-            let source_name = strip_stream_base_path(&forked_from_value, &stream_base_path);
-
-            // Parse optional fork offset
-            let fork_offset = if let Some(ref raw) = fork_offset_raw {
-                Some(Offset::from_str(raw)?)
-            } else {
-                None
-            };
-
-            let create_result = storage
-                .create_fork(&name, &source_name, fork_offset.as_ref(), config)
-                .map_err(ProblemResponse::from)?;
-
-            // After fork creation, read the fork metadata for response headers
-            let meta = storage.head(&name)?;
-
-            let status = if matches!(create_result, CreateStreamResult::Created) {
-                StatusCode::CREATED
-            } else {
-                StatusCode::OK
-            };
-
-            let location = build_location_url(&request_origin, &stream_base_path, &name);
-
-            let mut response_headers = HeaderMap::new();
-            response_headers.insert("content-type", meta.config.content_type.parse().unwrap());
-            response_headers.insert(
-                names::STREAM_NEXT_OFFSET,
-                HeaderValue::from_bytes(meta.next_offset.as_str().as_bytes()).unwrap(),
-            );
-            response_headers.insert("location", location.parse().unwrap());
-
-            if meta.closed {
-                response_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
-            }
-
-            return Ok((status, response_headers).into_response());
-        }
-
-        // ── Standard (non-fork) create branch ────────────────────────
-
-        // Parse body into messages BEFORE creating the stream so that
-        // failures (e.g. invalid JSON) never leave an orphaned stream.
-        let messages = if body_bytes.is_empty() {
-            vec![]
-        } else if json_mode::is_json_content_type(&normalized_ct) {
-            // Empty JSON arrays produce no messages — that's fine for PUT
-            json_mode::process_append(&body_bytes)?
-        } else {
-            vec![body_bytes]
-        };
-
-        // Atomic create + append + close. If commit_messages fails (e.g.
-        // memory limit), the stream is never inserted. If created_closed,
-        // the entry is closed before it becomes visible to other operations.
-        let create_with_data_result = storage
-            .create_stream_with_data(&name, config, messages, created_closed)
-            .map_err(ProblemResponse::from)?;
-
-        let CreateWithDataResult {
-            status: create_status,
-            next_offset,
-            closed,
-        } = create_with_data_result;
-
-        let status = if matches!(create_status, CreateStreamResult::Created) {
-            StatusCode::CREATED
-        } else {
-            StatusCode::OK
-        };
-
-        // Build absolute Location URL
         let location = build_location_url(&request_origin, &stream_base_path, &name);
 
-        let mut response_headers = HeaderMap::new();
-        response_headers.insert("content-type", normalized_ct.parse().unwrap());
-        response_headers.insert(
-            names::STREAM_NEXT_OFFSET,
-            HeaderValue::from_bytes(next_offset.as_str().as_bytes()).unwrap(),
-        );
-        response_headers.insert("location", location.parse().unwrap());
-
-        if closed {
-            response_headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
+        if let Some(forked_from) = headers
+            .get(names::STREAM_FORKED_FROM)
+            .and_then(|v| v.to_str().ok())
+        {
+            create_fork_stream(
+                &storage,
+                &name,
+                forked_from,
+                headers
+                    .get(names::STREAM_FORK_OFFSET)
+                    .and_then(|v| v.to_str().ok()),
+                &stream_base_path,
+                config,
+                &location,
+            )
+        } else {
+            create_standard_stream(
+                &storage,
+                &name,
+                body_bytes,
+                &normalized_ct,
+                config,
+                created_closed,
+                &location,
+            )
         }
+    })
+    .await
+}
 
-        Ok((status, response_headers).into_response())
+/// Parse Content-Type, defaulting to application/octet-stream when missing,
+/// rejecting an explicitly empty value.
+fn parse_content_type(headers: &HeaderMap) -> Result<String> {
+    let raw = headers.get("content-type").and_then(|v| v.to_str().ok());
+    if let Some(ct) = raw
+        && ct.trim().is_empty()
+    {
+        return Err(ProblemResponse::from(Error::InvalidHeader {
+            header: "Content-Type".to_string(),
+            reason: "empty value".to_string(),
+        }));
     }
-    .await;
+    Ok(raw.map_or_else(
+        || "application/octet-stream".to_string(),
+        headers::normalize_content_type,
+    ))
+}
 
-    result.map_err(|problem| problem.with_instance(instance))
+/// Build the `StreamConfig` from headers, enforcing the TTL/Expires-At
+/// mutual exclusion.
+fn build_config(
+    headers: &HeaderMap,
+    content_type: String,
+    created_closed: bool,
+) -> Result<StreamConfig> {
+    let ttl_seconds = match headers.get(names::STREAM_TTL).and_then(|v| v.to_str().ok()) {
+        Some(value) => Some(headers::parse_ttl(value)?),
+        None => None,
+    };
+    let expires_at = match headers
+        .get(names::STREAM_EXPIRES_AT)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(value) => Some(headers::parse_expires_at(value)?),
+        None => None,
+    };
+    if ttl_seconds.is_some() && expires_at.is_some() {
+        return Err(ProblemResponse::from(Error::ConflictingExpiration));
+    }
+
+    let mut config = StreamConfig::new(content_type);
+    if let Some(ttl) = ttl_seconds {
+        let computed_expires =
+            Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
+        config = config.with_expires_at(computed_expires).with_ttl(ttl);
+    } else if let Some(expires) = expires_at {
+        config = config.with_expires_at(expires);
+    }
+
+    if created_closed {
+        config = config.with_created_closed(true);
+    }
+
+    Ok(config)
+}
+
+/// Handle a fork-create request (Stream-Forked-From present).
+fn create_fork_stream<S: Storage>(
+    storage: &Arc<S>,
+    name: &str,
+    forked_from: &str,
+    fork_offset_raw: Option<&str>,
+    stream_base_path: &str,
+    config: StreamConfig,
+    location: &str,
+) -> Result<Response> {
+    let source_name = strip_stream_base_path(forked_from, stream_base_path);
+    let fork_offset = match fork_offset_raw {
+        Some(raw) => Some(Offset::from_str(raw)?),
+        None => None,
+    };
+
+    let create_result = storage
+        .create_fork(name, &source_name, fork_offset.as_ref(), config)
+        .map_err(ProblemResponse::from)?;
+
+    let meta = storage.head(name)?;
+    Ok(StreamResponse::new(created_status(create_result))
+        .content_type(&meta.config.content_type)
+        .next_offset(&meta.next_offset)
+        .location(location)
+        .closed_if(meta.closed)
+        .into_response())
+}
+
+/// Handle a standard (non-fork) create request.
+fn create_standard_stream<S: Storage>(
+    storage: &Arc<S>,
+    name: &str,
+    body: bytes::Bytes,
+    normalized_ct: &str,
+    config: StreamConfig,
+    created_closed: bool,
+    location: &str,
+) -> Result<Response> {
+    // Parse body into messages BEFORE creating the stream so that failures
+    // (e.g. invalid JSON) never leave an orphaned stream.
+    let messages = extract_messages(body, normalized_ct)?;
+
+    let CreateWithDataResult {
+        status: create_status,
+        next_offset,
+        closed,
+    } = storage
+        .create_stream_with_data(name, config, messages, created_closed)
+        .map_err(ProblemResponse::from)?;
+
+    Ok(StreamResponse::new(created_status(create_status))
+        .content_type(normalized_ct)
+        .next_offset(&next_offset)
+        .location(location)
+        .closed_if(closed)
+        .into_response())
+}
+
+fn created_status(result: CreateStreamResult) -> StatusCode {
+    if matches!(result, CreateStreamResult::Created) {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    }
 }
 
 /// Strip the stream base path prefix from a fork source header value.
@@ -235,12 +213,9 @@ fn strip_stream_base_path(value: &str, stream_base_path: &str) -> String {
         format!("{stream_base_path}/")
     };
 
-    if let Some(stripped) = value.strip_prefix(&prefix) {
-        stripped.to_string()
-    } else {
-        // If the value doesn't start with the prefix, use it as-is
-        value.to_string()
-    }
+    value
+        .strip_prefix(&prefix)
+        .map_or_else(|| value.to_string(), str::to_string)
 }
 
 /// Build an absolute Location URL from the trusted request origin.

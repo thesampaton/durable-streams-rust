@@ -1,9 +1,9 @@
+use crate::handlers::common::{StreamResponse, header_value, with_instance};
 use crate::protocol::cursor;
 use crate::protocol::error::Error;
-use crate::protocol::headers::names;
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::{Result, request_instance};
+use crate::protocol::problem::Result;
 use crate::protocol::sse::{self, ControlPayload};
 use crate::protocol::stream_name::StreamName;
 use crate::router::ReadStreamConfig;
@@ -48,11 +48,6 @@ pub struct ReadQuery {
 ///
 /// Returns error if stream doesn't exist, offset is invalid,
 /// or storage operation fails.
-///
-/// # Panics
-///
-/// Panics if validated header values fail to parse into `HeaderValue`,
-/// which should never happen with valid inputs.
 pub async fn read_stream<S: Storage + 'static>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
@@ -66,75 +61,74 @@ pub async fn read_stream<S: Storage + 'static>(
         sse_reconnect_interval_secs: reconnect_interval_secs,
         shutdown,
     } = read_config;
-    let instance = request_instance(&original_uri);
-    let result = async {
-        // Resolve offset: live modes require explicit offset, catch-up defaults to "-1"
-        let raw_offset = if let Some(ref live) = query.live {
-            match query.offset {
-                Some(ref o) => o.clone(),
-                None => {
-                    return Err(Error::InvalidHeader {
-                        header: "offset".to_string(),
-                        reason: format!("offset query parameter is required for live={live} mode"),
-                    }
-                    .into());
-                }
-            }
-        } else {
-            query.offset.clone().unwrap_or_else(|| "-1".to_string())
-        };
-
+    with_instance(original_uri, || async move {
+        let raw_offset = resolve_offset(&query)?;
         let offset = Offset::from_str(&raw_offset)?;
         let metadata = storage.head(&name)?;
         let content_type = metadata.config.content_type.clone();
 
-        if let Some(ref live) = query.live {
-            match live.as_str() {
-                "long-poll" => {
-                    let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
-                    read_long_poll(
-                        &storage,
-                        &ReadContext {
-                            name: &name,
-                            offset: &offset,
-                            raw_offset: &raw_offset,
-                            if_none_match,
-                            content_type: &content_type,
-                        },
-                        timeout,
-                        shutdown,
-                    )
-                    .await
-                }
-                "sse" => read_sse(
-                    storage,
-                    name,
-                    &offset,
-                    &content_type,
-                    reconnect_interval_secs,
-                    shutdown,
-                ),
-                other => Err(Error::InvalidHeader {
-                    header: "live".to_string(),
-                    reason: format!("unsupported live mode: {other}"),
-                }
-                .into()),
-            }
-        } else {
-            let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
-            read_catch_up(
+        let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
+
+        match query.live.as_deref() {
+            None => read_catch_up(
                 &storage,
                 &name,
                 &offset,
                 &raw_offset,
                 if_none_match,
                 &content_type,
-            )
+            ),
+            Some("long-poll") => {
+                read_long_poll(
+                    &storage,
+                    &ReadContext {
+                        name: &name,
+                        offset: &offset,
+                        raw_offset: &raw_offset,
+                        if_none_match,
+                        content_type: &content_type,
+                    },
+                    timeout,
+                    shutdown,
+                )
+                .await
+            }
+            Some("sse") => read_sse(
+                storage,
+                name,
+                &offset,
+                &content_type,
+                reconnect_interval_secs,
+                shutdown,
+            ),
+            Some(other) => Err(Error::InvalidHeader {
+                header: "live".to_string(),
+                reason: format!("unsupported live mode: {other}"),
+            }
+            .into()),
         }
-    }
-    .await;
+    })
+    .await
+}
 
-    result.map_err(|problem| problem.with_instance(instance))
+/// Resolve the starting offset from query params.
+///
+/// Live modes require an explicit `offset`; catch-up defaults to `-1`.
+fn resolve_offset(query: &ReadQuery) -> Result<String> {
+    if let Some(ref live) = query.live {
+        query.offset.clone().ok_or_else(|| {
+            Error::InvalidHeader {
+                header: "offset".to_string(),
+                reason: format!("offset query parameter is required for live={live} mode"),
+            }
+            .into()
+        })
+    } else {
+        Ok(query
+            .offset
+            .clone()
+            .unwrap_or_else(|| Offset::START.to_string()))
+    }
 }
 
 /// Catch-up mode: immediate read of all available data.
@@ -146,17 +140,11 @@ fn read_catch_up<S: Storage>(
     if_none_match: Option<&str>,
     content_type: &str,
 ) -> Result<Response> {
-    // Read from storage (single snapshot for offsets/closed state)
     let read_result = storage.read(name, offset)?;
-
-    // Check 304 Not Modified
-    let etag = generate_etag(raw_offset, &read_result);
-    if let Some(client_etag) = if_none_match
-        && client_etag == etag
-    {
-        return Ok(build_304_response(&read_result));
+    let (etag, not_modified) = compute_etag(&read_result, raw_offset, if_none_match);
+    if let Some(response) = not_modified {
+        return Ok(response);
     }
-
     Ok(build_data_response(&read_result, content_type, &etag, None))
 }
 
@@ -189,15 +177,11 @@ async fn read_long_poll<S: Storage>(
 
     let read_result = storage.read(name, offset)?;
 
-    // Check 304 Not Modified (same as catch-up)
-    let etag = generate_etag(raw_offset, &read_result);
-    if let Some(client_etag) = if_none_match
-        && client_etag == etag
-    {
-        return Ok(build_304_response(&read_result));
+    let (etag, not_modified) = compute_etag(&read_result, raw_offset, if_none_match);
+    if let Some(response) = not_modified {
+        return Ok(response);
     }
 
-    // Data available → return immediately (like catch-up + cursor)
     if !read_result.messages.is_empty() {
         let cursor_val = cursor::generate(&read_result.next_offset);
         return Ok(build_data_response(
@@ -222,17 +206,14 @@ async fn read_long_poll<S: Storage>(
 
     tokio::select! {
         _ = receiver.recv() => {
-            // Data or close event — re-read from resolved tail position
             handle_long_poll_wake(storage, name, &tail_offset, &tail_offset_str, content_type)
         }
         () = tokio::time::sleep(timeout) => {
-            // Timeout — return 204 with current position
             let read_result = storage.read(name, &tail_offset)?;
             let is_closed = read_result.closed && read_result.at_tail;
             Ok(build_204_response(&read_result.next_offset, is_closed))
         }
         () = shutdown.cancelled() => {
-            // Graceful shutdown — return 204 so the client can reconnect
             let read_result = storage.read(name, &tail_offset)?;
             let is_closed = read_result.closed && read_result.at_tail;
             Ok(build_204_response(&read_result.next_offset, is_closed))
@@ -254,15 +235,15 @@ fn read_sse<S: Storage + 'static>(
     reconnect_interval_secs: u64,
     shutdown: CancellationToken,
 ) -> Result<Response> {
-    let is_binary = sse::is_binary_content_type(content_type);
-    let is_json = json_mode::is_json_content_type(content_type);
+    let encoding = SseEncoding {
+        is_binary: sse::is_binary_content_type(content_type),
+        is_json: json_mode::is_json_content_type(content_type),
+    };
 
-    // Subscribe before read to avoid missing notifications
     let receiver = storage
         .subscribe(&name)
         .ok_or_else(|| Error::NotFound(name.clone()))?;
 
-    // Initial read to get current state
     let read_result = storage.read(&name, offset)?;
 
     let byte_stream = build_sse_byte_stream(
@@ -270,25 +251,22 @@ fn read_sse<S: Storage + 'static>(
         name,
         read_result,
         receiver,
-        SseEncoding { is_binary, is_json },
+        encoding,
         reconnect_interval_secs,
         shutdown,
     );
 
-    let body = Body::from_stream(byte_stream);
+    let mut response = StreamResponse::new(StatusCode::OK)
+        .content_type("text/event-stream")
+        .body(Body::from_stream(byte_stream));
 
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", "text/event-stream".parse().unwrap());
-
-    if is_binary {
-        headers.insert("stream-sse-data-encoding", "base64".parse().unwrap());
+    if encoding.is_binary {
+        response = response.header("stream-sse-data-encoding", header_value("base64"));
     }
 
-    Ok((StatusCode::OK, headers, body).into_response())
+    Ok(response.into_response())
 }
 
-/// Build a byte stream that yields raw SSE frame strings.
-///
 /// SSE data encoding derived from the stream's content type.
 #[derive(Clone, Copy)]
 struct SseEncoding {
@@ -296,6 +274,20 @@ struct SseEncoding {
     is_json: bool,
 }
 
+/// Encode a read result as SSE frames: optional `data` frame + `control` frame.
+fn encode_read_as_sse_frames(read_result: &ReadResult, encoding: SseEncoding) -> Vec<String> {
+    let mut frames = Vec::with_capacity(2);
+    let data_frames =
+        sse::format_data_frames(&read_result.messages, encoding.is_binary, encoding.is_json);
+    if !data_frames.is_empty() {
+        frames.push(data_frames);
+    }
+    frames.push(sse::format_control_frame(&build_sse_control(read_result)));
+    frames
+}
+
+/// Build a byte stream that yields raw SSE frame strings.
+///
 /// Manages keep-alive, idle timeout, and the subscribe-before-read pattern.
 fn build_sse_byte_stream<S: Storage + 'static>(
     storage: Arc<S>,
@@ -308,17 +300,11 @@ fn build_sse_byte_stream<S: Storage + 'static>(
 ) -> impl futures_util::stream::Stream<Item = std::result::Result<String, std::convert::Infallible>> + Send
 {
     async_stream::stream! {
-        let SseEncoding { is_binary, is_json } = encoding;
         let read_result = initial_read;
 
-        // Emit initial data + control (JSON messages batched into one event)
-        let data_frames = sse::format_data_frames(&read_result.messages, is_binary, is_json);
-        if !data_frames.is_empty() {
-            yield Ok(data_frames);
+        for frame in encode_read_as_sse_frames(&read_result, encoding) {
+            yield Ok(frame);
         }
-
-        let control = build_sse_control(&read_result);
-        yield Ok(sse::format_control_frame(&control));
 
         // If closed at tail, we're done
         if read_result.closed && read_result.at_tail {
@@ -346,19 +332,15 @@ fn build_sse_byte_stream<S: Storage + 'static>(
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             // Channel closed — final read + emit + end
                             if let Ok(rr) = storage.read(&name, &tail_offset) {
-                                let data_frames = sse::format_data_frames(&rr.messages, is_binary, is_json);
-                                if !data_frames.is_empty() {
-                                    yield Ok(data_frames);
+                                for frame in encode_read_as_sse_frames(&rr, encoding) {
+                                    yield Ok(frame);
                                 }
-                                let ctrl = build_sse_control(&rr);
-                                yield Ok(sse::format_control_frame(&ctrl));
                             }
                             return;
                         }
                     }
                 }
                 () = tokio::time::sleep(keepalive_interval) => {
-                    // Keep-alive comment frame
                     yield Ok(sse::format_keepalive_frame().to_string());
                     continue;
                 }
@@ -372,7 +354,6 @@ fn build_sse_byte_stream<S: Storage + 'static>(
                     return;
                 }
                 () = shutdown.cancelled() => {
-                    // Graceful shutdown — end the SSE stream cleanly
                     return;
                 }
             }
@@ -382,13 +363,9 @@ fn build_sse_byte_stream<S: Storage + 'static>(
                 return;
             };
 
-            let data_frames = sse::format_data_frames(&rr.messages, is_binary, is_json);
-            if !data_frames.is_empty() {
-                yield Ok(data_frames);
+            for frame in encode_read_as_sse_frames(&rr, encoding) {
+                yield Ok(frame);
             }
-
-            let ctrl = build_sse_control(&rr);
-            yield Ok(sse::format_control_frame(&ctrl));
 
             // Keep idle-close tied to stream activity (new data), not keepalive ticks.
             if !rr.messages.is_empty()
@@ -454,6 +431,21 @@ fn handle_long_poll_wake<S: Storage>(
     ))
 }
 
+/// Compute the etag for this read and a 304 response if the client's
+/// `If-None-Match` already matches.
+fn compute_etag(
+    read_result: &ReadResult,
+    raw_offset: &str,
+    if_none_match: Option<&str>,
+) -> (String, Option<Response>) {
+    let etag = generate_etag(raw_offset, read_result);
+    let not_modified = match if_none_match {
+        Some(client) if client == etag => Some(build_304_response(read_result)),
+        _ => None,
+    };
+    (etag, not_modified)
+}
+
 /// Generate `ETag` from read result.
 ///
 /// Format: `"{start_offset}:{end_offset}"` or `"{start_offset}:{end_offset}:c"` if closed at tail.
@@ -468,18 +460,15 @@ fn generate_etag(start_offset: &str, read_result: &ReadResult) -> String {
 
 /// Build a 304 Not Modified response.
 fn build_304_response(read_result: &ReadResult) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        names::STREAM_NEXT_OFFSET,
-        axum::http::HeaderValue::from_bytes(read_result.next_offset.as_str().as_bytes()).unwrap(),
-    );
-    headers.insert(names::STREAM_UP_TO_DATE, "true".parse().unwrap());
-    (StatusCode::NOT_MODIFIED, headers).into_response()
+    StreamResponse::new(StatusCode::NOT_MODIFIED)
+        .next_offset(&read_result.next_offset)
+        .up_to_date(true)
+        .into_response()
 }
 
 /// Build a 200 OK response with message data.
 ///
-/// If `cursor` is `Some`, includes `Stream-Cursor` header (long-poll mode).
+/// If `cursor_val` is `Some`, includes `Stream-Cursor` header (long-poll mode).
 fn build_data_response(
     read_result: &ReadResult,
     content_type: &str,
@@ -487,50 +476,33 @@ fn build_data_response(
     cursor_val: Option<&str>,
 ) -> Response {
     let body = build_body(read_result, content_type);
-
-    let mut headers = HeaderMap::new();
-    headers.insert("content-type", content_type.parse().unwrap());
-    headers.insert(
-        names::STREAM_NEXT_OFFSET,
-        axum::http::HeaderValue::from_bytes(read_result.next_offset.as_str().as_bytes()).unwrap(),
-    );
-    headers.insert(
-        names::STREAM_UP_TO_DATE,
-        (if read_result.at_tail { "true" } else { "false" })
-            .parse()
-            .unwrap(),
-    );
-    headers.insert("etag", etag.parse().unwrap());
-
     let is_closed_at_tail = read_result.closed && read_result.at_tail;
-    if is_closed_at_tail {
-        headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
-    }
+
+    let mut response = StreamResponse::new(StatusCode::OK)
+        .content_type(content_type)
+        .next_offset(&read_result.next_offset)
+        .up_to_date(read_result.at_tail)
+        .etag(etag)
+        .closed_if(is_closed_at_tail)
+        .body(Body::from(body));
 
     if let Some(c) = cursor_val {
-        headers.insert(names::STREAM_CURSOR, c.parse().unwrap());
+        response = response.cursor(c);
     }
 
-    (StatusCode::OK, headers, body).into_response()
+    response.into_response()
 }
 
 /// Build a 204 No Content response for long-poll timeout or closed stream.
 fn build_204_response(next_offset: &Offset, is_closed: bool) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        names::STREAM_NEXT_OFFSET,
-        axum::http::HeaderValue::from_bytes(next_offset.as_str().as_bytes()).unwrap(),
-    );
-    headers.insert(names::STREAM_UP_TO_DATE, "true".parse().unwrap());
-
     let cursor_val = cursor::generate(next_offset);
-    if is_closed {
-        headers.insert(names::STREAM_CLOSED, "true".parse().unwrap());
-        // Cursor MAY be omitted when closed per spec, but including it is harmless
-    }
-    headers.insert(names::STREAM_CURSOR, cursor_val.parse().unwrap());
-
-    (StatusCode::NO_CONTENT, headers).into_response()
+    StreamResponse::new(StatusCode::NO_CONTENT)
+        .next_offset(next_offset)
+        .up_to_date(true)
+        .closed_if(is_closed)
+        // Cursor MAY be omitted when closed per spec, but including it is harmless.
+        .cursor(&cursor_val)
+        .into_response()
 }
 
 /// Build response body from read result messages.
