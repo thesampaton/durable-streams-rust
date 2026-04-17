@@ -4,12 +4,13 @@
 //! `Storage` trait definition and public types.
 
 use crate::protocol::error::{Error, Result};
+use crate::protocol::offset::Offset;
 use crate::protocol::producer::ProducerHeaders;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
-use super::{StreamConfig, StreamState, fork};
+use super::{StreamConfig, StreamMetadata, StreamState, fork};
 
 /// Duration after which stale producer state is cleaned up (7 days).
 pub(crate) const PRODUCER_STATE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
@@ -92,6 +93,36 @@ pub(crate) fn cleanup_stale_producers(producers: &mut HashMap<String, ProducerSt
 /// memory for fork bookkeeping.
 pub(crate) fn is_stream_visible(config: &StreamConfig, state: StreamState) -> bool {
     !is_stream_expired(config) && state == StreamState::Active
+}
+
+/// Assemble a [`StreamMetadata`] from primitive fields.
+///
+/// The three backends persist stream state in different shapes
+/// (`memory::StreamEntry`, `file::StreamEntry`, `acid::StoredStreamMeta`) — they
+/// cannot share a struct because each carries backend-local resources (notifier
+/// channels, file handles, index vectors). This helper keeps the projection
+/// into the shared [`StreamMetadata`] return type in one place so a field
+/// addition or rename to [`StreamMetadata`] is a single edit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_stream_metadata(
+    config: StreamConfig,
+    next_read_seq: u64,
+    next_byte_offset: u64,
+    closed: bool,
+    total_bytes: u64,
+    message_count: u64,
+    created_at: DateTime<Utc>,
+    updated_at: Option<DateTime<Utc>>,
+) -> StreamMetadata {
+    StreamMetadata {
+        config,
+        next_offset: Offset::new(next_read_seq, next_byte_offset),
+        closed,
+        total_bytes,
+        message_count,
+        created_at,
+        updated_at,
+    }
 }
 
 /// Shared pre-persistence validation for `append` / `batch_append`.
