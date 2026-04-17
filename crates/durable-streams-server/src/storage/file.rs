@@ -1,8 +1,47 @@
-//! File-backed storage using one append-only log per stream.
+//! Local-filesystem storage built from one append-only log per stream.
 //!
-//! This backend keeps an in-memory index for fast reads and stores stream data
-//! beneath a caller-supplied root directory. It is a good fit when you want
-//! local persistence without introducing an external database.
+//! [`FileStorage`] is the implementation behind the config-level
+//! [`crate::config::StorageMode::FileFast`] and
+//! [`crate::config::StorageMode::FileDurable`] modes. Both use the same simple
+//! layout on disk:
+//!
+//! - one directory per stream under the configured storage root
+//! - `data.log` containing length-prefixed message payloads
+//! - `meta.json` containing stream metadata, producer state, and fork lineage
+//!
+//! At runtime the backend rebuilds an in-memory index from `data.log` so reads
+//! remain fast while the on-disk format stays straightforward to inspect and
+//! recover.
+//!
+//! # FileFast vs FileDurable
+//!
+//! The two file modes differ only in how aggressively writes are forced to
+//! stable storage:
+//!
+//! - `file-fast` skips `fsync`/`fdatasync` on each append and favors throughput
+//!   and lower tail latency
+//! - `file-durable` performs a sync on each append and favors simpler
+//!   crash-recovery expectations at the cost of write latency
+//!
+//! In both cases the backend is still "plain files plus an in-memory index";
+//! the difference is durability policy, not data model or on-disk shape.
+//!
+//! # When To Use This Backend
+//!
+//! Choose [`FileStorage`] when you want local persistence with minimal
+//! operational overhead and a storage format that is easy to reason about.
+//! This is often a good fit for:
+//!
+//! - single-node deployments
+//! - development and staging environments
+//! - simpler production setups where filesystem-backed append logs are
+//!   sufficient
+//!
+//! If you also want filesystem persistence but need transactional updates
+//! across metadata and messages, prefer [`super::acid::AcidStorage`] with
+//! [`crate::config::AcidBackend::File`]. That mode is also disk-backed, but it
+//! stores data in redb databases rather than per-stream log files and is aimed
+//! at stronger crash consistency rather than on-disk simplicity.
 
 mod filesys;
 mod reads;

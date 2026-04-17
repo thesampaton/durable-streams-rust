@@ -1,3 +1,9 @@
+//! In-memory storage used for tests, development, and ephemeral deployments.
+//!
+//! [`InMemoryStorage`] keeps the full stream set in process memory and shares
+//! the same [`super::Storage`] contract as the disk-backed backends, but
+//! without persistence across restarts.
+
 use super::{
     CreateStreamResult, ForkInfo, Message, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
     ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata, StreamState,

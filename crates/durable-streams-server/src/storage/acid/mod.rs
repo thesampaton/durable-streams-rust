@@ -1,8 +1,21 @@
 //! Crash-resilient redb-backed storage with sharded databases.
 //!
-//! This backend stores stream metadata and messages in redb tables and uses a
-//! stable hash-based shard layout so a stream always maps to the same database
-//! file after restarts.
+//! [`AcidStorage`] is the implementation behind
+//! [`crate::config::StorageMode::Acid`]. It stores stream metadata and
+//! messages in redb tables and uses a stable hash-based shard layout so a
+//! stream always maps to the same database after restarts.
+//!
+//! This backend comes in two persistence variants via
+//! [`crate::config::AcidBackend`]:
+//!
+//! - [`crate::config::AcidBackend::File`] persists redb shard files beneath
+//!   the configured storage directory
+//! - [`crate::config::AcidBackend::InMemory`] keeps the same transactional data
+//!   model in memory only
+//!
+//! Compared with [`super::file::FileStorage`], the acid backend trades
+//! on-disk simplicity for transactional updates and stronger crash-consistency
+//! behavior across metadata, message writes, and fork bookkeeping.
 
 mod layout;
 mod storage_impl;
