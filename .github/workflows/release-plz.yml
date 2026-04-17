@@ -9,6 +9,14 @@ name: Release PR (changelog)
 # and `git_release_enable = false` as belt-and-suspenders so even a
 # misconfigured future workflow step can't accidentally publish.
 #
+# Authentication uses a GitHub App installation token (secrets
+# `RELEASE_PLZ_APP_ID` + `RELEASE_PLZ_APP_PRIVATE_KEY`). This matters
+# because PRs created with the default `GITHUB_TOKEN` do NOT trigger
+# workflow runs (GitHub anti-loop safeguard) — so the CI `CI pass` gate
+# would never fire on the release PR and the merge button would stay
+# blocked. Installation tokens from an app are treated as a distinct
+# actor, so CI runs normally on release-plz PRs.
+#
 # When you actually want to release:
 #   1. Merge the open release PR (bumps version + finalises CHANGELOG on trunk).
 #   2. Tag the commit with `<crate>-v<version>` and push the tag.
@@ -21,8 +29,9 @@ on:
     branches: [trunk]
 
 permissions:
-  pull-requests: write
-  contents: write
+  # Workflow-level permissions kept minimal — the GitHub App installation
+  # token issued below is what actually writes the release PR.
+  contents: read
 
 concurrency:
   group: release-plz-${{ github.ref }}
@@ -33,14 +42,20 @@ jobs:
     name: release-plz release-pr
     runs-on: ubuntu-latest
     steps:
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz release-pr
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
