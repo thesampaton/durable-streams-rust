@@ -27,12 +27,29 @@ if [[ "${DURABLE_STREAMS_SERVER_SKIP_LAUNCH:-0}" != "1" ]]; then
 
     "$launcher" &
     server_pid="$!"
-    sleep "${DURABLE_STREAMS_SERVER_STARTUP_DELAY:-2}"
 
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-        wait "$server_pid"
-        exit 1
-    fi
+    # Derive host/port from the server URL so we can wait for readiness
+    # instead of relying on a fixed sleep. The previous approach flaked in
+    # CI when `cargo run` had to compile before listening.
+    host_port="${server_url#*://}"
+    host_port="${host_port%%/*}"
+    host="${host_port%%:*}"
+    port="${host_port##*:}"
+
+    ready_timeout="${DURABLE_STREAMS_SERVER_READY_TIMEOUT:-60}"
+    deadline=$(( $(date +%s) + ready_timeout ))
+    until (echo > "/dev/tcp/${host}/${port}") 2>/dev/null; do
+        if ! kill -0 "$server_pid" 2>/dev/null; then
+            echo "server exited before becoming ready" >&2
+            wait "$server_pid" || true
+            exit 1
+        fi
+        if (( $(date +%s) >= deadline )); then
+            echo "server did not accept connections on ${host}:${port} within ${ready_timeout}s" >&2
+            exit 1
+        fi
+        sleep 0.2
+    done
 fi
 
 if [[ -z "$server_url" ]]; then

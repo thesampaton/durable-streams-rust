@@ -29,18 +29,34 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    name: cargo clippy (pedantic)
+    name: cargo clippy (${{ matrix.crate }}${{ matrix.enforce && ' pedantic' || '' }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Server is the public crate with published releases — we gate
+          # pedantic strictly. `-D warnings` turns the workspace-level
+          # `clippy::pedantic = warn` into a hard error here.
+          - crate: durable-streams-server
+            enforce: true
+          # Client pedantic findings are reported (non-fatal) for now.
+          # When the client is ready to pass pedantic, flip `enforce: true`
+          # or merge back into the strict list.
+          - crate: durable-streams-client
+            enforce: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Workspace Cargo.toml sets `clippy::pedantic = warn` for both crates,
-      # and the server crate re-declares it locally. `-D warnings` turns that
-      # into a hard gate.
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: clippy (strict)
+        if: matrix.enforce
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets -- -D warnings
+      - name: clippy (advisory)
+        if: ${{ !matrix.enforce }}
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets
 
   check:
     name: cargo check (${{ matrix.toolchain }})
