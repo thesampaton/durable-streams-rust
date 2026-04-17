@@ -107,3 +107,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm install
       - run: ./scripts/conformance/run-server-suite.sh
+
+  # Aggregate gate. Branch protection requires this single check — we don't
+  # have to keep the ruleset in sync with matrix leg names. If any upstream
+  # job fails, is cancelled, or is skipped, this job fails.
+  ci-pass:
+    name: CI pass
+    if: always()
+    needs: [fmt, clippy, check, test, doc, server-conformance]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all required jobs succeeded
+        run: |
+          echo "upstream job results: ${{ join(needs.*.result, ',') }}"
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}; then
+            echo "::error::one or more required jobs did not succeed"
+            exit 1
+          fi
