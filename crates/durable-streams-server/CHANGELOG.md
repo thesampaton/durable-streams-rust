@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/thesampaton/durable-streams-rust/compare/v0.3.0...v0.3.1) - 2026-04-17
+
+### Fixed
+
+- *(server)* rewrite cascade-delete loops as while-let
+
+### Other
+
+- add PR gates, pre-release workflow, and release-plz standing PR
+
 _No notable changes yet._
 
 ## [0.3.0] - 2026-04-15
