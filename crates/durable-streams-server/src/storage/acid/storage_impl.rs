@@ -6,9 +6,9 @@ use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
 use crate::storage::{
     CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendPrecheck,
-    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata, fork,
-    is_stream_expired, is_stream_visible, precheck_append, precheck_batch_append,
-    precheck_producer_append,
+    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata,
+    build_stream_metadata, fork, is_stream_expired, is_stream_visible, precheck_append,
+    precheck_batch_append, precheck_producer_append,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
@@ -319,15 +319,16 @@ impl Storage for AcidStorage {
 
         fork::check_stream_access(&meta.config, meta.state, name)?;
 
-        Ok(StreamMetadata {
-            config: meta.config,
-            next_offset: Offset::new(meta.next_read_seq, meta.next_byte_offset),
-            closed: meta.closed,
-            total_bytes: meta.total_bytes,
-            message_count: meta.next_read_seq,
-            created_at: meta.created_at,
-            updated_at: meta.updated_at,
-        })
+        Ok(build_stream_metadata(
+            meta.config,
+            meta.next_read_seq,
+            meta.next_byte_offset,
+            meta.closed,
+            meta.total_bytes,
+            meta.next_read_seq,
+            meta.created_at,
+            meta.updated_at,
+        ))
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -742,15 +743,16 @@ impl Storage for AcidStorage {
 
                 result.push((
                     name,
-                    StreamMetadata {
-                        config: meta.config,
-                        next_offset: Offset::new(meta.next_read_seq, meta.next_byte_offset),
-                        closed: meta.closed,
-                        total_bytes: meta.total_bytes,
-                        message_count: meta.next_read_seq,
-                        created_at: meta.created_at,
-                        updated_at: meta.updated_at,
-                    },
+                    build_stream_metadata(
+                        meta.config,
+                        meta.next_read_seq,
+                        meta.next_byte_offset,
+                        meta.closed,
+                        meta.total_bytes,
+                        meta.next_read_seq,
+                        meta.created_at,
+                        meta.updated_at,
+                    ),
                 ));
             }
         }

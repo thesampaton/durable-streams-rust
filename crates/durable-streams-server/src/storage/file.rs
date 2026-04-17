@@ -1184,15 +1184,16 @@ impl Storage for FileStorage {
 
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
-        Ok(StreamMetadata {
-            config: stream.config.clone(),
-            next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-            closed: stream.closed,
-            total_bytes: stream.total_bytes,
-            message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-            created_at: stream.created_at,
-            updated_at: stream.updated_at,
-        })
+        Ok(super::build_stream_metadata(
+            stream.config.clone(),
+            stream.next_read_seq,
+            stream.next_byte_offset,
+            stream.closed,
+            stream.total_bytes,
+            u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
+            stream.created_at,
+            stream.updated_at,
+        ))
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -1439,15 +1440,16 @@ impl Storage for FileStorage {
             }
             result.push((
                 name.clone(),
-                StreamMetadata {
-                    config: stream.config.clone(),
-                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-                    closed: stream.closed,
-                    total_bytes: stream.total_bytes,
-                    message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-                    created_at: stream.created_at,
-                    updated_at: stream.updated_at,
-                },
+                super::build_stream_metadata(
+                    stream.config.clone(),
+                    stream.next_read_seq,
+                    stream.next_byte_offset,
+                    stream.closed,
+                    stream.total_bytes,
+                    u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
+                    stream.created_at,
+                    stream.updated_at,
+                ),
             ));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
