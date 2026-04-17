@@ -14,8 +14,8 @@
 //!   model in memory only
 //!
 //! Compared with [`super::file::FileStorage`], the acid backend trades
-//! on-disk simplicity for transactional updates and stronger crash-consistency
-//! behavior across metadata, message writes, and fork bookkeeping.
+//! on-disk simplicity for transactional durability across metadata, message
+//! writes, and fork bookkeeping.
 
 mod layout;
 mod storage_impl;

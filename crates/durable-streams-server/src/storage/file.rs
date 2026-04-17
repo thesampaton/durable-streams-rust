@@ -41,7 +41,7 @@
 //! across metadata and messages, prefer [`super::acid::AcidStorage`] with
 //! [`crate::config::AcidBackend::File`]. That mode is also disk-backed, but it
 //! stores data in redb databases rather than per-stream log files and is aimed
-//! at stronger crash consistency rather than on-disk simplicity.
+//! at transactional durability rather than on-disk simplicity.
 
 mod filesys;
 mod reads;

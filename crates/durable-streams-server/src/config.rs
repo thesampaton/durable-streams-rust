@@ -52,9 +52,10 @@ pub enum StorageMode {
     FileDurable,
     /// Transactional redb-backed storage.
     ///
-    /// Choose this when you want stronger crash consistency for metadata and
-    /// message updates than the plain file-log modes provide. The concrete redb
-    /// persistence medium is controlled separately by [`AcidBackend`].
+    /// Choose this when you want stronger transactional durability for
+    /// metadata and message updates than the plain file-log modes provide.
+    /// The concrete redb persistence medium is controlled separately by
+    /// [`AcidBackend`].
     #[serde(alias = "redb")]
     Acid,
 }
