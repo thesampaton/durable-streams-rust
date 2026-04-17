@@ -76,7 +76,10 @@ impl RetryPolicy {
                 }
                 Err(error) if attempt < self.options.max_retries && error.is_retryable() => {
                     trace::record_error(&span, &error);
-                    span.record("retry.backoff_ms", u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
+                    span.record(
+                        "retry.backoff_ms",
+                        u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    );
                     warn!(
                         parent: &span,
                         event = "retry.scheduled",

@@ -1,0 +1,41 @@
+# release-plz configuration
+#
+# Intent: maintain a standing "release PR" that tracks unreleased changes
+# per crate, but DO NOT publish to crates.io, create git tags, or create
+# GitHub releases until we deliberately flip to active releases.
+#
+# The workflow at `.github/workflows/release-plz.yml` only runs the
+# `release-pr` subcommand, which opens/updates the standing PR. The
+# belt-and-suspenders below ensures that even a misconfigured future
+# `release` step would still not publish or tag anything for these crates.
+
+[workspace]
+# Don't include dependency bumps in the release PR.
+dependencies_update = false
+# Keep the PR title stable so we don't spawn a new PR every push.
+pr_name = "chore: release"
+# Note: the default changelog template produces
+# conventional-commit-style groupings (feat/fix/…), which does not match
+# the Keep a Changelog (Added/Changed/Fixed/Breaking Changes) style
+# currently used by `crates/durable-streams-server/CHANGELOG.md`. Since
+# nothing is actively being released yet, the standing release PR's
+# diff is indicative only; we can tune `changelog_config` to a
+# git-cliff template matching Keep a Changelog when we go live.
+
+[[package]]
+name = "durable-streams-server"
+changelog_path = "crates/durable-streams-server/CHANGELOG.md"
+changelog_update = true
+# Safety: never publish, tag, or cut a GitHub release from this automation
+# while we are in "maintain unreleased section only" mode.
+publish = false
+git_tag_enable = false
+git_release_enable = false
+
+[[package]]
+name = "durable-streams-client"
+# The client is `publish = false` in Cargo.toml and has no CHANGELOG yet.
+# Fully exclude it from release-plz processing until it is ready to
+# publish; flip `release` back to `true` (and add the matching config
+# above) when that day arrives.
+release = false

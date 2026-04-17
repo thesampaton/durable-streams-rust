@@ -8,7 +8,8 @@ plumbing around them.
 Current focus:
 
 - a clean, explicit Rust client library
-- a production-oriented Rust server with multiple storage backends
+- a production-oriented Rust server with multiple storage backends and
+  transport modes
 - upstream client-conformance integration
 - upstream server-conformance integration
 - explicit protocol and standards alignment
@@ -29,6 +30,7 @@ It does **not** vendor or wrap the upstream example Rust client.
 |   |-- architecture.md
 |   `-- standards.md
 |-- scripts
+|   |-- check-server-public-api.sh
 |   `-- conformance
 `-- tests
     |-- README.md
@@ -38,11 +40,17 @@ It does **not** vendor or wrap the upstream example Rust client.
 ## Repository Intent
 
 - `crates/durable-streams-client` is the active client implementation. It
-  provides a typed async API, config loader, auth model, retry policy, and
-  idempotent producer support.
+  provides a typed async API, config loader, auth model, retry policy,
+  idempotent producer support, JSON and JSONL ingest helpers, file-backed
+  JSONL journaling, and journal-backed read replication.
 - `crates/durable-streams-server` is the production-oriented server crate,
-  providing in-memory, file-backed, and ACID storage backends, structured
-  error responses, readiness probes, graceful shutdown, and request telemetry.
+  providing in-memory, file-backed, and ACID (`redb`) storage backends;
+  stream forking with soft-delete and cascade garbage collection; typed
+  transport (`http`, `tls`, `mtls`); reverse-proxy trust gating; phased
+  structured startup; `application/problem+json` error responses; readiness
+  and liveness probes; graceful shutdown; request telemetry; and a
+  `clap`-based CLI with `serve`, `list`, `export`, and `import`
+  subcommands.
 - `tests/conformance` and `scripts/conformance` define where upstream Durable
   Streams conformance adapters and runners live.
 - `docs/architecture.md` describes the intended long-term shape.
@@ -50,8 +58,8 @@ It does **not** vendor or wrap the upstream example Rust client.
 
 ## Client Status
 
-The initial Rust client is implemented and wired into the upstream client
-conformance suite.
+The Rust client is implemented and wired into the upstream client conformance
+suite.
 
 - Library crate: `crates/durable-streams-client`
 - Conformance adapter:
@@ -59,27 +67,25 @@ conformance suite.
 - Client launcher used by the upstream suite:
   `tests/conformance/client/run-adapter.sh`
 
-The most recent local fail-fast client conformance run completed with:
-
-- `255 passed`
-- `0 failed`
-- `14 skipped`
-
-The skipped cases are optional capabilities currently declared unsupported by
-the adapter, such as higher-level batching and retry-options validation.
+Run the suite locally with `./scripts/conformance/run-client-suite.sh`. The
+skipped cases in the adapter are optional capabilities it explicitly declares
+unsupported (for example, higher-level batching and retry-options validation).
 
 ## Server Status
 
 The Rust server lives in this workspace as `crates/durable-streams-server`.
 
 - Binary crate and library crate name: `durable-streams-server`
-- Current version: `0.2.0`
+- Current version: `0.3.0` (release tag
+  `durable-streams-server-v0.3.0`)
 - Integration and unit tests are crate-local under
   `crates/durable-streams-server/tests`
 - Workspace launcher used by the upstream server suite:
   `tests/conformance/server/start-server.sh`
 
-See `crates/durable-streams-server/README.md` for server-specific documentation.
+See `crates/durable-streams-server/README.md` and
+`crates/durable-streams-server/CHANGELOG.md` for server-specific documentation
+and release notes.
 
 ## Client Usage
 
@@ -90,6 +96,11 @@ The client is designed for service-style construction:
 - environment overrides with the `DURABLE_STREAMS_CLIENT__` prefix
 - explicit auth configuration for bearer/basic/header-based gateways
 - direct async operations through `Client` and `StreamHandle`
+- idempotent producer fencing via `IdempotentProducer`
+- local JSONL journaling via `JsonJournal`
+- journal-backed read replication with offset resume via `ReadReplica`
+- a `raw` module for protocol-shaped request/response types when direct
+  protocol control is needed
 
 See `crates/durable-streams-client/README.md` for crate-specific examples.
 
@@ -98,6 +109,9 @@ See `crates/durable-streams-client/README.md` for crate-specific examples.
 The workspace treats the upstream Durable Streams protocol and conformance suites
 as external standards it aligns with explicitly.
 
+- Protocol revision, client-conformance package, and server-conformance
+  package are pinned under `[workspace.metadata.durable-streams]` in
+  `Cargo.toml`.
 - Protocol baseline and governance notes live in `docs/standards.md`.
 - Exact npm package pins for the upstream conformance suites live in
   `package.json`.
@@ -115,6 +129,15 @@ The workspace MSRV is **Rust 1.89**.
   `clippy::pedantic` enabled as a standing baseline.
 - The MSRV may be raised deliberately over time, but only as an explicit policy
   change.
+
+## Releases
+
+Per-crate release tags follow `<crate-name>-v<version>`, matching
+`cargo release` defaults and common Rust-workspace convention.
+
+- Most recent server release: `durable-streams-server-v0.3.0`.
+- `crates/durable-streams-client` is currently unpublished
+  (`publish = false`) and not yet tagged.
 
 ## Quick Start
 
@@ -141,13 +164,25 @@ To run the upstream client conformance suite against the adapter in this repo:
 
 ```bash
 ./scripts/conformance/run-client-suite.sh
+# stop on first failure
 ./scripts/conformance/run-client-suite.sh --fail-fast
 ```
 
-To run the upstream server conformance suite from this workspace:
+To run the upstream server conformance suite from this workspace (defaults to
+the in-memory backend):
 
 ```bash
 ./scripts/conformance/run-server-suite.sh
+```
+
+To exercise the file-backed or ACID backends against the same suite:
+
+```bash
+# file-backed
+DS_STORAGE__MODE=file-fast ./scripts/conformance/run-server-suite.sh
+
+# ACID (redb)
+DS_STORAGE__MODE=acid DS_STORAGE__ACID_BACKEND=memory ./scripts/conformance/run-server-suite.sh
 ```
 
 The client suite uses `tests/conformance/client/run-adapter.sh`, which launches

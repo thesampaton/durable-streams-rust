@@ -373,6 +373,7 @@ struct ReadParams {
     headers: Option<HashMap<String, String>>,
 }
 
+#[allow(clippy::too_many_lines)] // Dispatch match over every Command variant; splitting adds noise.
 async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> AdapterOutput {
     match command {
         Command::Init {
@@ -387,7 +388,21 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             headers,
             closed,
             data,
-        } => handle_create(&state, CreateParams { path, content_type, ttl_seconds, expires_at, headers, closed, data }).await,
+        } => {
+            handle_create(
+                &state,
+                CreateParams {
+                    path,
+                    content_type,
+                    ttl_seconds,
+                    expires_at,
+                    headers,
+                    closed,
+                    data,
+                },
+            )
+            .await
+        }
         Command::Connect { path, headers } => handle_connect(&state, path, headers).await,
         Command::Append {
             path,
@@ -398,7 +413,22 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             producer_id,
             producer_epoch,
             producer_seq,
-        } => handle_append(&state, AppendParams { path, data, binary, seq, headers, producer_id, producer_epoch, producer_seq }).await,
+        } => {
+            handle_append(
+                &state,
+                AppendParams {
+                    path,
+                    data,
+                    binary,
+                    seq,
+                    headers,
+                    producer_id,
+                    producer_epoch,
+                    producer_seq,
+                },
+            )
+            .await
+        }
         Command::Read {
             path,
             offset,
@@ -407,7 +437,21 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             max_chunks,
             wait_for_up_to_date,
             headers,
-        } => handle_read(&state, ReadParams { path, offset, live, timeout_ms, max_chunks, wait_for_up_to_date, headers }).await,
+        } => {
+            handle_read(
+                &state,
+                ReadParams {
+                    path,
+                    offset,
+                    live,
+                    timeout_ms,
+                    max_chunks,
+                    wait_for_up_to_date,
+                    headers,
+                },
+            )
+            .await
+        }
         Command::Head { path, headers } => handle_head(&state, path, headers).await,
         Command::Delete { path, headers } => handle_delete(&state, path, headers).await,
         Command::Close {
@@ -432,7 +476,10 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             epoch,
             auto_claim,
             headers,
-        } => handle_idempotent_append(&state, path, data, producer_id, epoch, auto_claim, headers).await,
+        } => {
+            handle_idempotent_append(&state, path, data, producer_id, epoch, auto_claim, headers)
+                .await
+        }
         Command::IdempotentAppendBatch {
             path,
             items,
@@ -441,7 +488,18 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             auto_claim,
             max_in_flight: _,
             headers,
-        } => handle_idempotent_append_batch(&state, path, items, producer_id, epoch, auto_claim, headers).await,
+        } => {
+            handle_idempotent_append_batch(
+                &state,
+                path,
+                items,
+                producer_id,
+                epoch,
+                auto_claim,
+                headers,
+            )
+            .await
+        }
         Command::IdempotentClose {
             path,
             producer_id,
@@ -449,7 +507,10 @@ async fn handle_command(state: Arc<Mutex<AdapterState>>, command: Command) -> Ad
             data,
             auto_claim,
             headers,
-        } => handle_idempotent_close(&state, path, producer_id, epoch, data, auto_claim, headers).await,
+        } => {
+            handle_idempotent_close(&state, path, producer_id, epoch, data, auto_claim, headers)
+                .await
+        }
         Command::IdempotentDetach {
             path,
             producer_id,
@@ -517,11 +578,16 @@ async fn handle_init(
     })
 }
 
-async fn handle_create(
-    state: &Arc<Mutex<AdapterState>>,
-    params: CreateParams,
-) -> AdapterOutput {
-    let CreateParams { path, content_type, ttl_seconds, expires_at, headers, closed, data } = params;
+async fn handle_create(state: &Arc<Mutex<AdapterState>>, params: CreateParams) -> AdapterOutput {
+    let CreateParams {
+        path,
+        content_type,
+        ttl_seconds,
+        expires_at,
+        headers,
+        closed,
+        data,
+    } = params;
     let mut state = state.lock().await;
     let Some(client) = state.client.clone() else {
         return AdapterOutput::Error(error_output(
@@ -604,11 +670,17 @@ async fn handle_connect(
     }
 }
 
-async fn handle_append(
-    state: &Arc<Mutex<AdapterState>>,
-    params: AppendParams,
-) -> AdapterOutput {
-    let AppendParams { path, data, binary, seq, headers, producer_id, producer_epoch, producer_seq } = params;
+async fn handle_append(state: &Arc<Mutex<AdapterState>>, params: AppendParams) -> AdapterOutput {
+    let AppendParams {
+        path,
+        data,
+        binary,
+        seq,
+        headers,
+        producer_id,
+        producer_epoch,
+        producer_seq,
+    } = params;
     let mut state = state.lock().await;
     let Some(client) = state.client.clone() else {
         return AdapterOutput::Error(error_output(
@@ -669,11 +741,16 @@ async fn handle_append(
     }
 }
 
-async fn handle_read(
-    state: &Arc<Mutex<AdapterState>>,
-    params: ReadParams,
-) -> AdapterOutput {
-    let ReadParams { path, offset, live, timeout_ms, max_chunks, wait_for_up_to_date, headers } = params;
+async fn handle_read(state: &Arc<Mutex<AdapterState>>, params: ReadParams) -> AdapterOutput {
+    let ReadParams {
+        path,
+        offset,
+        live,
+        timeout_ms,
+        max_chunks,
+        wait_for_up_to_date,
+        headers,
+    } = params;
     let mut state = state.lock().await;
     let Some(client) = state.client.clone() else {
         return AdapterOutput::Error(error_output(
@@ -944,11 +1021,9 @@ async fn handle_idempotent_append(
                 status: Some(200),
                 ..Default::default()
             }),
-            Err(error) => AdapterOutput::Error(error_to_output(
-                "idempotent-append",
-                Some(&path),
-                &error,
-            )),
+            Err(error) => {
+                AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error))
+            }
         },
         Err(error) => {
             AdapterOutput::Error(error_to_output("idempotent-append", Some(&path), &error))
@@ -1050,11 +1125,9 @@ async fn handle_idempotent_close(
                 stream_closed: Some(result.stream_closed),
                 ..Default::default()
             }),
-            Err(error) => AdapterOutput::Error(error_to_output(
-                "idempotent-close",
-                Some(&path),
-                &error,
-            )),
+            Err(error) => {
+                AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error))
+            }
         },
         Err(error) => {
             AdapterOutput::Error(error_to_output("idempotent-close", Some(&path), &error))
@@ -1213,7 +1286,7 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
                 && max < initial
             {
                 return Err(
-                    "maxDelayMs must be greater than or equal to initialDelayMs".to_string(),
+                    "maxDelayMs must be greater than or equal to initialDelayMs".to_string()
                 );
             }
             if multiplier.is_some_and(|value| value < 1.0) {
@@ -1240,8 +1313,9 @@ fn validate_target(target: ValidateTarget) -> Result<(), String> {
                 auto_claim: false,
                 max_batch_bytes: usize::try_from(max_batch_bytes.unwrap_or(1024 * 1024_i64))
                     .expect("max_batch_bytes must fit in usize"),
-                max_batch_items: max_batch_items
-                    .map(|value| usize::try_from(value).expect("max_batch_items must fit in usize")),
+                max_batch_items: max_batch_items.map(|value| {
+                    usize::try_from(value).expect("max_batch_items must fit in usize")
+                }),
             }
             .validate()
             .map_err(|error| error.to_string())

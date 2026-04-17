@@ -1,19 +1,72 @@
 name: CI
 
 on:
-  workflow_dispatch: # manual-only for now
+  pull_request:
+    branches: [trunk]
+  push:
+    branches: [trunk]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  cargo-check:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: cargo clippy (${{ matrix.crate }}${{ matrix.enforce && ' pedantic' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Server is the public crate with published releases — we gate
+          # pedantic strictly. `-D warnings` turns the workspace-level
+          # `clippy::pedantic = warn` into a hard error here.
+          - crate: durable-streams-server
+            enforce: true
+          # Client pedantic findings are reported (non-fatal) for now.
+          # When the client is ready to pass pedantic, flip `enforce: true`
+          # or merge back into the strict list.
+          - crate: durable-streams-client
+            enforce: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy (strict)
+        if: matrix.enforce
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets -- -D warnings
+      - name: clippy (advisory)
+        if: ${{ !matrix.enforce }}
+        run: cargo clippy -p ${{ matrix.crate }} --all-targets
+
+  check:
     name: cargo check (${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         toolchain:
-          - 1.89.0
+          - "1.89.0"
           - stable
-
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -22,29 +75,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
 
-  cargo-test:
-    name: cargo test (stable)
+  test:
+    name: cargo test
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
-          components: clippy
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace
 
-  server-conformance:
-    name: server conformance (stable)
+  doc:
+    name: cargo doc
     runs-on: ubuntu-latest
-
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: stable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps
+
+  server-conformance:
+    name: server conformance (memory backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
