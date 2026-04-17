@@ -5,9 +5,10 @@ use super::{
 use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
 use crate::storage::{
-    CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendResult, ProducerCheck,
-    ReadResult, Storage, StreamMetadata, check_producer, cleanup_stale_producers, fork,
-    is_stream_expired, validate_content_type, validate_seq,
+    CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendPrecheck,
+    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata, fork,
+    is_stream_expired, is_stream_visible, precheck_append, precheck_batch_append,
+    precheck_producer_append,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
@@ -101,13 +102,7 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            if meta.closed {
-                return Err(Error::StreamClosed);
-            }
-
-            validate_content_type(&meta.config.content_type, content_type)?;
+            precheck_append(&meta.config, meta.state, meta.closed, name, content_type)?;
 
             if meta.total_bytes + message_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -124,8 +119,13 @@ impl Storage for AcidStorage {
             meta.next_read_seq += 1;
             meta.next_byte_offset += message_bytes;
             meta.total_bytes += message_bytes;
-            meta.updated_at = Some(Utc::now());
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                None,
+                Utc::now(),
+            );
 
             Self::write_stream_meta(&mut streams, name, &meta)?;
 
@@ -176,14 +176,15 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            if meta.closed {
-                return Err(Error::StreamClosed);
-            }
-
-            validate_content_type(&meta.config.content_type, content_type)?;
-            let pending_seq = validate_seq(meta.last_seq.as_deref(), seq)?;
+            let pending_seq = precheck_batch_append(
+                &meta.config,
+                meta.state,
+                meta.closed,
+                meta.last_seq.as_deref(),
+                name,
+                content_type,
+                seq,
+            )?;
 
             if meta.total_bytes + batch_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -202,11 +203,13 @@ impl Storage for AcidStorage {
                 meta.total_bytes += len;
             }
 
-            if let Some(new_seq) = pending_seq {
-                meta.last_seq = Some(new_seq);
-            }
-            meta.updated_at = Some(Utc::now());
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                pending_seq,
+                Utc::now(),
+            );
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             Self::write_stream_meta(&mut streams, name, &meta)?;
@@ -379,21 +382,20 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            cleanup_stale_producers(&mut meta.producers);
-
-            if !messages.is_empty() {
-                validate_content_type(&meta.config.content_type, content_type)?;
-            }
-
-            match check_producer(
-                meta.producers.get(producer.id.as_str()),
-                producer,
+            let pending_seq = match precheck_producer_append(
+                &meta.config,
+                meta.state,
                 meta.closed,
+                meta.last_seq.as_deref(),
+                &mut meta.producers,
+                name,
+                content_type,
+                producer,
+                &messages,
+                seq,
             )? {
-                ProducerCheck::Accept => {}
-                ProducerCheck::Duplicate { epoch, seq } => {
+                ProducerAppendPrecheck::Accept { pending_seq } => pending_seq,
+                ProducerAppendPrecheck::Duplicate { epoch, seq } => {
                     return Ok(ProducerAppendResult::Duplicate {
                         epoch,
                         seq,
@@ -401,9 +403,7 @@ impl Storage for AcidStorage {
                         closed: meta.closed,
                     });
                 }
-            }
-
-            let pending_seq = validate_seq(meta.last_seq.as_deref(), seq)?;
+            };
 
             if meta.total_bytes + batch_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -422,9 +422,6 @@ impl Storage for AcidStorage {
                 meta.total_bytes += len;
             }
 
-            if let Some(new_seq) = pending_seq {
-                meta.last_seq = Some(new_seq);
-            }
             if should_close {
                 meta.closed = true;
             }
@@ -438,8 +435,13 @@ impl Storage for AcidStorage {
                     updated_at: now,
                 },
             );
-            meta.updated_at = Some(now);
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                pending_seq,
+                now,
+            );
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             let closed = meta.closed;
@@ -596,7 +598,7 @@ impl Storage for AcidStorage {
         };
 
         match Self::read_stream_meta(&streams, name) {
-            Ok(Some(meta)) => !is_stream_expired(&meta.config) && meta.state == StreamState::Active,
+            Ok(Some(meta)) => is_stream_visible(&meta.config, meta.state),
             _ => false,
         }
     }
@@ -608,7 +610,7 @@ impl Storage for AcidStorage {
         let streams = txn.open_table(STREAMS).ok()?;
         let meta = Self::read_stream_meta(&streams, name).ok()??;
 
-        if is_stream_expired(&meta.config) || meta.state == StreamState::Tombstone {
+        if !is_stream_visible(&meta.config, meta.state) {
             return None;
         }
 
@@ -740,7 +742,7 @@ impl Storage for AcidStorage {
                 let meta: StoredStreamMeta = serde_json::from_slice(value.value())
                     .map_err(|e| Self::storage_err("failed to parse stream metadata", e))?;
 
-                if is_stream_expired(&meta.config) || meta.state == StreamState::Tombstone {
+                if !is_stream_visible(&meta.config, meta.state) {
                     continue;
                 }
 
