@@ -22,8 +22,8 @@ use tokio::sync::broadcast;
 // Re-export shared items so existing `super::` paths in backends still work.
 pub(crate) use shared::{
     NOTIFY_CHANNEL_CAPACITY, ProducerAppendPrecheck, ProducerState, apply_append_metadata,
-    cleanup_stale_producers, is_stream_expired, is_stream_visible, precheck_append,
-    precheck_batch_append, precheck_producer_append,
+    build_stream_metadata, cleanup_stale_producers, is_stream_expired, is_stream_visible,
+    precheck_append, precheck_batch_append, precheck_producer_append,
 };
 
 /// Immutable stream configuration captured at create time.

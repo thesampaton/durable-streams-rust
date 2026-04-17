@@ -651,33 +651,36 @@ impl FileStorage {
             let mut parent = parent_arc.write().expect("stream lock poisoned");
             parent.ref_count = parent.ref_count.saturating_sub(1);
 
-            if parent.state == StreamState::Tombstone && parent.ref_count == 0 {
-                // This parent can be garbage-collected
-                let fi = parent.fork_info.clone();
-                let dir = parent.dir.clone();
-                let total = parent.total_bytes;
-                // Persist updated ref_count before removing
-                drop(parent);
-                streams.remove(&current_parent);
+            let step = super::fork::cascade_step(
+                parent.state,
+                parent.ref_count,
+                parent.fork_info.as_ref(),
+            );
 
-                if let Err(e) = self.remove_stream_dir(&dir) {
-                    warn!(%e, stream = current_parent.as_str(), "failed to remove tombstoned ancestor directory during cascade delete");
-                } else {
-                    self.rollback_total_bytes(total);
+            match step {
+                super::fork::CascadeStep::CollectAndContinue { next_parent } => {
+                    let dir = parent.dir.clone();
+                    let total = parent.total_bytes;
+                    drop(parent);
+                    streams.remove(&current_parent);
+
+                    if let Err(e) = self.remove_stream_dir(&dir) {
+                        warn!(%e, stream = current_parent.as_str(), "failed to remove tombstoned ancestor directory during cascade delete");
+                    } else {
+                        self.rollback_total_bytes(total);
+                    }
+
+                    match next_parent {
+                        Some(next) => current_parent = next,
+                        None => break,
+                    }
                 }
-
-                // Continue up the chain
-                if let Some(fi) = fi {
-                    current_parent = fi.source_name;
-                } else {
+                super::fork::CascadeStep::PersistAndStop => {
+                    if let Err(e) = self.write_metadata_for(&current_parent, &parent) {
+                        warn!(%e, stream = current_parent.as_str(), "failed to persist parent ref_count during cascade delete");
+                    }
                     break;
                 }
-            } else {
-                // Parent still alive or has other children — persist ref_count update
-                if let Err(e) = self.write_metadata_for(&current_parent, &parent) {
-                    warn!(%e, stream = current_parent.as_str(), "failed to persist parent ref_count during cascade delete");
-                }
-                break;
             }
         }
     }
@@ -940,26 +943,25 @@ impl Storage for FileStorage {
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        if let Some(stream_arc) = streams.get(name) {
+        let action = if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_root_create(
+            super::fork::resolve_root_create(
                 name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
+                Some((&stream.config, stream.state, stream.ref_count)),
                 &config,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name)?;
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+            )?
+        } else {
+            super::fork::resolve_root_create(name, None, &config)?
+        };
+
+        match action {
+            super::fork::RootCreateAction::AlreadyExists => {
+                return Ok(CreateStreamResult::AlreadyExists);
             }
+            super::fork::RootCreateAction::CreateAfterExpiredCleanup => {
+                self.remove_for_recreate(&mut streams, name)?;
+            }
+            super::fork::RootCreateAction::Create => {}
         }
 
         let dir = self.stream_dir_for_name(name)?;
@@ -1182,15 +1184,16 @@ impl Storage for FileStorage {
 
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
-        Ok(StreamMetadata {
-            config: stream.config.clone(),
-            next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-            closed: stream.closed,
-            total_bytes: stream.total_bytes,
-            message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-            created_at: stream.created_at,
-            updated_at: stream.updated_at,
-        })
+        Ok(super::build_stream_metadata(
+            stream.config.clone(),
+            stream.next_read_seq,
+            stream.next_byte_offset,
+            stream.closed,
+            stream.total_bytes,
+            u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
+            stream.created_at,
+            stream.updated_at,
+        ))
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -1296,30 +1299,30 @@ impl Storage for FileStorage {
     ) -> Result<CreateWithDataResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        if let Some(stream_arc) = streams.get(name) {
+        let action = if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_root_create(
+            let action = super::fork::resolve_root_create(
                 name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
+                Some((&stream.config, stream.state, stream.ref_count)),
                 &config,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name)?;
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateWithDataResult {
-                        status: CreateStreamResult::AlreadyExists,
-                        next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-                        closed: stream.closed,
-                    });
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+            )?;
+            if matches!(action, super::fork::RootCreateAction::AlreadyExists) {
+                return Ok(CreateWithDataResult {
+                    status: CreateStreamResult::AlreadyExists,
+                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                    closed: stream.closed,
+                });
             }
+            action
+        } else {
+            super::fork::resolve_root_create(name, None, &config)?
+        };
+
+        if matches!(
+            action,
+            super::fork::RootCreateAction::CreateAfterExpiredCleanup
+        ) {
+            self.remove_for_recreate(&mut streams, name)?;
         }
 
         let dir = self.stream_dir_for_name(name)?;
@@ -1437,15 +1440,16 @@ impl Storage for FileStorage {
             }
             result.push((
                 name.clone(),
-                StreamMetadata {
-                    config: stream.config.clone(),
-                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-                    closed: stream.closed,
-                    total_bytes: stream.total_bytes,
-                    message_count: u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-                    created_at: stream.created_at,
-                    updated_at: stream.updated_at,
-                },
+                super::build_stream_metadata(
+                    stream.config.clone(),
+                    stream.next_read_seq,
+                    stream.next_byte_offset,
+                    stream.closed,
+                    stream.total_bytes,
+                    u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
+                    stream.created_at,
+                    stream.updated_at,
+                ),
             ));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1461,61 +1465,48 @@ impl Storage for FileStorage {
     ) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        // Look up source stream
         let source_arc = streams
             .get(source_name)
             .ok_or_else(|| Error::NotFound(source_name.to_string()))?
             .clone();
 
-        let source = source_arc.read().expect("stream lock poisoned");
+        let (fork_spec, resolved_offset) = {
+            let source = source_arc.read().expect("stream lock poisoned");
+            let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
+            super::fork::prepare_fork_spec(
+                source_name,
+                &source.config,
+                source.state,
+                &source_next_offset,
+                fork_offset,
+                &config,
+            )?
+        };
 
-        super::fork::check_fork_source_access(&source.config, source.state, source_name)?;
-
-        // Resolve fork offset (defaults to source tail)
-        let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
-        let resolved_offset = super::fork::resolve_fork_offset(fork_offset, &source_next_offset)?;
-
-        // Validate content type: fork must match source
-        if !config
-            .content_type
-            .eq_ignore_ascii_case(&source.config.content_type)
-        {
-            return Err(Error::ContentTypeMismatch {
-                expected: source.config.content_type.clone(),
-                actual: config.content_type.clone(),
-            });
-        }
-
-        let fork_spec = super::fork::build_fork_create_spec(
-            source_name,
-            &source.config,
-            &config,
-            resolved_offset.clone(),
-        );
-
-        drop(source);
-
-        if let Some(existing_arc) = streams.get(name) {
+        let action = if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_fork_create(
+            super::fork::resolve_fork_create(
                 name,
-                &existing.config,
-                existing.fork_info.as_ref(),
-                existing.state,
-                existing.ref_count,
+                Some((
+                    &existing.config,
+                    existing.fork_info.as_ref(),
+                    existing.state,
+                    existing.ref_count,
+                )),
                 &fork_spec,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(existing);
-                    self.remove_for_recreate(&mut streams, name)?;
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+            )?
+        } else {
+            super::fork::resolve_fork_create(name, None, &fork_spec)?
+        };
+
+        match action {
+            super::fork::ForkCreateAction::AlreadyExists => {
+                return Ok(CreateStreamResult::AlreadyExists);
             }
+            super::fork::ForkCreateAction::CreateAfterExpiredCleanup => {
+                self.remove_for_recreate(&mut streams, name)?;
+            }
+            super::fork::ForkCreateAction::Create => {}
         }
 
         // Extract fork offset components to initialize the fork entry
