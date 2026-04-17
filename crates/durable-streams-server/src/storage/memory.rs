@@ -182,23 +182,18 @@ impl InMemoryStorage {
             let mut parent = parent_arc.write().expect("stream lock poisoned");
             parent.ref_count = parent.ref_count.saturating_sub(1);
 
-            let step = super::fork::cascade_step(
-                parent.state,
-                parent.ref_count,
-                parent.fork_info.as_ref(),
-            );
+            if parent.state == StreamState::Tombstone && parent.ref_count == 0 {
+                let next_parent = parent.fork_info.as_ref().map(|fi| fi.source_name.clone());
+                self.saturating_sub_total_bytes(parent.total_bytes);
+                drop(parent);
+                streams.remove(&current_parent);
 
-            match step {
-                super::fork::CascadeStep::CollectAndContinue { next_parent } => {
-                    self.saturating_sub_total_bytes(parent.total_bytes);
-                    drop(parent);
-                    streams.remove(&current_parent);
-                    match next_parent {
-                        Some(next) => current_parent = next,
-                        None => break,
-                    }
+                match next_parent {
+                    Some(next) => current_parent = next,
+                    None => break,
                 }
-                super::fork::CascadeStep::PersistAndStop => break,
+            } else {
+                break;
             }
         }
     }
@@ -375,25 +370,26 @@ impl Storage for InMemoryStorage {
     fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        let action = if let Some(stream_arc) = streams.get(name) {
+        if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            super::fork::resolve_root_create(
+            match super::fork::evaluate_root_create(
                 name,
-                Some((&stream.config, stream.state, stream.ref_count)),
+                &stream.config,
+                stream.state,
+                stream.ref_count,
                 &config,
-            )?
-        } else {
-            super::fork::resolve_root_create(name, None, &config)?
-        };
-
-        match action {
-            super::fork::RootCreateAction::AlreadyExists => {
-                return Ok(CreateStreamResult::AlreadyExists);
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(stream);
+                    self.remove_for_recreate(&mut streams, name);
+                }
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
+                    return Ok(CreateStreamResult::AlreadyExists);
+                }
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
-            super::fork::RootCreateAction::CreateAfterExpiredCleanup => {
-                self.remove_for_recreate(&mut streams, name);
-            }
-            super::fork::RootCreateAction::Create => {}
         }
 
         let entry = StreamEntry::new(config);
@@ -419,14 +415,15 @@ impl Storage for InMemoryStorage {
 
         let offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
         self.commit_messages(&mut stream, vec![data])?;
-        let entry = &mut *stream;
-        super::apply_append_metadata(
-            &mut entry.config,
-            &mut entry.last_seq,
-            &mut entry.updated_at,
-            None,
-            Utc::now(),
-        );
+        {
+            let StreamEntry {
+                config,
+                last_seq,
+                updated_at,
+                ..
+            } = &mut *stream;
+            super::apply_append_metadata(config, last_seq, updated_at, None, Utc::now());
+        }
 
         Ok(offset)
     }
@@ -462,14 +459,15 @@ impl Storage for InMemoryStorage {
         )?;
 
         self.commit_messages(&mut stream, messages)?;
-        let entry = &mut *stream;
-        super::apply_append_metadata(
-            &mut entry.config,
-            &mut entry.last_seq,
-            &mut entry.updated_at,
-            pending_seq,
-            Utc::now(),
-        );
+        {
+            let StreamEntry {
+                config,
+                last_seq,
+                updated_at,
+                ..
+            } = &mut *stream;
+            super::apply_append_metadata(config, last_seq, updated_at, pending_seq, Utc::now());
+        }
 
         Ok(Offset::new(stream.next_read_seq, stream.next_byte_offset))
     }
@@ -641,13 +639,23 @@ impl Storage for InMemoryStorage {
         let mut stream = stream_arc.write().expect("stream lock poisoned");
 
         let pending_seq = {
-            let entry = &mut *stream;
+            let StreamEntry {
+                config,
+                state,
+                closed,
+                last_seq,
+                producers,
+                next_read_seq,
+                next_byte_offset,
+                ..
+            } = &mut *stream;
+
             match super::precheck_producer_append(
-                &entry.config,
-                entry.state,
-                entry.closed,
-                entry.last_seq.as_deref(),
-                &mut entry.producers,
+                config,
+                *state,
+                *closed,
+                last_seq.as_deref(),
+                producers,
                 name,
                 content_type,
                 producer,
@@ -659,8 +667,8 @@ impl Storage for InMemoryStorage {
                     return Ok(ProducerAppendResult::Duplicate {
                         epoch,
                         seq,
-                        next_offset: Offset::new(entry.next_read_seq, entry.next_byte_offset),
-                        closed: entry.closed,
+                        next_offset: Offset::new(*next_read_seq, *next_byte_offset),
+                        closed: *closed,
                     });
                 }
             }
@@ -673,14 +681,15 @@ impl Storage for InMemoryStorage {
             stream.closed = true;
         }
 
-        let entry = &mut *stream;
-        super::apply_append_metadata(
-            &mut entry.config,
-            &mut entry.last_seq,
-            &mut entry.updated_at,
-            pending_seq,
-            now,
-        );
+        {
+            let StreamEntry {
+                config,
+                last_seq,
+                updated_at,
+                ..
+            } = &mut *stream;
+            super::apply_append_metadata(config, last_seq, updated_at, pending_seq, now);
+        }
 
         stream.producers.insert(
             producer.id.clone(),
@@ -711,30 +720,30 @@ impl Storage for InMemoryStorage {
     ) -> Result<super::CreateWithDataResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
-        let action = if let Some(stream_arc) = streams.get(name) {
+        if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
-            let action = super::fork::resolve_root_create(
+            match super::fork::evaluate_root_create(
                 name,
-                Some((&stream.config, stream.state, stream.ref_count)),
+                &stream.config,
+                stream.state,
+                stream.ref_count,
                 &config,
-            )?;
-            if matches!(action, super::fork::RootCreateAction::AlreadyExists) {
-                return Ok(super::CreateWithDataResult {
-                    status: CreateStreamResult::AlreadyExists,
-                    next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-                    closed: stream.closed,
-                });
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(stream);
+                    self.remove_for_recreate(&mut streams, name);
+                }
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
+                    return Ok(super::CreateWithDataResult {
+                        status: CreateStreamResult::AlreadyExists,
+                        next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                        closed: stream.closed,
+                    });
+                }
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
-            action
-        } else {
-            super::fork::resolve_root_create(name, None, &config)?
-        };
-
-        if matches!(
-            action,
-            super::fork::RootCreateAction::CreateAfterExpiredCleanup
-        ) {
-            self.remove_for_recreate(&mut streams, name);
         }
 
         let mut entry = StreamEntry::new(config);
@@ -862,30 +871,27 @@ impl Storage for InMemoryStorage {
             )?
         };
 
-        let action = if let Some(existing_arc) = streams.get(name) {
+        if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
-            super::fork::resolve_fork_create(
+            match super::fork::evaluate_fork_create(
                 name,
-                Some((
-                    &existing.config,
-                    existing.fork_info.as_ref(),
-                    existing.state,
-                    existing.ref_count,
-                )),
+                &existing.config,
+                existing.fork_info.as_ref(),
+                existing.state,
+                existing.ref_count,
                 &fork_spec,
-            )?
-        } else {
-            super::fork::resolve_fork_create(name, None, &fork_spec)?
-        };
-
-        match action {
-            super::fork::ForkCreateAction::AlreadyExists => {
-                return Ok(CreateStreamResult::AlreadyExists);
+            ) {
+                super::fork::ExistingCreateDisposition::RemoveExpired => {
+                    drop(existing);
+                    self.remove_for_recreate(&mut streams, name);
+                }
+                super::fork::ExistingCreateDisposition::AlreadyExists => {
+                    return Ok(CreateStreamResult::AlreadyExists);
+                }
+                super::fork::ExistingCreateDisposition::Conflict(err) => {
+                    return Err(err);
+                }
             }
-            super::fork::ForkCreateAction::CreateAfterExpiredCleanup => {
-                self.remove_for_recreate(&mut streams, name);
-            }
-            super::fork::ForkCreateAction::Create => {}
         }
 
         // Extract fork offset components to initialize the fork entry

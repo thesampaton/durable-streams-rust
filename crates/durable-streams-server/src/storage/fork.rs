@@ -139,43 +139,6 @@ pub(crate) enum ExistingCreateDisposition {
     Conflict(Error),
 }
 
-/// Resolved action for a root-create call after evaluating any existing stream.
-pub(crate) enum RootCreateAction {
-    /// No existing stream at this path — caller should create a fresh entry.
-    Create,
-    /// Existing stream has expired and its storage must be reclaimed before
-    /// the new entry is written.
-    CreateAfterExpiredCleanup,
-    /// Existing stream matches the requested config — caller should return an
-    /// idempotent success.
-    AlreadyExists,
-}
-
-/// Resolve `evaluate_root_create` into a three-state action for the caller.
-///
-/// Returns `Err(..)` directly for conflict dispositions so callers don't
-/// have to match the full `ExistingCreateDisposition` enum at every call site.
-pub(crate) fn resolve_root_create(
-    name: &str,
-    existing: Option<(&StreamConfig, StreamState, u32)>,
-    requested_config: &StreamConfig,
-) -> Result<RootCreateAction> {
-    let Some((existing_config, existing_state, existing_ref_count)) = existing else {
-        return Ok(RootCreateAction::Create);
-    };
-    match evaluate_root_create(
-        name,
-        existing_config,
-        existing_state,
-        existing_ref_count,
-        requested_config,
-    ) {
-        ExistingCreateDisposition::RemoveExpired => Ok(RootCreateAction::CreateAfterExpiredCleanup),
-        ExistingCreateDisposition::AlreadyExists => Ok(RootCreateAction::AlreadyExists),
-        ExistingCreateDisposition::Conflict(err) => Err(err),
-    }
-}
-
 /// Decide how `PUT` should behave for an existing non-fork stream path.
 #[must_use]
 pub(crate) fn evaluate_root_create(
@@ -200,45 +163,6 @@ pub(crate) fn evaluate_root_create(
         ExistingCreateDisposition::AlreadyExists
     } else {
         ExistingCreateDisposition::Conflict(Error::ConfigMismatch)
-    }
-}
-
-/// Resolved action for a fork-create call after evaluating any existing stream.
-pub(crate) enum ForkCreateAction {
-    /// No existing stream at this path — caller should create a fresh fork entry.
-    Create,
-    /// Existing stream has expired and its storage must be reclaimed before
-    /// the new fork entry is written.
-    CreateAfterExpiredCleanup,
-    /// Existing fork matches the requested spec — caller should return an
-    /// idempotent success.
-    AlreadyExists,
-}
-
-/// Resolve `evaluate_fork_create` into a three-state action for the caller.
-///
-/// Returns `Err(..)` directly for conflict dispositions so callers don't
-/// have to match the full `ExistingCreateDisposition` enum.
-pub(crate) fn resolve_fork_create(
-    name: &str,
-    existing: Option<(&StreamConfig, Option<&ForkInfo>, StreamState, u32)>,
-    spec: &ForkCreateSpec,
-) -> Result<ForkCreateAction> {
-    let Some((existing_config, existing_fork_info, existing_state, existing_ref_count)) = existing
-    else {
-        return Ok(ForkCreateAction::Create);
-    };
-    match evaluate_fork_create(
-        name,
-        existing_config,
-        existing_fork_info,
-        existing_state,
-        existing_ref_count,
-        spec,
-    ) {
-        ExistingCreateDisposition::RemoveExpired => Ok(ForkCreateAction::CreateAfterExpiredCleanup),
-        ExistingCreateDisposition::AlreadyExists => Ok(ForkCreateAction::AlreadyExists),
-        ExistingCreateDisposition::Conflict(err) => Err(err),
     }
 }
 
@@ -330,34 +254,6 @@ pub(crate) fn evaluate_delete(
         Ok(DeleteDisposition::Tombstone)
     } else {
         Ok(DeleteDisposition::HardDelete)
-    }
-}
-
-/// One step of a cascade-delete walk after an ancestor's `ref_count` has been decremented.
-pub(crate) enum CascadeStep {
-    /// Current ancestor is tombstoned with no remaining references — hard-delete it
-    /// and continue walking to `next_parent` (the ancestor this one was forked from).
-    CollectAndContinue { next_parent: Option<String> },
-    /// Current ancestor is still live — persist its updated `ref_count` and stop.
-    PersistAndStop,
-}
-
-/// Decide what to do with a cascade-walk ancestor after its `ref_count` was decremented.
-///
-/// Backends perform the decrement and persistence themselves (their locking /
-/// transaction models differ), but the collect-or-stop policy is uniform.
-#[must_use]
-pub(crate) fn cascade_step(
-    state: StreamState,
-    ref_count: u32,
-    fork_info: Option<&ForkInfo>,
-) -> CascadeStep {
-    if state == StreamState::Tombstone && ref_count == 0 {
-        CascadeStep::CollectAndContinue {
-            next_parent: fork_info.map(|fi| fi.source_name.clone()),
-        }
-    } else {
-        CascadeStep::PersistAndStop
     }
 }
 
