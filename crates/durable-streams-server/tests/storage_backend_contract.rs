@@ -2,16 +2,13 @@ mod common;
 
 use bytes::Bytes;
 use chrono::Utc;
-use common::{
-    ALL_BACKENDS, create_test_storage, create_test_storage_with_limits, with_each_backend,
-};
+use common::{create_test_storage, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
     CreateStreamResult, ProducerAppendResult, Storage, StreamConfig,
 };
-use std::panic::RefUnwindSafe;
 use std::sync::Arc;
 use std::thread;
 
@@ -27,64 +24,46 @@ fn plain_text_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
 }
 
-fn for_all_backends(test: impl Fn(common::StorageTestBackend) + RefUnwindSafe) {
-    with_each_backend(&ALL_BACKENDS, "backend contract", test);
-}
+storage_backend_tests! {
+    mod core {
+        use super::*;
 
-mod core {
-    use super::*;
-
-    #[test]
-    fn create_idempotent_and_config_mismatch() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn create_idempotent_and_config_mismatch() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             let cfg = plain_text_config();
 
             let created = storage.create_stream("s", cfg.clone()).unwrap();
-            assert_eq!(
-                created,
-                CreateStreamResult::Created,
-                "backend={} failed create",
-                backend.as_str()
-            );
+            assert_eq!(created, CreateStreamResult::Created);
 
             let idempotent = storage.create_stream("s", cfg).unwrap();
-            assert_eq!(
-                idempotent,
-                CreateStreamResult::AlreadyExists,
-                "backend={} failed idempotent create",
-                backend.as_str()
-            );
+            assert_eq!(idempotent, CreateStreamResult::AlreadyExists);
 
             assert!(matches!(
                 storage.create_stream("s", StreamConfig::new("application/json".to_string())),
                 Err(Error::ConfigMismatch)
             ));
-        });
-    }
+        }
 
-    #[test]
-    fn append_read_and_offset_monotonicity() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn append_read_and_offset_monotonicity() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
             let o1 = storage.append("s", Bytes::from("a"), "text/plain").unwrap();
             let o2 = storage.append("s", Bytes::from("b"), "text/plain").unwrap();
-            assert!(o1 < o2, "backend={} offset monotonicity", backend.as_str());
+            assert!(o1 < o2);
 
             let read = storage.read("s", &Offset::start()).unwrap();
             assert_eq!(read.messages, vec![Bytes::from("a"), Bytes::from("b")]);
             assert!(read.at_tail);
-        });
-    }
+        }
 
-    #[test]
-    fn read_from_offset_and_sentinels() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn read_from_offset_and_sentinels() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
@@ -107,13 +86,11 @@ mod core {
             let from_now = storage.read("s", &Offset::now()).unwrap();
             assert!(from_now.messages.is_empty());
             assert!(from_now.at_tail);
-        });
-    }
+        }
 
-    #[test]
-    fn close_and_content_type_rules() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn close_and_content_type_rules() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
@@ -134,13 +111,11 @@ mod core {
 
             let read = storage.read("s", &Offset::start()).unwrap();
             assert!(read.closed);
-        });
-    }
+        }
 
-    #[test]
-    fn delete_and_exists() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn delete_and_exists() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
             storage.append("s", Bytes::from("x"), "text/plain").unwrap();
@@ -148,24 +123,17 @@ mod core {
             assert!(storage.exists("s"));
             storage.delete("s").unwrap();
             assert!(!storage.exists("s"));
-            assert_eq!(
-                storage.total_bytes(),
-                0,
-                "backend={} leaked bytes after delete",
-                backend.as_str()
-            );
+            assert_eq!(storage.total_bytes(), 0);
             assert!(matches!(storage.delete("s"), Err(Error::NotFound(_))));
-        });
+        }
     }
-}
 
-mod limits_atomicity {
-    use super::*;
+    mod limits_atomicity {
+        use super::*;
 
-    #[test]
-    fn limits_and_not_found() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage_with_limits(backend, 100, 50);
+        #[test]
+        fn limits_and_not_found() {
+            let handle = create_test_storage_with_limits(BACKEND, 100, 50);
             let storage = &handle.storage;
             let cfg = plain_text_config();
             storage.create_stream("a", cfg.clone()).unwrap();
@@ -200,13 +168,11 @@ mod limits_atomicity {
                 storage.close_stream("missing"),
                 Err(Error::NotFound(_))
             ));
-        });
-    }
+        }
 
-    #[test]
-    fn create_with_data_atomicity_and_idempotency() {
-        for_all_backends(|backend| {
-            let small = create_test_storage_with_limits(backend, 1024, 8);
+        #[test]
+        fn create_with_data_atomicity_and_idempotency() {
+            let small = create_test_storage_with_limits(BACKEND, 1024, 8);
             let cfg = plain_text_config();
             let oversized = vec![Bytes::from(vec![0_u8; 9])];
             let err = small
@@ -215,7 +181,7 @@ mod limits_atomicity {
             assert!(matches!(err, Err(Error::StreamSizeLimitExceeded)));
             assert!(!small.storage.exists("s"));
 
-            let handle = create_test_storage(backend);
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
             let closed_cfg = plain_text_config().with_created_closed(true);
@@ -237,13 +203,11 @@ mod limits_atomicity {
 
             let meta = storage.head("idempotent").unwrap();
             assert_eq!(meta.message_count, 1);
-        });
-    }
+        }
 
-    #[test]
-    fn stream_seq_rollback_after_failed_commit() {
-        for_all_backends(|backend| {
-            let small = create_test_storage_with_limits(backend, 1024, 8);
+        #[test]
+        fn stream_seq_rollback_after_failed_commit() {
+            let small = create_test_storage_with_limits(BACKEND, 1024, 8);
             small
                 .storage
                 .create_stream("s", plain_text_config())
@@ -280,17 +244,15 @@ mod limits_atomicity {
                 Some("s2"),
             );
             assert!(matches!(retry, Ok(ProducerAppendResult::Accepted { .. })));
-        });
+        }
     }
-}
 
-mod producer {
-    use super::*;
+    mod producer {
+        use super::*;
 
-    #[test]
-    fn duplicate_gap_fencing_and_epoch_reset_rules() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn duplicate_gap_fencing_and_epoch_reset_rules() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
@@ -371,13 +333,11 @@ mod producer {
                 )
                 .unwrap_err();
             assert!(matches!(nonzero_after_bump, Error::InvalidProducerState(_)));
-        });
-    }
+        }
 
-    #[test]
-    fn multi_producer_independence_and_closed_precedence() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn multi_producer_independence_and_closed_precedence() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
@@ -421,17 +381,15 @@ mod producer {
                 )
                 .unwrap_err();
             assert!(matches!(closed_precedence, Error::StreamClosed));
-        });
+        }
     }
-}
 
-mod fork_lifecycle {
-    use super::*;
+    mod fork_lifecycle {
+        use super::*;
 
-    #[test]
-    fn fork_idempotency_requires_matching_source_and_offset() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn fork_idempotency_requires_matching_source_and_offset() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
             storage
@@ -471,13 +429,11 @@ mod fork_lifecycle {
                 )
                 .unwrap_err();
             assert!(matches!(different_offset, Error::ConfigMismatch));
-        });
-    }
+        }
 
-    #[test]
-    fn expired_parent_with_descendants_becomes_tombstone_and_blocks_recreation() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn expired_parent_with_descendants_becomes_tombstone_and_blocks_recreation() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
             let expires_at = Utc::now() + chrono::Duration::milliseconds(300);
@@ -494,12 +450,7 @@ mod fork_lifecycle {
 
             std::thread::sleep(std::time::Duration::from_millis(500));
             let removed = storage.cleanup_expired_streams();
-            assert_eq!(
-                removed,
-                1,
-                "backend={} should process one expired source",
-                backend.as_str()
-            );
+            assert_eq!(removed, 1);
 
             let source_head = storage.head("source").unwrap_err();
             assert!(matches!(source_head, Error::StreamGone(_)));
@@ -511,13 +462,11 @@ mod fork_lifecycle {
 
             let fork_read = storage.read("fork", &Offset::start()).unwrap();
             assert_eq!(fork_read.messages, vec![Bytes::from("baseline")]);
-        });
-    }
+        }
 
-    #[test]
-    fn deleting_last_descendant_cascades_cleanup() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn deleting_last_descendant_cascades_cleanup() {
+            let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
             storage
@@ -547,17 +496,15 @@ mod fork_lifecycle {
 
             let source_read = storage.read("source", &Offset::start()).unwrap();
             assert!(source_read.messages.is_empty());
-        });
+        }
     }
-}
 
-mod concurrency {
-    use super::*;
+    mod concurrency {
+        use super::*;
 
-    #[test]
-    fn concurrent_append_offsets_unique() {
-        for_all_backends(|backend| {
-            let handle = create_test_storage(backend);
+        #[test]
+        fn concurrent_append_offsets_unique() {
+            let handle = create_test_storage(BACKEND);
             let storage = Arc::new(handle.storage);
             storage.create_stream("s", plain_text_config()).unwrap();
 
@@ -592,12 +539,7 @@ mod concurrency {
             }
 
             let meta = storage.head("s").unwrap();
-            assert_eq!(
-                meta.message_count,
-                80,
-                "backend={} failed",
-                backend.as_str()
-            );
-        });
+            assert_eq!(meta.message_count, 80);
+        }
     }
 }

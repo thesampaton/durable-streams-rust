@@ -8,15 +8,11 @@ mod common;
 
 use bytes::Bytes;
 use chrono::Utc;
-use common::{
-    ALL_BACKENDS, StorageTestBackend, create_test_storage, create_test_storage_with_limits,
-    with_each_backend,
-};
+use common::{create_test_storage, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{Storage, StreamConfig};
-use std::panic::RefUnwindSafe;
 
 fn plain_config() -> StreamConfig {
     StreamConfig::new("text/plain".to_string())
@@ -30,18 +26,14 @@ fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
     }
 }
 
-fn for_all_backends(test: impl Fn(StorageTestBackend) + RefUnwindSafe) {
-    with_each_backend(&ALL_BACKENDS, "resource cleanup", test);
-}
+storage_backend_tests! {
+    // ---------------------------------------------------------------------------
+    // 1. Expired stream cleanup on access
+    // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// 1. Expired stream cleanup on access
-// ---------------------------------------------------------------------------
-
-#[test]
-fn expired_stream_returns_not_found_on_read() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn expired_stream_returns_not_found_on_read() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -53,21 +45,15 @@ fn expired_stream_returns_not_found_on_read() {
 
         std::thread::sleep(std::time::Duration::from_millis(700));
 
-        assert!(
-            matches!(
-                storage.read("s", &Offset::start()),
-                Err(Error::StreamExpired)
-            ),
-            "backend={}: expired stream read should return StreamExpired",
-            backend.as_str()
-        );
-    });
-}
+        assert!(matches!(
+            storage.read("s", &Offset::start()),
+            Err(Error::StreamExpired)
+        ));
+    }
 
-#[test]
-fn expired_stream_returns_not_found_on_head() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn expired_stream_returns_not_found_on_head() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -79,18 +65,12 @@ fn expired_stream_returns_not_found_on_head() {
 
         std::thread::sleep(std::time::Duration::from_millis(700));
 
-        assert!(
-            matches!(storage.head("s"), Err(Error::StreamExpired)),
-            "backend={}: expired stream head should return StreamExpired",
-            backend.as_str()
-        );
-    });
-}
+        assert!(matches!(storage.head("s"), Err(Error::StreamExpired)));
+    }
 
-#[test]
-fn expired_stream_returns_error_on_append() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn expired_stream_returns_error_on_append() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -99,25 +79,19 @@ fn expired_stream_returns_error_on_append() {
 
         std::thread::sleep(std::time::Duration::from_millis(700));
 
-        assert!(
-            matches!(
-                storage.append("s", Bytes::from("late"), "text/plain"),
-                Err(Error::StreamExpired)
-            ),
-            "backend={}: expired stream append should return StreamExpired",
-            backend.as_str()
-        );
-    });
-}
+        assert!(matches!(
+            storage.append("s", Bytes::from("late"), "text/plain"),
+            Err(Error::StreamExpired)
+        ));
+    }
 
-// ---------------------------------------------------------------------------
-// 2. Expired stream re-creation
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 2. Expired stream re-creation
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn expired_stream_can_be_recreated() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn expired_stream_can_be_recreated() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -132,30 +106,20 @@ fn expired_stream_can_be_recreated() {
         // Recreate with a fresh config (no expiry)
         let fresh_config = plain_config();
         let result = storage.create_stream("s", fresh_config);
-        assert!(
-            result.is_ok(),
-            "backend={}: should be able to recreate expired stream, got {result:?}",
-            backend.as_str()
-        );
+        assert!(result.is_ok(), "expected recreate to succeed, got {result:?}");
 
         // Old data should be gone
         let read = storage.read("s", &Offset::start()).unwrap();
-        assert!(
-            read.messages.is_empty(),
-            "backend={}: recreated stream should have no old data",
-            backend.as_str()
-        );
-    });
-}
+        assert!(read.messages.is_empty());
+    }
 
-// ---------------------------------------------------------------------------
-// 3. Proactive cleanup_expired_streams
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 3. Proactive cleanup_expired_streams
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn cleanup_expired_streams_removes_expired() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn cleanup_expired_streams_removes_expired() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -179,40 +143,21 @@ fn cleanup_expired_streams_removes_expired() {
         std::thread::sleep(std::time::Duration::from_millis(700));
 
         let removed = storage.cleanup_expired_streams();
-        assert_eq!(
-            removed,
-            2,
-            "backend={}: should have removed 2 expired streams",
-            backend.as_str()
-        );
+        assert_eq!(removed, 2);
 
         // Expired streams should be gone
-        assert!(
-            !storage.exists("exp-1"),
-            "backend={}: exp-1 should not exist",
-            backend.as_str()
-        );
-        assert!(
-            !storage.exists("exp-2"),
-            "backend={}: exp-2 should not exist",
-            backend.as_str()
-        );
+        assert!(!storage.exists("exp-1"));
+        assert!(!storage.exists("exp-2"));
 
         // Non-expiring stream should still be there
-        assert!(
-            storage.exists("keep"),
-            "backend={}: keep should still exist",
-            backend.as_str()
-        );
+        assert!(storage.exists("keep"));
         let read = storage.read("keep", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
-    });
-}
+    }
 
-#[test]
-fn cleanup_expired_streams_returns_zero_when_none_expired() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn cleanup_expired_streams_returns_zero_when_none_expired() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -221,22 +166,15 @@ fn cleanup_expired_streams_returns_zero_when_none_expired() {
             .unwrap();
 
         let removed = storage.cleanup_expired_streams();
-        assert_eq!(
-            removed,
-            0,
-            "backend={}: no streams should be expired",
-            backend.as_str()
-        );
+        assert_eq!(removed, 0);
 
         // Stream should still exist
         assert!(storage.exists("s"));
-    });
-}
+    }
 
-#[test]
-fn cleanup_expired_streams_reclaims_bytes() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn cleanup_expired_streams_reclaims_bytes() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -255,23 +193,16 @@ fn cleanup_expired_streams_reclaims_bytes() {
         storage.cleanup_expired_streams();
 
         let after = handle.storage.total_bytes();
-        assert_eq!(
-            after,
-            0,
-            "backend={}: total_bytes should be 0 after cleanup, got {after}",
-            backend.as_str()
-        );
-    });
-}
+        assert_eq!(after, 0);
+    }
 
-// ---------------------------------------------------------------------------
-// 4. Memory limit accounting after failed batch
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 4. Memory limit accounting after failed batch
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn memory_limit_rollback_on_failed_append() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 100, 50);
+    #[test]
+    fn memory_limit_rollback_on_failed_append() {
+        let handle = create_test_storage_with_limits(BACKEND, 100, 50);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -284,27 +215,16 @@ fn memory_limit_rollback_on_failed_append() {
 
         // This should fail (40 + 20 > 50 per-stream limit)
         let result = storage.append("s", Bytes::from(vec![0u8; 20]), "text/plain");
-        assert!(
-            result.is_err(),
-            "backend={}: should fail stream limit",
-            backend.as_str()
-        );
+        assert!(result.is_err());
 
         // total_bytes should be unchanged
         let after = handle.storage.total_bytes();
-        assert_eq!(
-            after,
-            before,
-            "backend={}: total_bytes should be unchanged after failed append",
-            backend.as_str()
-        );
-    });
-}
+        assert_eq!(after, before);
+    }
 
-#[test]
-fn global_memory_limit_rollback_on_failed_append() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 100, 80);
+    #[test]
+    fn global_memory_limit_rollback_on_failed_append() {
+        let handle = create_test_storage_with_limits(BACKEND, 100, 80);
         let storage = &handle.storage;
 
         storage.create_stream("a", plain_config()).unwrap();
@@ -315,31 +235,20 @@ fn global_memory_limit_rollback_on_failed_append() {
 
         // This should fail (60 + 50 > 100 global limit)
         let result = storage.append("b", Bytes::from(vec![0u8; 50]), "text/plain");
-        assert!(
-            result.is_err(),
-            "backend={}: should fail global limit",
-            backend.as_str()
-        );
+        assert!(result.is_err());
 
         // total_bytes should still be 60
         let after = handle.storage.total_bytes();
-        assert_eq!(
-            after,
-            60,
-            "backend={}: total_bytes should be unchanged after failed global limit",
-            backend.as_str()
-        );
-    });
-}
+        assert_eq!(after, 60);
+    }
 
-// ---------------------------------------------------------------------------
-// 5. Delete reclaims bytes
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 5. Delete reclaims bytes
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn delete_reclaims_total_bytes() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn delete_reclaims_total_bytes() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -351,19 +260,12 @@ fn delete_reclaims_total_bytes() {
 
         storage.delete("s").unwrap();
 
-        assert_eq!(
-            handle.storage.total_bytes(),
-            0,
-            "backend={}: total_bytes should be 0 after delete",
-            backend.as_str()
-        );
-    });
-}
+        assert_eq!(handle.storage.total_bytes(), 0);
+    }
 
-#[test]
-fn delete_allows_reuse_of_capacity() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 100, 80);
+    #[test]
+    fn delete_allows_reuse_of_capacity() {
+        let handle = create_test_storage_with_limits(BACKEND, 100, 80);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -381,25 +283,19 @@ fn delete_allows_reuse_of_capacity() {
 
         // Now should succeed
         let result = storage.append("s2", Bytes::from(vec![0u8; 30]), "text/plain");
-        assert!(
-            result.is_ok(),
-            "backend={}: should succeed after delete freed capacity",
-            backend.as_str()
-        );
-    });
-}
+        assert!(result.is_ok(), "expected append to succeed, got {result:?}");
+    }
 
-// ---------------------------------------------------------------------------
-// 6. Producer state cleanup (7-day TTL)
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 6. Producer state cleanup (7-day TTL)
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn producer_append_still_works_after_many_operations() {
-    // This test verifies that producer state management doesn't leak over
-    // many sequential operations. While we can't directly test the 7-day TTL
-    // without time manipulation, we verify the cleanup path runs correctly.
-    for_all_backends(|backend| {
-        let handle = create_test_storage_with_limits(backend, 10 * 1024 * 1024, 10 * 1024 * 1024);
+    #[test]
+    fn producer_append_still_works_after_many_operations() {
+        // This test verifies that producer state management doesn't leak over
+        // many sequential operations. While we can't directly test the 7-day TTL
+        // without time manipulation, we verify the cleanup path runs correctly.
+        let handle = create_test_storage_with_limits(BACKEND, 10 * 1024 * 1024, 10 * 1024 * 1024);
         let storage = &handle.storage;
 
         storage.create_stream("s", plain_config()).unwrap();
@@ -415,26 +311,20 @@ fn producer_append_still_works_after_many_operations() {
                 false,
                 None,
             );
-            assert!(
-                result.is_ok(),
-                "backend={}: producer {pid} should succeed, got {result:?}",
-                backend.as_str()
-            );
+            assert!(result.is_ok(), "producer {pid} should succeed, got {result:?}");
         }
 
         let meta = storage.head("s").unwrap();
         assert_eq!(meta.message_count, 50);
-    });
-}
+    }
 
-// ---------------------------------------------------------------------------
-// 7. Cleanup is idempotent
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // 7. Cleanup is idempotent
+    // ---------------------------------------------------------------------------
 
-#[test]
-fn cleanup_expired_streams_is_idempotent() {
-    for_all_backends(|backend| {
-        let handle = create_test_storage(backend);
+    #[test]
+    fn cleanup_expired_streams_is_idempotent() {
+        let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
         let expires = Utc::now() + chrono::Duration::milliseconds(500);
@@ -451,11 +341,6 @@ fn cleanup_expired_streams_is_idempotent() {
 
         // Second call should find nothing to clean
         let second = storage.cleanup_expired_streams();
-        assert_eq!(
-            second,
-            0,
-            "backend={}: second cleanup should find nothing",
-            backend.as_str()
-        );
-    });
+        assert_eq!(second, 0);
+    }
 }
