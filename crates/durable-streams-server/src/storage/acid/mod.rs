@@ -429,10 +429,7 @@ impl AcidStorage {
 
     fn cascade_delete_acid(&self, parent_name: &str) -> Result<()> {
         let mut current_parent = parent_name.to_string();
-        loop {
-            let Some(shard_idx) = self.find_stream_shard_index(&current_parent)? else {
-                break;
-            };
+        while let Some(shard_idx) = self.find_stream_shard_index(&current_parent)? {
             let shard = &self.shards[shard_idx];
             let txn = Self::begin_write_txn(&shard.db)?;
             let mut streams = txn

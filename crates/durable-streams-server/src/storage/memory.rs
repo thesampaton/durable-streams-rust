@@ -177,10 +177,7 @@ impl InMemoryStorage {
         parent_name: &str,
     ) {
         let mut current_parent = parent_name.to_string();
-        loop {
-            let Some(parent_arc) = streams.get(&current_parent) else {
-                break;
-            };
+        while let Some(parent_arc) = streams.get(&current_parent) {
             let parent_arc = parent_arc.clone();
             let mut parent = parent_arc.write().expect("stream lock poisoned");
             parent.ref_count = parent.ref_count.saturating_sub(1);
