@@ -4,11 +4,10 @@
 //! and response construction so each handler can focus on its own flow
 //! rather than re-implementing the same HTTP plumbing.
 
-use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::{Result, request_instance};
+use crate::protocol::problem::{ProblemDetails, ProblemResponse, Result, request_instance};
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::IntoHeaderName};
@@ -17,13 +16,20 @@ use std::future::Future;
 
 /// Read a request body fully into bytes.
 ///
-/// Body I/O failures surface as [`Error::InvalidBody`] rather than the
-/// semantically wrong `InvalidHeader { header: "Content-Length" }` the
-/// handlers used to build by hand.
+/// Body I/O failures surface as a dedicated invalid-body problem response
+/// without widening the public [`crate::protocol::error::Error`] enum.
 pub async fn read_body(body: Body) -> Result<Bytes> {
-    axum::body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|e| Error::InvalidBody(format!("failed to read request body: {e}")).into())
+    axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+        ProblemResponse::new(
+            ProblemDetails::new(
+                "/errors/invalid-body",
+                "Invalid Body",
+                StatusCode::BAD_REQUEST,
+                "INVALID_BODY",
+            )
+            .with_detail(format!("failed to read request body: {e}")),
+        )
+    })
 }
 
 /// Check whether the `Stream-Closed` request header is truthy.
