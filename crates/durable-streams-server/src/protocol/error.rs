@@ -105,10 +105,6 @@ pub enum Error {
     #[error("Empty request body requires Stream-Closed: true")]
     EmptyBody,
 
-    /// Request body could not be read (400)
-    #[error("Invalid request body: {0}")]
-    InvalidBody(String),
-
     /// Empty JSON array append body (400)
     #[error("Empty JSON arrays are not permitted for append")]
     EmptyArray,
@@ -189,8 +185,7 @@ impl Error {
             | Self::InvalidHeader { .. }
             | Self::InvalidStreamName(_)
             | Self::EmptyBody
-            | Self::EmptyArray
-            | Self::InvalidBody(_) => StatusCode::BAD_REQUEST,
+            | Self::EmptyArray => StatusCode::BAD_REQUEST,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::InsufficientStorage(_) => {
                 StatusCode::from_u16(507).expect("507 is a valid status code")
@@ -269,9 +264,6 @@ impl Error {
             Self::EmptyArray => {
                 self.simple_problem("/errors/empty-array", "Empty Array", "EMPTY_ARRAY")
             }
-            Self::InvalidBody(_) => {
-                self.simple_problem("/errors/invalid-body", "Invalid Body", "INVALID_BODY")
-            }
             Self::EpochFenced { .. } => self.simple_problem(
                 "/errors/producer-epoch-fenced",
                 "Producer Epoch Fenced",
@@ -342,7 +334,6 @@ impl Error {
             | Self::InvalidJson(_)
             | Self::EmptyBody
             | Self::EmptyArray
-            | Self::InvalidBody(_)
             | Self::InvalidHeader { .. }
             | Self::InvalidStreamName(_)
             | Self::ForkOffsetBeyondTail => self.client_problem(),
