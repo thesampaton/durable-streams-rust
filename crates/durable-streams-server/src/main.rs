@@ -204,42 +204,58 @@ async fn main() {
     }
 }
 
-// ── Storage factory for CLI commands ────────────────────────────────
+// ── Storage construction (shared between serve and CLI command paths) ──
+
+fn build_in_memory_storage(config: &Config) -> InMemoryStorage {
+    InMemoryStorage::new(
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
+    )
+}
+
+fn build_file_storage(config: &Config) -> Result<FileStorage, String> {
+    let sync_on_append = config.storage.mode.sync_on_append();
+    let storage = FileStorage::new(
+        &config.storage.data_dir,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
+        sync_on_append,
+    )
+    .map_err(|e| format!("failed to initialize file storage: {e}"))?;
+    tracing::info!(
+        storage.dir = config.storage.data_dir,
+        storage.sync_on_append = sync_on_append,
+        "file storage initialized"
+    );
+    Ok(storage)
+}
+
+fn build_acid_storage(config: &Config) -> Result<AcidStorage, String> {
+    let storage = AcidStorage::new(
+        &config.storage.data_dir,
+        config.storage.acid_shard_count,
+        config.limits.max_memory_bytes,
+        config.limits.max_stream_bytes,
+        config.storage.acid_backend,
+    )
+    .map_err(|e| format!("failed to initialize acid storage: {e}"))?;
+    tracing::info!(
+        storage.backend = config.storage.acid_backend.as_str(),
+        storage.dir = config.storage.data_dir,
+        storage.shards = config.storage.acid_shard_count,
+        "acid storage initialized"
+    );
+    Ok(storage)
+}
 
 fn run_with_storage<F>(config: &Config, f: F) -> Result<(), String>
 where
     F: FnOnce(&dyn Storage) -> Result<(), String>,
 {
     match config.storage.mode {
-        StorageMode::Memory => {
-            let storage = InMemoryStorage::new(
-                config.limits.max_memory_bytes,
-                config.limits.max_stream_bytes,
-            );
-            f(&storage)
-        }
-        StorageMode::FileFast | StorageMode::FileDurable => {
-            let sync_on_append = config.storage.mode.sync_on_append();
-            let storage = FileStorage::new(
-                &config.storage.data_dir,
-                config.limits.max_memory_bytes,
-                config.limits.max_stream_bytes,
-                sync_on_append,
-            )
-            .map_err(|e| format!("Failed to initialize file storage: {e}"))?;
-            f(&storage)
-        }
-        StorageMode::Acid => {
-            let storage = AcidStorage::new(
-                &config.storage.data_dir,
-                config.storage.acid_shard_count,
-                config.limits.max_memory_bytes,
-                config.limits.max_stream_bytes,
-                config.storage.acid_backend,
-            )
-            .map_err(|e| format!("Failed to initialize acid storage: {e}"))?;
-            f(&storage)
-        }
+        StorageMode::Memory => f(&build_in_memory_storage(config)),
+        StorageMode::FileFast | StorageMode::FileDurable => f(&build_file_storage(config)?),
+        StorageMode::Acid => f(&build_acid_storage(config)?),
     }
 }
 
@@ -259,37 +275,20 @@ fn run_list(storage: &dyn Storage, json: bool) -> Result<(), String> {
 }
 
 fn print_streams_json(streams: &[(String, durable_streams_server::storage::StreamMetadata)]) {
-    use serde::Serialize;
-
-    #[derive(Serialize)]
-    struct StreamInfo {
-        name: String,
-        status: String,
-        message_count: u64,
-        total_bytes: u64,
-        content_type: String,
-        created_at: String,
-        updated_at: Option<String>,
-        ttl_seconds: Option<u64>,
-        expires_at: Option<String>,
-    }
-
-    let entries: Vec<StreamInfo> = streams
+    let entries: Vec<serde_json::Value> = streams
         .iter()
-        .map(|(name, meta)| StreamInfo {
-            name: name.clone(),
-            status: if meta.closed {
-                "closed".to_string()
-            } else {
-                "open".to_string()
-            },
-            message_count: meta.message_count,
-            total_bytes: meta.total_bytes,
-            content_type: meta.config.content_type.clone(),
-            created_at: meta.created_at.to_rfc3339(),
-            updated_at: meta.updated_at.map(|t| t.to_rfc3339()),
-            ttl_seconds: meta.config.ttl_seconds,
-            expires_at: meta.config.expires_at.map(|t| t.to_rfc3339()),
+        .map(|(name, meta)| {
+            serde_json::json!({
+                "name": name,
+                "status": if meta.closed { "closed" } else { "open" },
+                "message_count": meta.message_count,
+                "total_bytes": meta.total_bytes,
+                "content_type": meta.config.content_type,
+                "created_at": meta.created_at.to_rfc3339(),
+                "updated_at": meta.updated_at.map(|t| t.to_rfc3339()),
+                "ttl_seconds": meta.config.ttl_seconds,
+                "expires_at": meta.config.expires_at.map(|t| t.to_rfc3339()),
+            })
         })
         .collect();
 
@@ -437,52 +436,15 @@ async fn run_serve(config: Config, profile: &DeploymentProfile) -> Result<(), St
 
     let serve_result = match runtime.config.storage.mode {
         StorageMode::Memory => {
-            let storage = Arc::new(InMemoryStorage::new(
-                runtime.config.limits.max_memory_bytes,
-                runtime.config.limits.max_stream_bytes,
-            ));
-            serve(storage, &runtime).await
+            serve(Arc::new(build_in_memory_storage(&runtime.config)), &runtime).await
         }
         StorageMode::FileFast | StorageMode::FileDurable => {
-            let sync_on_append = runtime.config.storage.mode.sync_on_append();
-            tracing::info!(
-                storage.dir = runtime.config.storage.data_dir,
-                storage.sync_on_append = sync_on_append,
-                "file storage initialized"
-            );
-            let storage = Arc::new(
-                FileStorage::new(
-                    &runtime.config.storage.data_dir,
-                    runtime.config.limits.max_memory_bytes,
-                    runtime.config.limits.max_stream_bytes,
-                    sync_on_append,
-                )
-                .map_err(|e| {
-                    StartupError::runtime(format!("failed to initialize file storage: {e}"))
-                })?,
-            );
-            serve(storage, &runtime).await
+            let storage = build_file_storage(&runtime.config).map_err(StartupError::runtime)?;
+            serve(Arc::new(storage), &runtime).await
         }
         StorageMode::Acid => {
-            tracing::info!(
-                storage.backend = runtime.config.storage.acid_backend.as_str(),
-                storage.dir = runtime.config.storage.data_dir,
-                storage.shards = runtime.config.storage.acid_shard_count,
-                "acid storage initialized"
-            );
-            let storage = Arc::new(
-                AcidStorage::new(
-                    &runtime.config.storage.data_dir,
-                    runtime.config.storage.acid_shard_count,
-                    runtime.config.limits.max_memory_bytes,
-                    runtime.config.limits.max_stream_bytes,
-                    runtime.config.storage.acid_backend,
-                )
-                .map_err(|e| {
-                    StartupError::runtime(format!("failed to initialize acid storage: {e}"))
-                })?,
-            );
-            serve(storage, &runtime).await
+            let storage = build_acid_storage(&runtime.config).map_err(StartupError::runtime)?;
+            serve(Arc::new(storage), &runtime).await
         }
     };
 
@@ -515,39 +477,42 @@ async fn serve<S: Storage + 'static>(
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    match runtime.config.transport.mode {
-        TransportMode::Http => {
-            log_phase(StartupPhase::BindListener);
-            let listener = bind_tcp_listener(runtime.addr)?;
-            log_bound_endpoints(runtime);
-            log_phase(StartupPhase::StartServer);
-            from_tcp(listener)
-                .map_err(|error| StartupError::bind(runtime.addr, error))?
-                .handle(handle)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .map_err(|e| StartupError::runtime(e.to_string()))?;
-        }
+    let tls = match runtime.config.transport.mode {
+        TransportMode::Http => None,
         TransportMode::Tls | TransportMode::Mtls => {
             log_phase(StartupPhase::BuildTlsContext);
             let server_config = build_tls_server_config(&runtime.config)?;
-            let tls = RustlsConfig::from_config(Arc::new(server_config));
             tracing::info!(
                 transport.mode = runtime.config.transport.mode.as_str(),
                 "TLS context built successfully"
             );
-
-            log_phase(StartupPhase::BindListener);
-            let listener = bind_tcp_listener(runtime.addr)?;
-            log_bound_endpoints(runtime);
-            log_phase(StartupPhase::StartServer);
-            from_tcp_rustls(listener, tls)
-                .map_err(|error| StartupError::bind(runtime.addr, error))?
-                .handle(handle)
-                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-                .map_err(|e| StartupError::runtime(e.to_string()))?;
+            Some(RustlsConfig::from_config(Arc::new(server_config)))
         }
+    };
+
+    log_phase(StartupPhase::BindListener);
+    let listener = bind_tcp_listener(runtime.addr)?;
+    log_bound_endpoints(runtime);
+    log_phase(StartupPhase::StartServer);
+
+    let service = app.into_make_service_with_connect_info::<SocketAddr>();
+    let addr = runtime.addr;
+    let bind_err = |error| StartupError::bind(addr, error);
+    let runtime_err = |e: std::io::Error| StartupError::runtime(e.to_string());
+
+    match tls {
+        Some(tls) => from_tcp_rustls(listener, tls)
+            .map_err(bind_err)?
+            .handle(handle)
+            .serve(service)
+            .await
+            .map_err(runtime_err)?,
+        None => from_tcp(listener)
+            .map_err(bind_err)?
+            .handle(handle)
+            .serve(service)
+            .await
+            .map_err(runtime_err)?,
     }
 
     Ok(())
