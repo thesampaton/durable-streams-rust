@@ -13,7 +13,7 @@
 //! remain fast while the on-disk format stays straightforward to inspect and
 //! recover.
 //!
-//! # FileFast vs FileDurable
+//! # `FileFast` vs `FileDurable`
 //!
 //! The two file modes differ only in how aggressively writes are forced to
 //! stable storage:
