@@ -5,9 +5,10 @@ use super::{
 use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
 use crate::storage::{
-    CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendResult, ProducerCheck,
-    ReadResult, Storage, StreamMetadata, check_producer, cleanup_stale_producers, fork,
-    is_stream_expired, validate_content_type, validate_seq,
+    CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendPrecheck,
+    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata,
+    build_stream_metadata, fork, is_stream_expired, is_stream_visible, precheck_append,
+    precheck_batch_append, precheck_producer_append,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
@@ -40,29 +41,27 @@ impl Storage for AcidStorage {
         let mut removed_expired_bytes = 0_u64;
         let mut removed_expired_parent = None;
 
-        if let Some(existing) = Self::read_stream_meta(&streams, name)? {
-            match fork::evaluate_root_create(
-                name,
-                &existing.config,
-                existing.state,
-                existing.ref_count,
-                &config,
-            ) {
-                fork::ExistingCreateDisposition::RemoveExpired => {
-                    removed_expired_bytes = existing.total_bytes;
-                    removed_expired_parent = existing.fork_info.map(|info| info.source_name);
-                    Self::delete_stream_messages(&mut messages, name)?;
-                    streams
-                        .remove(name)
-                        .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
-                }
-                fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+        let existing = Self::read_stream_meta(&streams, name)?;
+        let action = fork::resolve_root_create(
+            name,
+            existing.as_ref().map(|e| (&e.config, e.state, e.ref_count)),
+            &config,
+        )?;
+
+        match action {
+            fork::RootCreateAction::AlreadyExists => {
+                return Ok(CreateStreamResult::AlreadyExists);
             }
+            fork::RootCreateAction::CreateAfterExpiredCleanup => {
+                let existing = existing.expect("expired cleanup requires existing meta");
+                removed_expired_bytes = existing.total_bytes;
+                removed_expired_parent = existing.fork_info.map(|info| info.source_name);
+                Self::delete_stream_messages(&mut messages, name)?;
+                streams
+                    .remove(name)
+                    .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
+            }
+            fork::RootCreateAction::Create => {}
         }
 
         let meta = Self::new_stream_meta(config);
@@ -101,13 +100,7 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            if meta.closed {
-                return Err(Error::StreamClosed);
-            }
-
-            validate_content_type(&meta.config.content_type, content_type)?;
+            precheck_append(&meta.config, meta.state, meta.closed, name, content_type)?;
 
             if meta.total_bytes + message_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -124,8 +117,13 @@ impl Storage for AcidStorage {
             meta.next_read_seq += 1;
             meta.next_byte_offset += message_bytes;
             meta.total_bytes += message_bytes;
-            meta.updated_at = Some(Utc::now());
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                None,
+                Utc::now(),
+            );
 
             Self::write_stream_meta(&mut streams, name, &meta)?;
 
@@ -176,14 +174,15 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            if meta.closed {
-                return Err(Error::StreamClosed);
-            }
-
-            validate_content_type(&meta.config.content_type, content_type)?;
-            let pending_seq = validate_seq(meta.last_seq.as_deref(), seq)?;
+            let pending_seq = precheck_batch_append(
+                &meta.config,
+                meta.state,
+                meta.closed,
+                meta.last_seq.as_deref(),
+                name,
+                content_type,
+                seq,
+            )?;
 
             if meta.total_bytes + batch_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -202,11 +201,13 @@ impl Storage for AcidStorage {
                 meta.total_bytes += len;
             }
 
-            if let Some(new_seq) = pending_seq {
-                meta.last_seq = Some(new_seq);
-            }
-            meta.updated_at = Some(Utc::now());
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                pending_seq,
+                Utc::now(),
+            );
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             Self::write_stream_meta(&mut streams, name, &meta)?;
@@ -318,15 +319,16 @@ impl Storage for AcidStorage {
 
         fork::check_stream_access(&meta.config, meta.state, name)?;
 
-        Ok(StreamMetadata {
-            config: meta.config,
-            next_offset: Offset::new(meta.next_read_seq, meta.next_byte_offset),
-            closed: meta.closed,
-            total_bytes: meta.total_bytes,
-            message_count: meta.next_read_seq,
-            created_at: meta.created_at,
-            updated_at: meta.updated_at,
-        })
+        Ok(build_stream_metadata(
+            meta.config,
+            meta.next_read_seq,
+            meta.next_byte_offset,
+            meta.closed,
+            meta.total_bytes,
+            meta.next_read_seq,
+            meta.created_at,
+            meta.updated_at,
+        ))
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -379,21 +381,20 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-
-            cleanup_stale_producers(&mut meta.producers);
-
-            if !messages.is_empty() {
-                validate_content_type(&meta.config.content_type, content_type)?;
-            }
-
-            match check_producer(
-                meta.producers.get(producer.id.as_str()),
-                producer,
+            let pending_seq = match precheck_producer_append(
+                &meta.config,
+                meta.state,
                 meta.closed,
+                meta.last_seq.as_deref(),
+                &mut meta.producers,
+                name,
+                content_type,
+                producer,
+                &messages,
+                seq,
             )? {
-                ProducerCheck::Accept => {}
-                ProducerCheck::Duplicate { epoch, seq } => {
+                ProducerAppendPrecheck::Accept { pending_seq } => pending_seq,
+                ProducerAppendPrecheck::Duplicate { epoch, seq } => {
                     return Ok(ProducerAppendResult::Duplicate {
                         epoch,
                         seq,
@@ -401,9 +402,7 @@ impl Storage for AcidStorage {
                         closed: meta.closed,
                     });
                 }
-            }
-
-            let pending_seq = validate_seq(meta.last_seq.as_deref(), seq)?;
+            };
 
             if meta.total_bytes + batch_bytes > self.max_stream_bytes {
                 return Err(Error::StreamSizeLimitExceeded);
@@ -422,9 +421,6 @@ impl Storage for AcidStorage {
                 meta.total_bytes += len;
             }
 
-            if let Some(new_seq) = pending_seq {
-                meta.last_seq = Some(new_seq);
-            }
             if should_close {
                 meta.closed = true;
             }
@@ -438,8 +434,13 @@ impl Storage for AcidStorage {
                     updated_at: now,
                 },
             );
-            meta.updated_at = Some(now);
-            fork::renew_ttl(&mut meta.config);
+            apply_append_metadata(
+                &mut meta.config,
+                &mut meta.last_seq,
+                &mut meta.updated_at,
+                pending_seq,
+                now,
+            );
 
             let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
             let closed = meta.closed;
@@ -495,37 +496,33 @@ impl Storage for AcidStorage {
                 .open_table(MESSAGES)
                 .map_err(|e| Self::storage_err("failed to open messages table", e))?;
 
-            if let Some(existing) = Self::read_stream_meta(&streams, name)? {
-                match fork::evaluate_root_create(
-                    name,
-                    &existing.config,
-                    existing.state,
-                    existing.ref_count,
-                    &config,
-                ) {
-                    fork::ExistingCreateDisposition::RemoveExpired => {
-                        removed_expired_bytes = existing.total_bytes;
-                        removed_expired_parent =
-                            existing.fork_info.clone().map(|info| info.source_name);
-                        Self::delete_stream_messages(&mut message_table, name)?;
-                        streams
-                            .remove(name)
-                            .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
-                    }
-                    fork::ExistingCreateDisposition::AlreadyExists => {
-                        return Ok(CreateWithDataResult {
-                            status: CreateStreamResult::AlreadyExists,
-                            next_offset: Offset::new(
-                                existing.next_read_seq,
-                                existing.next_byte_offset,
-                            ),
-                            closed: existing.closed,
-                        });
-                    }
-                    fork::ExistingCreateDisposition::Conflict(err) => {
-                        return Err(err);
-                    }
+            let existing = Self::read_stream_meta(&streams, name)?;
+            let action = fork::resolve_root_create(
+                name,
+                existing.as_ref().map(|e| (&e.config, e.state, e.ref_count)),
+                &config,
+            )?;
+
+            match action {
+                fork::RootCreateAction::AlreadyExists => {
+                    let existing = existing.expect("AlreadyExists requires existing meta");
+                    return Ok(CreateWithDataResult {
+                        status: CreateStreamResult::AlreadyExists,
+                        next_offset: Offset::new(existing.next_read_seq, existing.next_byte_offset),
+                        closed: existing.closed,
+                    });
                 }
+                fork::RootCreateAction::CreateAfterExpiredCleanup => {
+                    let existing = existing.expect("expired cleanup requires existing meta");
+                    removed_expired_bytes = existing.total_bytes;
+                    removed_expired_parent =
+                        existing.fork_info.clone().map(|info| info.source_name);
+                    Self::delete_stream_messages(&mut message_table, name)?;
+                    streams
+                        .remove(name)
+                        .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
+                }
+                fork::RootCreateAction::Create => {}
             }
 
             if batch_bytes > 0 {
@@ -596,7 +593,7 @@ impl Storage for AcidStorage {
         };
 
         match Self::read_stream_meta(&streams, name) {
-            Ok(Some(meta)) => !is_stream_expired(&meta.config) && meta.state == StreamState::Active,
+            Ok(Some(meta)) => is_stream_visible(&meta.config, meta.state),
             _ => false,
         }
     }
@@ -608,7 +605,7 @@ impl Storage for AcidStorage {
         let streams = txn.open_table(STREAMS).ok()?;
         let meta = Self::read_stream_meta(&streams, name).ok()??;
 
-        if is_stream_expired(&meta.config) || meta.state == StreamState::Tombstone {
+        if !is_stream_visible(&meta.config, meta.state) {
             return None;
         }
 
@@ -740,21 +737,22 @@ impl Storage for AcidStorage {
                 let meta: StoredStreamMeta = serde_json::from_slice(value.value())
                     .map_err(|e| Self::storage_err("failed to parse stream metadata", e))?;
 
-                if is_stream_expired(&meta.config) || meta.state == StreamState::Tombstone {
+                if !is_stream_visible(&meta.config, meta.state) {
                     continue;
                 }
 
                 result.push((
                     name,
-                    StreamMetadata {
-                        config: meta.config,
-                        next_offset: Offset::new(meta.next_read_seq, meta.next_byte_offset),
-                        closed: meta.closed,
-                        total_bytes: meta.total_bytes,
-                        message_count: meta.next_read_seq,
-                        created_at: meta.created_at,
-                        updated_at: meta.updated_at,
-                    },
+                    build_stream_metadata(
+                        meta.config,
+                        meta.next_read_seq,
+                        meta.next_byte_offset,
+                        meta.closed,
+                        meta.total_bytes,
+                        meta.next_read_seq,
+                        meta.created_at,
+                        meta.updated_at,
+                    ),
                 ));
             }
         }
@@ -782,28 +780,16 @@ impl Storage for AcidStorage {
 
         let source_meta = Self::read_stream_meta(&source_read_streams, source_name)?
             .ok_or_else(|| Error::NotFound(source_name.to_string()))?;
-        fork::check_fork_source_access(&source_meta.config, source_meta.state, source_name)?;
-
         let source_next_offset =
             Offset::new(source_meta.next_read_seq, source_meta.next_byte_offset);
-        let resolved_offset = fork::resolve_fork_offset(fork_offset, &source_next_offset)?;
-
-        if !config
-            .content_type
-            .eq_ignore_ascii_case(&source_meta.config.content_type)
-        {
-            return Err(Error::ContentTypeMismatch {
-                expected: source_meta.config.content_type.clone(),
-                actual: config.content_type.clone(),
-            });
-        }
-
-        let fork_spec = fork::build_fork_create_spec(
+        let (fork_spec, resolved_offset) = fork::prepare_fork_spec(
             source_name,
             &source_meta.config,
+            source_meta.state,
+            &source_next_offset,
+            fork_offset,
             &config,
-            resolved_offset.clone(),
-        );
+        )?;
 
         let (mut removed_expired_bytes, mut removed_expired_parent) =
             match self.remove_cross_shard_existing_fork(name, source_shard_idx, &fork_spec)? {
@@ -825,31 +811,29 @@ impl Storage for AcidStorage {
         let mut source_meta = Self::read_stream_meta(&streams, source_name)?
             .ok_or_else(|| Error::NotFound(source_name.to_string()))?;
 
-        if let Some(existing) = Self::read_stream_meta(&streams, name)? {
-            match fork::evaluate_fork_create(
-                name,
-                &existing.config,
-                existing.fork_info.as_ref(),
-                existing.state,
-                existing.ref_count,
-                &fork_spec,
-            ) {
-                fork::ExistingCreateDisposition::RemoveExpired => {
-                    removed_expired_bytes = existing.total_bytes;
-                    removed_expired_parent =
-                        existing.fork_info.clone().map(|info| info.source_name);
-                    Self::delete_stream_messages(&mut messages, name)?;
-                    streams
-                        .remove(name)
-                        .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
-                }
-                fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
+        let existing = Self::read_stream_meta(&streams, name)?;
+        let action = fork::resolve_fork_create(
+            name,
+            existing
+                .as_ref()
+                .map(|e| (&e.config, e.fork_info.as_ref(), e.state, e.ref_count)),
+            &fork_spec,
+        )?;
+
+        match action {
+            fork::ForkCreateAction::AlreadyExists => {
+                return Ok(CreateStreamResult::AlreadyExists);
             }
+            fork::ForkCreateAction::CreateAfterExpiredCleanup => {
+                let existing = existing.expect("expired cleanup requires existing meta");
+                removed_expired_bytes = existing.total_bytes;
+                removed_expired_parent = existing.fork_info.clone().map(|info| info.source_name);
+                Self::delete_stream_messages(&mut messages, name)?;
+                streams
+                    .remove(name)
+                    .map_err(|e| Self::storage_err("failed to remove expired stream", e))?;
+            }
+            fork::ForkCreateAction::Create => {}
         }
 
         let fork_meta = Self::build_fork_stored_meta(&fork_spec, &config, &resolved_offset);
