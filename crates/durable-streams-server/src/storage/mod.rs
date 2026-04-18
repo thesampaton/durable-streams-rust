@@ -5,6 +5,22 @@
 //! - [`memory::InMemoryStorage`] for ephemeral development and tests
 //! - [`file::FileStorage`] for append-log persistence on the local filesystem
 //! - [`acid::AcidStorage`] for crash-resilient redb-backed persistence
+//!
+//! The two disk-backed families serve different needs:
+//!
+//! - [`file::FileStorage`] is the simpler "one directory plus one log file per
+//!   stream" backend used by [`crate::config::StorageMode::FileFast`] and
+//!   [`crate::config::StorageMode::FileDurable`]
+//! - [`acid::AcidStorage`] is the transactional backend used by
+//!   [`crate::config::StorageMode::Acid`], with
+//!   [`crate::config::AcidBackend::File`] persisting redb databases to disk
+//!   and [`crate::config::AcidBackend::InMemory`] keeping those databases only
+//!   in memory
+//!
+//! If you want the lowest operational complexity and are comfortable with a
+//! file-log design, start with [`file::FileStorage`]. If you want stronger
+//! transactional durability and recovery guarantees, prefer
+//! [`acid::AcidStorage`].
 
 pub mod acid;
 pub mod file;
