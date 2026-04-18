@@ -18,115 +18,99 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 
-/// Storage backend selection for the server runtime.
+/// Declares a string-valued enum plus its `as_str`, [`fmt::Display`], and an
+/// env-parser function from a single `Variant => "canonical" | "alias"`  table.
 ///
-/// This is the main operator-facing choice when deciding how the server should
-/// persist streams.
-///
-/// The `file-*` modes use the simple append-log implementation from
-/// [`crate::storage::file::FileStorage`]. The `acid` mode uses
-/// [`crate::storage::acid::AcidStorage`], which stores data in redb databases
-/// instead of per-stream log files.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum StorageMode {
-    /// In-memory backend.
-    ///
-    /// Best suited to tests, demos, and ephemeral development environments.
-    Memory,
-    /// Filesystem-backed append-log storage without syncing each append.
-    ///
-    /// Uses one directory per stream with a `data.log` and `meta.json`, but
-    /// does not call `fsync`/`fdatasync` on every write. Choose this when you
-    /// want simple local persistence and favor throughput over the strongest
-    /// crash-durability guarantees for the most recent appends.
-    #[serde(alias = "fast")]
-    FileFast,
-    /// Filesystem-backed append-log storage with syncing on each append.
-    ///
-    /// Uses the same on-disk layout as [`Self::FileFast`], but performs
-    /// `fsync`/`fdatasync` after writes. Choose this when you want the simpler
-    /// file-log backend while reducing the risk of losing recently acknowledged
-    /// appends after a crash, and can afford the added write latency.
-    #[serde(alias = "file", alias = "durable")]
-    FileDurable,
-    /// Transactional redb-backed storage.
-    ///
-    /// Choose this when you want stronger transactional durability for
-    /// metadata and message updates than the plain file-log modes provide.
-    /// The concrete redb persistence medium is controlled separately by
-    /// [`AcidBackend`].
-    #[serde(alias = "redb")]
-    Acid,
-}
-
-/// Redb persistence medium used by [`StorageMode::Acid`].
-///
-/// This only applies when `storage.mode = "acid"`. It does not affect the
-/// separate `file-fast` / `file-durable` storage family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AcidBackend {
-    /// File-backed redb (default).
-    ///
-    /// Persists shard databases under `storage.data_dir` and survives restarts.
-    /// Choose this when you want the acid/redb backend with durable local
-    /// storage.
-    File,
-    /// In-memory redb.
-    ///
-    /// Keeps the redb databases in memory only. This preserves the
-    /// transactional behavior of the acid backend but drops all state on
-    /// shutdown, which can be useful for tests or benchmarking.
-    #[serde(alias = "memory", alias = "inmemory")]
-    InMemory,
-}
-
-impl AcidBackend {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::File => "file",
-            Self::InMemory => "in-memory",
+/// This keeps the canonical name, serde aliases, and env-parser aliases in one
+/// place so they cannot drift apart. Additional `#[derive(...)]` attributes on
+/// the enum (e.g. for `PartialOrd`) stack with the macro-generated derives.
+macro_rules! string_enum {
+    (
+        $(#[$enum_attr:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_attr:meta])*
+                $variant:ident => $canonical:literal $(| $alias:literal)*
+            ),+ $(,)?
         }
-    }
+        parse_fn $parse_fn:ident;
+    ) => {
+        $(#[$enum_attr])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        $vis enum $name {
+            $(
+                $(#[$variant_attr])*
+                #[serde(rename = $canonical $(, alias = $alias)*)]
+                $variant,
+            )+
+        }
+
+        impl $name {
+            /// Canonical string form — matches the primary serde name.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $canonical, )+
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+
+        fn $parse_fn(raw: &str) -> Option<$name> {
+            match raw.to_ascii_lowercase().as_str() {
+                $( $canonical $(| $alias)* => Some($name::$variant), )+
+                _ => None,
+            }
+        }
+    };
 }
 
-impl fmt::Display for StorageMode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+string_enum! {
+    /// Storage backend selection for the server runtime.
+    ///
+    /// This is the main operator-facing choice when deciding how the server should
+    /// persist streams.
+    ///
+    /// The `file-*` modes use the simple append-log implementation from
+    /// [`crate::storage::file::FileStorage`]. The `acid` mode uses
+    /// [`crate::storage::acid::AcidStorage`], which stores data in redb databases
+    /// instead of per-stream log files.
+    pub enum StorageMode {
+        /// In-memory backend.
+        ///
+        /// Best suited to tests, demos, and ephemeral development environments.
+        Memory => "memory",
+        /// Filesystem-backed append-log storage without syncing each append.
+        ///
+        /// Uses one directory per stream with a `data.log` and `meta.json`, but
+        /// does not call `fsync`/`fdatasync` on every write. Choose this when you
+        /// want simple local persistence and favor throughput over the strongest
+        /// crash-durability guarantees for the most recent appends.
+        FileFast => "file-fast" | "fast",
+        /// Filesystem-backed append-log storage with syncing on each append.
+        ///
+        /// Uses the same on-disk layout as [`Self::FileFast`], but performs
+        /// `fsync`/`fdatasync` after writes. Choose this when you want the simpler
+        /// file-log backend while reducing the risk of losing recently acknowledged
+        /// appends after a crash, and can afford the added write latency.
+        FileDurable => "file-durable" | "file" | "durable",
+        /// Transactional redb-backed storage.
+        ///
+        /// Choose this when you want stronger transactional durability for
+        /// metadata and message updates than the plain file-log modes provide.
+        /// The concrete redb persistence medium is controlled separately by
+        /// [`AcidBackend`].
+        Acid => "acid" | "redb",
     }
-}
-
-impl fmt::Display for TransportMode {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl fmt::Display for HttpVersion {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl fmt::Display for AlpnProtocol {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
+    parse_fn parse_storage_mode_env;
 }
 
 impl StorageMode {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Memory => "memory",
-            Self::FileFast => "file-fast",
-            Self::FileDurable => "file-durable",
-            Self::Acid => "acid",
-        }
-    }
-
     #[must_use]
     pub fn uses_file_backend(self) -> bool {
         matches!(self, Self::FileFast | Self::FileDurable)
@@ -138,125 +122,104 @@ impl StorageMode {
     }
 }
 
-/// Transport mode selected for the listener.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TransportMode {
-    /// Plain HTTP transport.
-    Http,
-    /// Server-side TLS.
-    Tls,
-    /// Mutual TLS.
-    Mtls,
+string_enum! {
+    /// Redb persistence medium used by [`StorageMode::Acid`].
+    ///
+    /// This only applies when `storage.mode = "acid"`. It does not affect the
+    /// separate `file-fast` / `file-durable` storage family.
+    pub enum AcidBackend {
+        /// File-backed redb (default).
+        ///
+        /// Persists shard databases under `storage.data_dir` and survives restarts.
+        /// Choose this when you want the acid/redb backend with durable local
+        /// storage.
+        File => "file",
+        /// In-memory redb.
+        ///
+        /// Keeps the redb databases in memory only. This preserves the
+        /// transactional behavior of the acid backend but drops all state on
+        /// shutdown, which can be useful for tests or benchmarking.
+        InMemory => "in-memory" | "memory" | "inmemory",
+    }
+    parse_fn parse_acid_backend_env;
+}
+
+string_enum! {
+    /// Transport mode selected for the listener.
+    pub enum TransportMode {
+        /// Plain HTTP transport.
+        Http => "http",
+        /// Server-side TLS.
+        Tls => "tls",
+        /// Mutual TLS.
+        Mtls => "mtls",
+    }
+    parse_fn parse_transport_mode_env;
 }
 
 impl TransportMode {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Tls => "tls",
-            Self::Mtls => "mtls",
-        }
-    }
-
     #[must_use]
     pub fn uses_tls(self) -> bool {
         matches!(self, Self::Tls | Self::Mtls)
     }
 }
 
-/// Operator-facing HTTP protocol versions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HttpVersion {
-    /// HTTP/1.1
-    #[serde(
-        rename = "http1",
-        alias = "1.1",
-        alias = "http1.1",
-        alias = "http/1.1",
-        alias = "h1"
-    )]
-    Http1,
-    /// HTTP/2
-    #[serde(rename = "http2", alias = "2", alias = "h2")]
-    Http2,
-}
-
-impl HttpVersion {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Http1 => "http1",
-            Self::Http2 => "http2",
-        }
+string_enum! {
+    /// Operator-facing HTTP protocol versions.
+    pub enum HttpVersion {
+        /// HTTP/1.1
+        Http1 => "http1" | "1.1" | "http1.1" | "http/1.1" | "h1",
+        /// HTTP/2
+        Http2 => "http2" | "2" | "h2",
     }
+    parse_fn parse_http_version_env;
 }
 
-/// TLS protocol versions accepted by the config layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum TlsVersion {
-    /// TLS 1.2
-    #[serde(rename = "1.2", alias = "tls1.2", alias = "tls-1.2")]
-    V1_2,
-    /// TLS 1.3
-    #[serde(rename = "1.3", alias = "tls1.3", alias = "tls-1.3")]
-    V1_3,
-}
-
-impl TlsVersion {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::V1_2 => "1.2",
-            Self::V1_3 => "1.3",
-        }
+string_enum! {
+    /// TLS protocol versions accepted by the config layer.
+    #[derive(PartialOrd, Ord)]
+    pub enum TlsVersion {
+        /// TLS 1.2
+        V1_2 => "1.2" | "tls1.2" | "tls-1.2",
+        /// TLS 1.3
+        V1_3 => "1.3" | "tls1.3" | "tls-1.3",
     }
+    parse_fn parse_tls_version_env;
 }
 
-/// ALPN protocols used when TLS is enabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlpnProtocol {
-    /// HTTP/1.1 ALPN identifier.
-    #[serde(rename = "http/1.1", alias = "http1", alias = "h1")]
-    Http1_1,
-    /// HTTP/2 ALPN identifier.
-    #[serde(rename = "h2", alias = "http2")]
-    H2,
-}
-
-impl AlpnProtocol {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Http1_1 => "http/1.1",
-            Self::H2 => "h2",
-        }
+string_enum! {
+    /// ALPN protocols used when TLS is enabled.
+    pub enum AlpnProtocol {
+        /// HTTP/1.1 ALPN identifier.
+        Http1_1 => "http/1.1" | "http1" | "h1",
+        /// HTTP/2 ALPN identifier.
+        H2 => "h2" | "http2",
     }
+    parse_fn parse_alpn_protocol_env;
 }
 
-/// Forwarded-header family trusted from a proxy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ForwardedHeadersMode {
-    /// Do not trust any proxy headers.
-    #[serde(rename = "none")]
-    None,
-    /// Trust the `X-Forwarded-*` header family.
-    #[serde(rename = "x-forwarded", alias = "xforwarded")]
-    XForwarded,
-    /// Trust RFC 7239 `Forwarded`.
-    #[serde(rename = "forwarded")]
-    Forwarded,
+string_enum! {
+    /// Forwarded-header family trusted from a proxy.
+    pub enum ForwardedHeadersMode {
+        /// Do not trust any proxy headers.
+        None => "none",
+        /// Trust the `X-Forwarded-*` header family.
+        XForwarded => "x-forwarded" | "xforwarded",
+        /// Trust RFC 7239 `Forwarded`.
+        Forwarded => "forwarded",
+    }
+    parse_fn parse_forwarded_headers_mode_env;
 }
 
-/// Proxy-origin identity handoff strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProxyIdentityMode {
-    /// No proxy identity handoff.
-    None,
-    /// Trust a single HTTP header from the proxy.
-    Header,
+string_enum! {
+    /// Proxy-origin identity handoff strategy.
+    pub enum ProxyIdentityMode {
+        /// No proxy identity handoff.
+        None => "none",
+        /// Trust a single HTTP header from the proxy.
+        Header => "header",
+    }
+    parse_fn parse_proxy_identity_mode_env;
 }
 
 /// Typed profile selection for config loading.
@@ -698,6 +661,17 @@ struct MergeContext {
     legacy_tls_seen: bool,
 }
 
+/// Apply one `parse_env::<T>`-style env override: if the key is set, parse it
+/// and assign the target field. Returns from the enclosing function via `?` if
+/// parsing fails.
+macro_rules! env_parse_into {
+    ($self:expr, $get:expr, $key:literal => $($field:ident).+ : $ty:ty) => {
+        if let Some(__value) = parse_env::<$ty>($get, $key)? {
+            $self . $($field).+ = __value;
+        }
+    };
+}
+
 impl Config {
     /// Load configuration from `DS_*` environment variables with sensible defaults.
     ///
@@ -987,22 +961,10 @@ impl Config {
         &mut self,
         get: &impl Fn(&str) -> Option<String>,
     ) -> Result<(), ConfigLoadError> {
-        if let Some(max_memory_bytes) = parse_env::<u64>(get, "DS_LIMITS__MAX_MEMORY_BYTES")? {
-            self.limits.max_memory_bytes = max_memory_bytes;
-        }
-        if let Some(max_stream_bytes) = parse_env::<u64>(get, "DS_LIMITS__MAX_STREAM_BYTES")? {
-            self.limits.max_stream_bytes = max_stream_bytes;
-        }
-        if let Some(max_stream_name_bytes) =
-            parse_env::<usize>(get, "DS_LIMITS__MAX_STREAM_NAME_BYTES")?
-        {
-            self.limits.max_stream_name_bytes = max_stream_name_bytes;
-        }
-        if let Some(max_stream_name_segments) =
-            parse_env::<usize>(get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS")?
-        {
-            self.limits.max_stream_name_segments = max_stream_name_segments;
-        }
+        env_parse_into!(self, get, "DS_LIMITS__MAX_MEMORY_BYTES" => limits.max_memory_bytes : u64);
+        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_BYTES" => limits.max_stream_bytes : u64);
+        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_BYTES" => limits.max_stream_name_bytes : usize);
+        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS" => limits.max_stream_name_segments : usize);
         Ok(())
     }
 
@@ -1016,9 +978,7 @@ impl Config {
         if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
             self.http.stream_base_path = stream_base_path;
         }
-        if let Some(allow_wildcard_cors) = parse_env::<bool>(get, "DS_HTTP__ALLOW_WILDCARD_CORS")? {
-            self.http.allow_wildcard_cors = allow_wildcard_cors;
-        }
+        env_parse_into!(self, get, "DS_HTTP__ALLOW_WILDCARD_CORS" => http.allow_wildcard_cors : bool);
         Ok(())
     }
 
@@ -1033,9 +993,7 @@ impl Config {
         if let Some(data_dir) = get("DS_STORAGE__DATA_DIR") {
             self.storage.data_dir = data_dir;
         }
-        if let Some(acid_shard_count) = parse_env::<usize>(get, "DS_STORAGE__ACID_SHARD_COUNT")? {
-            self.storage.acid_shard_count = acid_shard_count;
-        }
+        env_parse_into!(self, get, "DS_STORAGE__ACID_SHARD_COUNT" => storage.acid_shard_count : usize);
         if let Some(acid_backend) =
             parse_env_with(get, "DS_STORAGE__ACID_BACKEND", parse_acid_backend_env)?
         {
@@ -1100,9 +1058,7 @@ impl Config {
         &mut self,
         get: &impl Fn(&str) -> Option<String>,
     ) -> Result<(), ConfigLoadError> {
-        if let Some(enabled) = parse_env::<bool>(get, "DS_PROXY__ENABLED")? {
-            self.proxy.enabled = enabled;
-        }
+        env_parse_into!(self, get, "DS_PROXY__ENABLED" => proxy.enabled : bool);
         if let Some(forwarded_headers) = parse_env_with(
             get,
             "DS_PROXY__FORWARDED_HEADERS",
@@ -1123,9 +1079,7 @@ impl Config {
         if let Some(header_name) = get("DS_PROXY__IDENTITY__HEADER_NAME") {
             self.proxy.identity.header_name = Some(header_name);
         }
-        if let Some(require_tls) = parse_env::<bool>(get, "DS_PROXY__IDENTITY__REQUIRE_TLS")? {
-            self.proxy.identity.require_tls = require_tls;
-        }
+        env_parse_into!(self, get, "DS_PROXY__IDENTITY__REQUIRE_TLS" => proxy.identity.require_tls : bool);
         Ok(())
     }
 
@@ -1442,6 +1396,40 @@ pub struct LongPollTimeout(pub Duration);
 #[derive(Debug, Clone, Copy)]
 pub struct SseReconnectInterval(pub u64);
 
+/// Shared defaults applied to every `prod*` profile: stricter limits and
+/// file-durable on-disk storage.
+fn prod_base_patch() -> ConfigPatch {
+    ConfigPatch {
+        limits: LimitsConfigPatch {
+            max_memory_bytes: Some(512 * 1024 * 1024),
+            max_stream_bytes: Some(256 * 1024 * 1024),
+            ..LimitsConfigPatch::default()
+        },
+        storage: StorageConfigPatch {
+            mode: Some(StorageMode::FileDurable),
+            data_dir: Some("/var/lib/durable-streams".to_string()),
+            acid_shard_count: Some(16),
+            ..StorageConfigPatch::default()
+        },
+        ..ConfigPatch::default()
+    }
+}
+
+/// Prod base extended with a TLS-family transport (TLS or mTLS) serving both
+/// HTTP/1.1 and HTTP/2.
+fn prod_tls_patch(mode: TransportMode) -> ConfigPatch {
+    ConfigPatch {
+        transport: TransportConfigPatch {
+            mode: Some(mode),
+            http: TransportHttpConfigPatch {
+                versions: Some(vec![HttpVersion::Http1, HttpVersion::Http2]),
+            },
+            ..TransportConfigPatch::default()
+        },
+        ..prod_base_patch()
+    }
+}
+
 fn built_in_profile_patch(profile: &DeploymentProfile) -> Option<ConfigPatch> {
     match profile {
         DeploymentProfile::Default | DeploymentProfile::Named(_) => None,
@@ -1455,62 +1443,9 @@ fn built_in_profile_patch(profile: &DeploymentProfile) -> Option<ConfigPatch> {
             },
             ..ConfigPatch::default()
         }),
-        DeploymentProfile::Prod => Some(ConfigPatch {
-            limits: LimitsConfigPatch {
-                max_memory_bytes: Some(512 * 1024 * 1024),
-                max_stream_bytes: Some(256 * 1024 * 1024),
-                ..LimitsConfigPatch::default()
-            },
-            storage: StorageConfigPatch {
-                mode: Some(StorageMode::FileDurable),
-                data_dir: Some("/var/lib/durable-streams".to_string()),
-                acid_shard_count: Some(16),
-                ..StorageConfigPatch::default()
-            },
-            ..ConfigPatch::default()
-        }),
-        DeploymentProfile::ProdTls => Some(ConfigPatch {
-            limits: LimitsConfigPatch {
-                max_memory_bytes: Some(512 * 1024 * 1024),
-                max_stream_bytes: Some(256 * 1024 * 1024),
-                ..LimitsConfigPatch::default()
-            },
-            storage: StorageConfigPatch {
-                mode: Some(StorageMode::FileDurable),
-                data_dir: Some("/var/lib/durable-streams".to_string()),
-                acid_shard_count: Some(16),
-                ..StorageConfigPatch::default()
-            },
-            transport: TransportConfigPatch {
-                mode: Some(TransportMode::Tls),
-                http: TransportHttpConfigPatch {
-                    versions: Some(vec![HttpVersion::Http1, HttpVersion::Http2]),
-                },
-                ..TransportConfigPatch::default()
-            },
-            ..ConfigPatch::default()
-        }),
-        DeploymentProfile::ProdMtls => Some(ConfigPatch {
-            limits: LimitsConfigPatch {
-                max_memory_bytes: Some(512 * 1024 * 1024),
-                max_stream_bytes: Some(256 * 1024 * 1024),
-                ..LimitsConfigPatch::default()
-            },
-            storage: StorageConfigPatch {
-                mode: Some(StorageMode::FileDurable),
-                data_dir: Some("/var/lib/durable-streams".to_string()),
-                acid_shard_count: Some(16),
-                ..StorageConfigPatch::default()
-            },
-            transport: TransportConfigPatch {
-                mode: Some(TransportMode::Mtls),
-                http: TransportHttpConfigPatch {
-                    versions: Some(vec![HttpVersion::Http1, HttpVersion::Http2]),
-                },
-                ..TransportConfigPatch::default()
-            },
-            ..ConfigPatch::default()
-        }),
+        DeploymentProfile::Prod => Some(prod_base_patch()),
+        DeploymentProfile::ProdTls => Some(prod_tls_patch(TransportMode::Tls)),
+        DeploymentProfile::ProdMtls => Some(prod_tls_patch(TransportMode::Mtls)),
     }
 }
 
@@ -1612,74 +1547,6 @@ impl MergeContext {
         {
             config.transport.mode = TransportMode::Tls;
         }
-    }
-}
-
-fn parse_storage_mode_env(raw: &str) -> Option<StorageMode> {
-    match raw.to_ascii_lowercase().as_str() {
-        "memory" => Some(StorageMode::Memory),
-        "file" | "file-durable" | "durable" => Some(StorageMode::FileDurable),
-        "file-fast" | "fast" => Some(StorageMode::FileFast),
-        "acid" | "redb" => Some(StorageMode::Acid),
-        _ => None,
-    }
-}
-
-fn parse_acid_backend_env(raw: &str) -> Option<AcidBackend> {
-    match raw.to_ascii_lowercase().as_str() {
-        "file" => Some(AcidBackend::File),
-        "memory" | "in-memory" | "inmemory" => Some(AcidBackend::InMemory),
-        _ => None,
-    }
-}
-
-fn parse_transport_mode_env(raw: &str) -> Option<TransportMode> {
-    match raw.to_ascii_lowercase().as_str() {
-        "http" => Some(TransportMode::Http),
-        "tls" => Some(TransportMode::Tls),
-        "mtls" => Some(TransportMode::Mtls),
-        _ => None,
-    }
-}
-
-fn parse_http_version_env(raw: &str) -> Option<HttpVersion> {
-    match raw.to_ascii_lowercase().as_str() {
-        "http1" | "http1.1" | "http/1.1" | "1.1" | "h1" => Some(HttpVersion::Http1),
-        "http2" | "2" | "h2" => Some(HttpVersion::Http2),
-        _ => None,
-    }
-}
-
-fn parse_tls_version_env(raw: &str) -> Option<TlsVersion> {
-    match raw.to_ascii_lowercase().as_str() {
-        "1.2" | "tls1.2" | "tls-1.2" => Some(TlsVersion::V1_2),
-        "1.3" | "tls1.3" | "tls-1.3" => Some(TlsVersion::V1_3),
-        _ => None,
-    }
-}
-
-fn parse_alpn_protocol_env(raw: &str) -> Option<AlpnProtocol> {
-    match raw.to_ascii_lowercase().as_str() {
-        "http/1.1" | "http1" | "h1" => Some(AlpnProtocol::Http1_1),
-        "h2" | "http2" => Some(AlpnProtocol::H2),
-        _ => None,
-    }
-}
-
-fn parse_forwarded_headers_mode_env(raw: &str) -> Option<ForwardedHeadersMode> {
-    match raw.to_ascii_lowercase().as_str() {
-        "none" => Some(ForwardedHeadersMode::None),
-        "x-forwarded" | "xforwarded" => Some(ForwardedHeadersMode::XForwarded),
-        "forwarded" => Some(ForwardedHeadersMode::Forwarded),
-        _ => None,
-    }
-}
-
-fn parse_proxy_identity_mode_env(raw: &str) -> Option<ProxyIdentityMode> {
-    match raw.to_ascii_lowercase().as_str() {
-        "none" => Some(ProxyIdentityMode::None),
-        "header" => Some(ProxyIdentityMode::Header),
-        _ => None,
     }
 }
 
