@@ -215,7 +215,6 @@ pub durable_streams_server::protocol::error::Error::EpochFenced::received: u64
 pub durable_streams_server::protocol::error::Error::ForkFromTombstone(alloc::string::String)
 pub durable_streams_server::protocol::error::Error::ForkOffsetBeyondTail
 pub durable_streams_server::protocol::error::Error::InsufficientStorage(durable_streams_server::protocol::error::StorageFailure)
-pub durable_streams_server::protocol::error::Error::InvalidBody(alloc::string::String)
 pub durable_streams_server::protocol::error::Error::InvalidHeader
 pub durable_streams_server::protocol::error::Error::InvalidHeader::header: alloc::string::String
 pub durable_streams_server::protocol::error::Error::InvalidHeader::reason: alloc::string::String
