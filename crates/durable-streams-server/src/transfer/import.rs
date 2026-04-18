@@ -78,7 +78,7 @@ pub fn import_streams<R: Read>(
         if storage.exists(&stream.name) {
             match options.conflict_policy {
                 ConflictPolicy::Skip => {
-                    eprintln!("Skipping existing stream: {}", stream.name);
+                    tracing::warn!(stream = %stream.name, "skipping existing stream");
                     stats.streams_skipped += 1;
                     continue;
                 }
