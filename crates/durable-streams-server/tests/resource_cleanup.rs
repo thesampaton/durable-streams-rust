@@ -36,14 +36,14 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
             .append("s", Bytes::from("data"), "text/plain")
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         assert!(matches!(
             storage.read("s", &Offset::start()),
@@ -56,14 +56,14 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
             .append("s", Bytes::from("data"), "text/plain")
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         assert!(matches!(storage.head("s"), Err(Error::StreamExpired)));
     }
@@ -73,11 +73,11 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         assert!(matches!(
             storage.append("s", Bytes::from("late"), "text/plain"),
@@ -94,14 +94,14 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
             .append("s", Bytes::from("old-data"), "text/plain")
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         // Recreate with a fresh config (no expiry)
         let fresh_config = plain_config();
@@ -122,7 +122,7 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
 
         storage.create_stream("exp-1", config.clone()).unwrap();
@@ -140,7 +140,7 @@ storage_backend_tests! {
             .append("keep", Bytes::from("keep-data"), "text/plain")
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         let removed = storage.cleanup_expired_streams();
         assert_eq!(removed, 2);
@@ -177,7 +177,7 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
 
         storage.create_stream("exp", config).unwrap();
@@ -188,7 +188,7 @@ storage_backend_tests! {
         let before = handle.storage.total_bytes();
         assert_eq!(before, 100);
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         storage.cleanup_expired_streams();
 
@@ -327,14 +327,14 @@ storage_backend_tests! {
         let handle = create_test_storage(BACKEND);
         let storage = &handle.storage;
 
-        let expires = Utc::now() + chrono::Duration::milliseconds(500);
+        let expires = Utc::now() + chrono::Duration::seconds(2);
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("exp", config).unwrap();
         storage
             .append("exp", Bytes::from("data"), "text/plain")
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(700));
+        std::thread::sleep(std::time::Duration::from_millis(2500));
 
         let first = storage.cleanup_expired_streams();
         assert_eq!(first, 1);
