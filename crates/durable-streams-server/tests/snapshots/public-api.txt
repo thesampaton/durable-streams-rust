@@ -5,6 +5,8 @@ pub durable_streams_server::config::AcidBackend::File
 pub durable_streams_server::config::AcidBackend::InMemory
 impl durable_streams_server::config::AcidBackend
 pub fn durable_streams_server::config::AcidBackend::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::AcidBackend
+pub fn durable_streams_server::config::AcidBackend::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum durable_streams_server::config::AlpnProtocol
 pub durable_streams_server::config::AlpnProtocol::H2
 pub durable_streams_server::config::AlpnProtocol::Http1_1
@@ -90,6 +92,10 @@ pub enum durable_streams_server::config::ForwardedHeadersMode
 pub durable_streams_server::config::ForwardedHeadersMode::Forwarded
 pub durable_streams_server::config::ForwardedHeadersMode::None
 pub durable_streams_server::config::ForwardedHeadersMode::XForwarded
+impl durable_streams_server::config::ForwardedHeadersMode
+pub fn durable_streams_server::config::ForwardedHeadersMode::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::ForwardedHeadersMode
+pub fn durable_streams_server::config::ForwardedHeadersMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum durable_streams_server::config::HttpVersion
 pub durable_streams_server::config::HttpVersion::Http1
 pub durable_streams_server::config::HttpVersion::Http2
@@ -100,6 +106,10 @@ pub fn durable_streams_server::config::HttpVersion::fmt(&self, formatter: &mut c
 pub enum durable_streams_server::config::ProxyIdentityMode
 pub durable_streams_server::config::ProxyIdentityMode::Header
 pub durable_streams_server::config::ProxyIdentityMode::None
+impl durable_streams_server::config::ProxyIdentityMode
+pub fn durable_streams_server::config::ProxyIdentityMode::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::ProxyIdentityMode
+pub fn durable_streams_server::config::ProxyIdentityMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum durable_streams_server::config::StorageMode
 pub durable_streams_server::config::StorageMode::Acid
 pub durable_streams_server::config::StorageMode::FileDurable
@@ -107,6 +117,7 @@ pub durable_streams_server::config::StorageMode::FileFast
 pub durable_streams_server::config::StorageMode::Memory
 impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
+impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::StorageMode
@@ -116,12 +127,15 @@ pub durable_streams_server::config::TlsVersion::V1_2
 pub durable_streams_server::config::TlsVersion::V1_3
 impl durable_streams_server::config::TlsVersion
 pub fn durable_streams_server::config::TlsVersion::as_str(self) -> &'static str
+impl core::fmt::Display for durable_streams_server::config::TlsVersion
+pub fn durable_streams_server::config::TlsVersion::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum durable_streams_server::config::TransportMode
 pub durable_streams_server::config::TransportMode::Http
 pub durable_streams_server::config::TransportMode::Mtls
 pub durable_streams_server::config::TransportMode::Tls
 impl durable_streams_server::config::TransportMode
 pub fn durable_streams_server::config::TransportMode::as_str(self) -> &'static str
+impl durable_streams_server::config::TransportMode
 pub fn durable_streams_server::config::TransportMode::uses_tls(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::TransportMode
 pub fn durable_streams_server::config::TransportMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -642,6 +656,7 @@ pub durable_streams_server::StorageMode::FileFast
 pub durable_streams_server::StorageMode::Memory
 impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
+impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::StorageMode
