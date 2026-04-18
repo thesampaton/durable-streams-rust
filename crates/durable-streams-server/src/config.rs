@@ -19,30 +19,65 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Storage backend selection for the server runtime.
+///
+/// This is the main operator-facing choice when deciding how the server should
+/// persist streams.
+///
+/// The `file-*` modes use the simple append-log implementation from
+/// [`crate::storage::file::FileStorage`]. The `acid` mode uses
+/// [`crate::storage::acid::AcidStorage`], which stores data in redb databases
+/// instead of per-stream log files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StorageMode {
     /// In-memory backend.
+    ///
+    /// Best suited to tests, demos, and ephemeral development environments.
     Memory,
-    /// File backend without fsync/fdatasync on every append.
+    /// Filesystem-backed append-log storage without syncing each append.
+    ///
+    /// Uses one directory per stream with a `data.log` and `meta.json`, but
+    /// does not call `fsync`/`fdatasync` on every write. Choose this when you
+    /// want simple local persistence and favor throughput over the strongest
+    /// crash-durability guarantees for the most recent appends.
     #[serde(alias = "fast")]
     FileFast,
-    /// File backend with fsync/fdatasync on every append.
+    /// Filesystem-backed append-log storage with syncing on each append.
+    ///
+    /// Uses the same on-disk layout as [`Self::FileFast`], but performs
+    /// `fsync`/`fdatasync` after writes. Choose this when you want the simpler
+    /// file-log backend while reducing the risk of losing recently acknowledged
+    /// appends after a crash, and can afford the added write latency.
     #[serde(alias = "file", alias = "durable")]
     FileDurable,
-    /// ACID backend using sharded redb databases.
+    /// Transactional redb-backed storage.
+    ///
+    /// Choose this when you want stronger transactional durability for
+    /// metadata and message updates than the plain file-log modes provide.
+    /// The concrete redb persistence medium is controlled separately by
+    /// [`AcidBackend`].
     #[serde(alias = "redb")]
     Acid,
 }
 
-/// Redb storage backend used by the [`StorageMode::Acid`] mode.
+/// Redb persistence medium used by [`StorageMode::Acid`].
+///
+/// This only applies when `storage.mode = "acid"`. It does not affect the
+/// separate `file-fast` / `file-durable` storage family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AcidBackend {
-    /// File-backed redb (default). Data persists across restarts.
+    /// File-backed redb (default).
+    ///
+    /// Persists shard databases under `storage.data_dir` and survives restarts.
+    /// Choose this when you want the acid/redb backend with durable local
+    /// storage.
     File,
-    /// In-memory redb. Provides ACID transactions without disk I/O; all data
-    /// is lost on shutdown.
+    /// In-memory redb.
+    ///
+    /// Keeps the redb databases in memory only. This preserves the
+    /// transactional behavior of the acid backend but drops all state on
+    /// shutdown, which can be useful for tests or benchmarking.
     #[serde(alias = "memory", alias = "inmemory")]
     InMemory,
 }
