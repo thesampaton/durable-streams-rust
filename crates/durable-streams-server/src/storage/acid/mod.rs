@@ -442,37 +442,42 @@ impl AcidStorage {
 
             meta.ref_count = meta.ref_count.saturating_sub(1);
 
-            if meta.state == StreamState::Tombstone && meta.ref_count == 0 {
-                let fi = meta.fork_info.clone();
-                let total_bytes = meta.total_bytes;
+            let step =
+                super::fork::cascade_step(meta.state, meta.ref_count, meta.fork_info.as_ref());
 
-                let mut messages = txn
-                    .open_table(MESSAGES)
-                    .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-                Self::delete_stream_messages(&mut messages, &current_parent)?;
-                drop(messages);
+            match step {
+                super::fork::CascadeStep::CollectAndContinue { next_parent } => {
+                    let total_bytes = meta.total_bytes;
 
-                streams
-                    .remove(current_parent.as_str())
-                    .map_err(|e| Self::storage_err("failed to remove tombstoned parent", e))?;
-                drop(streams);
-                txn.commit()
-                    .map_err(|e| Self::storage_err("failed to commit cascade delete", e))?;
+                    let mut messages = txn
+                        .open_table(MESSAGES)
+                        .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+                    Self::delete_stream_messages(&mut messages, &current_parent)?;
+                    drop(messages);
 
-                self.saturating_sub_total_bytes(total_bytes);
-                self.drop_notifier(&current_parent);
+                    streams
+                        .remove(current_parent.as_str())
+                        .map_err(|e| Self::storage_err("failed to remove tombstoned parent", e))?;
+                    drop(streams);
+                    txn.commit()
+                        .map_err(|e| Self::storage_err("failed to commit cascade delete", e))?;
 
-                if let Some(fi) = fi {
-                    current_parent = fi.source_name;
-                } else {
+                    self.saturating_sub_total_bytes(total_bytes);
+                    self.drop_notifier(&current_parent);
+
+                    match next_parent {
+                        Some(next) => current_parent = next,
+                        None => break,
+                    }
+                }
+                super::fork::CascadeStep::PersistAndStop => {
+                    Self::write_stream_meta(&mut streams, &current_parent, &meta)?;
+                    drop(streams);
+                    txn.commit().map_err(|e| {
+                        Self::storage_err("failed to commit ref_count decrement", e)
+                    })?;
                     break;
                 }
-            } else {
-                Self::write_stream_meta(&mut streams, &current_parent, &meta)?;
-                drop(streams);
-                txn.commit()
-                    .map_err(|e| Self::storage_err("failed to commit ref_count decrement", e))?;
-                break;
             }
         }
         Ok(())
