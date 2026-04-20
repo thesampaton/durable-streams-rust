@@ -24,91 +24,77 @@ pub(super) fn retry_on_eintr<T>(
 }
 
 impl FileStorage {
-    /// Map a stream name to a directory path inside `root_dir`.
-    ///
-    /// Uses base64url encoding (alphabet `[A-Za-z0-9_-]`) so the output
-    /// cannot contain path separators, but we verify containment anyway
-    /// as defense in depth.
-    pub(super) fn stream_dir_for_name(&self, name: &str) -> Result<PathBuf> {
+    fn stream_dir_component(name: &str) -> Result<String> {
         let encoded = base64::prelude::BASE64_URL_SAFE_NO_PAD.encode(name.as_bytes());
-
-        // Reject path traversal sequences and separators. Base64url encoding
-        // (alphabet [A-Za-z0-9_-]) cannot produce these, but the explicit
-        // checks act as defense in depth and satisfy static analysis (CodeQL
-        // rust/path-injection).
-        if encoded.contains("..") || encoded.contains('/') || encoded.contains('\\') {
-            return Err(Error::Storage(
-                "encoded stream name contains path traversal characters".to_string(),
-            ));
-        }
-        if !encoded
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        if !is_valid_stream_dir_component(&encoded) {
             return Err(Error::Storage(
                 "encoded stream directory contains invalid characters".to_string(),
             ));
         }
+        Ok(encoded)
+    }
 
-        let dir = self.root_dir.join(&encoded);
-        if !dir.starts_with(&self.root_dir) {
-            return Err(Error::Storage(format!(
-                "stream directory escapes storage root: {encoded}"
-            )));
-        }
-        Ok(dir)
+    /// Map a stream name to a directory path inside `root_dir`.
+    ///
+    /// Stream directories are always the base64url-encoded stream name as a
+    /// single direct child under the configured storage root.
+    pub(super) fn stream_dir_for_name(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.root_dir.join(Self::stream_dir_component(name)?))
     }
 
     pub(super) fn validate_stream_dir(&self, dir: &Path) -> Result<()> {
-        if !dir.starts_with(&self.root_dir) {
+        if dir.parent() != Some(self.root_dir.as_path()) {
             return Err(Error::Storage(format!(
-                "path escapes storage root: {}",
+                "stream directory must be a direct child of the storage root: {}",
                 dir.display()
             )));
         }
 
-        let rel = dir.strip_prefix(&self.root_dir).map_err(|e| {
-            Error::Storage(format!(
-                "failed to validate storage path {}: {e}",
-                dir.display()
-            ))
-        })?;
-        if rel.components().count() != 1 {
+        let Some(component) = dir.file_name().and_then(|name| name.to_str()) else {
             return Err(Error::Storage(format!(
-                "invalid stream path depth: {}",
+                "stream directory is not valid UTF-8: {}",
+                dir.display()
+            )));
+        };
+        if !is_valid_stream_dir_component(component) {
+            return Err(Error::Storage(format!(
+                "stream directory contains invalid characters: {}",
                 dir.display()
             )));
         }
 
-        if dir.exists() {
-            let metadata = fs::symlink_metadata(dir).map_err(|e| {
-                Error::Storage(format!(
-                    "failed to stat stream directory {}: {e}",
-                    dir.display()
-                ))
-            })?;
-            if metadata.file_type().is_symlink() {
-                return Err(Error::Storage(format!(
-                    "stream directory cannot be a symlink: {}",
-                    dir.display()
-                )));
-            }
-            if !metadata.is_dir() {
-                return Err(Error::Storage(format!(
-                    "stream path is not a directory: {}",
-                    dir.display()
-                )));
-            }
+        match fs::symlink_metadata(dir) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(Error::Storage(format!(
+                        "stream directory cannot be a symlink: {}",
+                        dir.display()
+                    )));
+                }
+                if !metadata.is_dir() {
+                    return Err(Error::Storage(format!(
+                        "stream path is not a directory: {}",
+                        dir.display()
+                    )));
+                }
 
-            let canonical = fs::canonicalize(dir).map_err(|e| {
-                Error::Storage(format!(
-                    "failed to canonicalize stream directory {}: {e}",
-                    dir.display()
-                ))
-            })?;
-            if !canonical.starts_with(&self.root_dir_canonical) {
+                let canonical = fs::canonicalize(dir).map_err(|e| {
+                    Error::Storage(format!(
+                        "failed to canonicalize stream directory {}: {e}",
+                        dir.display()
+                    ))
+                })?;
+                if !canonical.starts_with(&self.root_dir_canonical) {
+                    return Err(Error::Storage(format!(
+                        "stream directory resolves outside storage root: {}",
+                        dir.display()
+                    )));
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
                 return Err(Error::Storage(format!(
-                    "stream directory resolves outside storage root: {}",
+                    "failed to stat stream directory {}: {err}",
                     dir.display()
                 )));
             }
@@ -203,4 +189,11 @@ impl FileStorage {
             )
         })
     }
+}
+
+fn is_valid_stream_dir_component(component: &str) -> bool {
+    !component.is_empty()
+        && component
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

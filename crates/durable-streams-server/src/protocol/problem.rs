@@ -107,6 +107,19 @@ pub struct ProblemResponse {
 /// Response result alias for handlers that emit structured problem details.
 pub type Result<T> = std::result::Result<T, ProblemResponse>;
 
+/// Crate-local alias used where `protocol::error::Result` is also in scope.
+pub(crate) type ProblemResult<T> = Result<T>;
+
+fn fallback_problem_body() -> Vec<u8> {
+    let fallback = ProblemDetails::new(
+        "/errors/internal",
+        "Internal Server Error",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+    );
+    serde_json::to_vec(&fallback).unwrap_or_else(|_| b"{}".to_vec())
+}
+
 impl ProblemResponse {
     /// Create a problem response from an RFC 9457 payload.
     #[must_use]
@@ -171,7 +184,7 @@ impl IntoResponse for ProblemResponse {
             .map_or_else(|| ProblemTelemetry::from(&*self.problem), |t| *t);
         let body = match serde_json::to_vec(&self.problem) {
             Ok(body) => body,
-            Err(_) => br#"{"type":"/errors/internal","title":"Internal Server Error","status":500,"code":"INTERNAL_ERROR"}"#.to_vec(),
+            Err(_) => fallback_problem_body(),
         };
 
         let mut response = Response::new(Body::from(body));

@@ -21,57 +21,33 @@ pub mod names {
 
 /// Parse TTL header value
 ///
-/// Validates that the TTL is a valid unsigned integer with no leading zeros,
-/// no decimal points, and no scientific notation.
+/// Validates that the TTL is a valid unsigned integer with no leading zeros
+/// or leading plus sign.
 ///
 /// # Errors
 ///
-/// Returns `Error::InvalidTtl` if the value has leading zeros, decimals,
-/// scientific notation, is negative, or is not a valid integer.
+/// Returns `Error::InvalidTtl` if the value is empty, has leading zeros,
+/// has a leading plus sign, or is not a valid integer.
 pub fn parse_ttl(value: &str) -> Result<u64> {
     let trimmed = value.trim();
 
-    // Reject empty
     if trimmed.is_empty() {
         return Err(Error::InvalidTtl("empty value".to_string()));
     }
 
-    // Reject leading zeros (except "0" itself)
-    if trimmed.len() > 1 && trimmed.starts_with('0') {
-        return Err(Error::InvalidTtl(format!(
-            "leading zeros not allowed: '{trimmed}'"
-        )));
-    }
-
-    // Reject decimals
-    if trimmed.contains('.') {
-        return Err(Error::InvalidTtl(format!(
-            "decimal values not allowed: '{trimmed}'"
-        )));
-    }
-
-    // Reject scientific notation
-    if trimmed.contains('e') || trimmed.contains('E') {
-        return Err(Error::InvalidTtl(format!(
-            "scientific notation not allowed: '{trimmed}'"
-        )));
-    }
-
-    // Reject negative
-    if trimmed.starts_with('-') {
-        return Err(Error::InvalidTtl(format!(
-            "negative values not allowed: '{trimmed}'"
-        )));
-    }
-
-    // Reject leading plus sign (Rust's u64::parse accepts "+123")
+    // Reject leading plus sign explicitly because `u64::from_str` accepts it.
     if trimmed.starts_with('+') {
         return Err(Error::InvalidTtl(format!(
             "leading plus sign not allowed: '{trimmed}'"
         )));
     }
 
-    // Parse as u64
+    if trimmed.len() > 1 && trimmed.starts_with('0') {
+        return Err(Error::InvalidTtl(format!(
+            "leading zeros not allowed: '{trimmed}'"
+        )));
+    }
+
     trimmed
         .parse::<u64>()
         .map_err(|e| Error::InvalidTtl(format!("invalid integer '{trimmed}': {e}")))

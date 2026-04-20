@@ -1,5 +1,5 @@
 use crate::handlers::common::with_instance;
-use crate::protocol::problem::Result;
+use crate::protocol::problem::ProblemResult;
 use crate::protocol::stream_name::StreamName;
 use crate::storage::Storage;
 use axum::{
@@ -21,7 +21,7 @@ pub async fn delete_stream<S: Storage>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
         storage.delete(&name)?;
         Ok(StatusCode::NO_CONTENT.into_response())

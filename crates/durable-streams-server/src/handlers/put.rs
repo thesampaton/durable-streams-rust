@@ -5,7 +5,7 @@ use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::{ProblemResponse, Result};
+use crate::protocol::problem::{ProblemResponse, ProblemResult};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
 use crate::storage::{CreateStreamResult, CreateWithDataResult, Storage, StreamConfig};
@@ -39,7 +39,7 @@ pub async fn create_stream<S: Storage>(
     Extension(request_origin): Extension<ProxyTrustResult>,
     headers: HeaderMap,
     body: Body,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
         let body_bytes = read_body(body).await?;
         let normalized_ct = parse_content_type(&headers)?;
@@ -80,7 +80,7 @@ pub async fn create_stream<S: Storage>(
 
 /// Parse Content-Type, defaulting to application/octet-stream when missing,
 /// rejecting an explicitly empty value.
-fn parse_content_type(headers: &HeaderMap) -> Result<String> {
+fn parse_content_type(headers: &HeaderMap) -> ProblemResult<String> {
     let raw = headers.get("content-type").and_then(|v| v.to_str().ok());
     if let Some(ct) = raw
         && ct.trim().is_empty()
@@ -102,7 +102,7 @@ fn build_config(
     headers: &HeaderMap,
     content_type: String,
     created_closed: bool,
-) -> Result<StreamConfig> {
+) -> ProblemResult<StreamConfig> {
     let ttl_seconds = match headers.get(names::STREAM_TTL).and_then(|v| v.to_str().ok()) {
         Some(value) => Some(headers::parse_ttl(value)?),
         None => None,
@@ -143,7 +143,7 @@ fn create_fork_stream<S: Storage>(
     stream_base_path: &str,
     config: StreamConfig,
     location: &str,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let source_name = strip_stream_base_path(forked_from, stream_base_path);
     let fork_offset = match fork_offset_raw {
         Some(raw) => Some(Offset::from_str(raw)?),
@@ -172,7 +172,7 @@ fn create_standard_stream<S: Storage>(
     config: StreamConfig,
     created_closed: bool,
     location: &str,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     // Parse body into messages BEFORE creating the stream so that failures
     // (e.g. invalid JSON) never leave an orphaned stream.
     let messages = extract_messages(body, normalized_ct)?;
