@@ -7,7 +7,7 @@
 use crate::protocol::headers::{self, names};
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::{ProblemDetails, ProblemResponse, Result, request_instance};
+use crate::protocol::problem::{ProblemDetails, ProblemResponse, ProblemResult, request_instance};
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header::IntoHeaderName};
@@ -18,7 +18,7 @@ use std::future::Future;
 ///
 /// Body I/O failures surface as a dedicated invalid-body problem response
 /// without widening the public [`crate::protocol::error::Error`] enum.
-pub async fn read_body(body: Body) -> Result<Bytes> {
+pub async fn read_body(body: Body) -> ProblemResult<Bytes> {
     axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
         ProblemResponse::new(
             ProblemDetails::new(
@@ -49,7 +49,7 @@ pub fn parse_stream_closed(headers: &HeaderMap) -> bool {
 ///
 /// Empty JSON arrays return `Ok(vec![])`; callers enforce their own
 /// policy (PUT accepts them; POST rejects unless closing).
-pub fn extract_messages(body: Bytes, normalized_ct: &str) -> Result<Vec<Bytes>> {
+pub fn extract_messages(body: Bytes, normalized_ct: &str) -> ProblemResult<Vec<Bytes>> {
     if body.is_empty() {
         Ok(vec![])
     } else if json_mode::is_json_content_type(normalized_ct) {
@@ -63,10 +63,10 @@ pub fn extract_messages(body: Bytes, normalized_ct: &str) -> Result<Vec<Bytes>> 
 ///
 /// All handlers share the same "run the body, tag failures with the
 /// request path" boilerplate; this helper does the wrapping once.
-pub async fn with_instance<F, Fut>(original_uri: OriginalUri, f: F) -> Result<Response>
+pub async fn with_instance<F, Fut>(original_uri: OriginalUri, f: F) -> ProblemResult<Response>
 where
     F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<Response>>,
+    Fut: Future<Output = ProblemResult<Response>>,
 {
     let instance = request_instance(&original_uri);
     f().await.map_err(|problem| problem.with_instance(instance))

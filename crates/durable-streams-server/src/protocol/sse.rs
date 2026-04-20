@@ -165,6 +165,12 @@ pub fn format_keepalive_frame() -> &'static str {
     ":\n\n"
 }
 
+const TEXT_SAFE_APPLICATION_TYPES: &[&str] = &["application/json"];
+
+fn is_text_content_type(ct: &str) -> bool {
+    ct.starts_with("text/") || TEXT_SAFE_APPLICATION_TYPES.contains(&ct)
+}
+
 /// Determine if a content type requires base64 encoding in SSE mode.
 ///
 /// Returns `false` for `text/*` and `application/json` (UTF-8 safe).
@@ -176,13 +182,7 @@ pub fn format_keepalive_frame() -> &'static str {
 /// base64-encode data events."
 #[must_use]
 pub fn is_binary_content_type(ct: &str) -> bool {
-    if ct.starts_with("text/") {
-        return false;
-    }
-    if ct == "application/json" {
-        return false;
-    }
-    true
+    !is_text_content_type(ct)
 }
 
 #[cfg(test)]

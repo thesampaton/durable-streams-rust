@@ -3,7 +3,7 @@ use crate::protocol::cursor;
 use crate::protocol::error::Error;
 use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
-use crate::protocol::problem::Result;
+use crate::protocol::problem::ProblemResult;
 use crate::protocol::sse::{self, ControlPayload};
 use crate::protocol::stream_name::StreamName;
 use crate::router::ReadStreamConfig;
@@ -55,7 +55,7 @@ pub async fn read_stream<S: Storage + 'static>(
     Query(query): Query<ReadQuery>,
     Extension(read_config): Extension<ReadStreamConfig>,
     headers: HeaderMap,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let ReadStreamConfig {
         long_poll_timeout: timeout,
         sse_reconnect_interval_secs: reconnect_interval_secs,
@@ -114,7 +114,7 @@ pub async fn read_stream<S: Storage + 'static>(
 /// Resolve the starting offset from query params.
 ///
 /// Live modes require an explicit `offset`; catch-up defaults to `-1`.
-fn resolve_offset(query: &ReadQuery) -> Result<String> {
+fn resolve_offset(query: &ReadQuery) -> ProblemResult<String> {
     if let Some(ref live) = query.live {
         query.offset.clone().ok_or_else(|| {
             Error::InvalidHeader {
@@ -139,7 +139,7 @@ fn read_catch_up<S: Storage>(
     raw_offset: &str,
     if_none_match: Option<&str>,
     content_type: &str,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let read_result = storage.read(name, offset)?;
     let (etag, not_modified) = compute_etag(&read_result, raw_offset, if_none_match);
     if let Some(response) = not_modified {
@@ -162,7 +162,7 @@ async fn read_long_poll<S: Storage>(
     ctx: &ReadContext<'_>,
     timeout: Duration,
     shutdown: CancellationToken,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let ReadContext {
         name,
         offset,
@@ -234,7 +234,7 @@ fn read_sse<S: Storage + 'static>(
     content_type: &str,
     reconnect_interval_secs: u64,
     shutdown: CancellationToken,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let encoding = SseEncoding {
         is_binary: sse::is_binary_content_type(content_type),
         is_json: json_mode::is_json_content_type(content_type),
@@ -412,7 +412,7 @@ fn handle_long_poll_wake<S: Storage>(
     offset: &Offset,
     raw_offset: &str,
     content_type: &str,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let read_result = storage.read(name, offset)?;
 
     if read_result.messages.is_empty() {

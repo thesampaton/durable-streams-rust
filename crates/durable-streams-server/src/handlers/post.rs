@@ -3,7 +3,7 @@ use crate::handlers::common::{
 };
 use crate::protocol::error::Error;
 use crate::protocol::headers::{self, names};
-use crate::protocol::problem::{ProblemResponse, Result};
+use crate::protocol::problem::{ProblemResponse, ProblemResult};
 use crate::protocol::producer;
 use crate::protocol::stream_name::StreamName;
 use crate::storage::{ProducerAppendResult, Storage};
@@ -32,7 +32,7 @@ pub async fn append_data<S: Storage>(
     original_uri: OriginalUri,
     headers: HeaderMap,
     body: Body,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
         let body_bytes = read_body(body).await?;
         let should_close = parse_stream_closed(&headers);
@@ -108,7 +108,7 @@ fn handle_non_producer_append<S: Storage>(
     content_type: &str,
     should_close: bool,
     seq: Option<&str>,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     let next_offset = if messages.is_empty() {
         storage.head(name)?.next_offset
     } else {
@@ -146,7 +146,7 @@ struct ProducerAppendArgs<'a, S: Storage> {
 ///
 /// Returns 200 OK for accepted appends, 204 No Content for duplicates
 /// or close-only operations.
-fn handle_producer_append<S: Storage>(args: ProducerAppendArgs<'_, S>) -> Result<Response> {
+fn handle_producer_append<S: Storage>(args: ProducerAppendArgs<'_, S>) -> ProblemResult<Response> {
     let ProducerAppendArgs {
         storage,
         name,

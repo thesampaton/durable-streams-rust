@@ -72,10 +72,8 @@ impl Offset {
         match self {
             Self::Start => Self::START,
             Self::Now => Self::NOW,
-            Self::Concrete { raw, .. } => {
-                // SAFETY: `raw` is always constructed from ASCII hex digits + `_`.
-                unsafe { std::str::from_utf8_unchecked(raw) }
-            }
+            Self::Concrete { raw, .. } => std::str::from_utf8(raw)
+                .expect("offset bytes are generated from ASCII hex digits and '_'"),
         }
     }
 

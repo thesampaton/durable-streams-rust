@@ -1,5 +1,5 @@
 use crate::handlers::common::{StreamResponse, header_value, with_instance};
-use crate::protocol::{headers::names, problem::Result, stream_name::StreamName};
+use crate::protocol::{headers::names, problem::ProblemResult, stream_name::StreamName};
 use crate::storage::Storage;
 use axum::{
     extract::{OriginalUri, State},
@@ -20,7 +20,7 @@ pub async fn stream_metadata<S: Storage>(
     State(storage): State<Arc<S>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
-) -> Result<Response> {
+) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
         let metadata = storage.head(&name)?;
         let mut response = StreamResponse::new(StatusCode::OK)

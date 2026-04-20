@@ -99,14 +99,6 @@ where
 
         let name = raw_name.strip_prefix('/').unwrap_or(&raw_name);
 
-        // Validate empty name before extracting limits (no config needed).
-        if name.is_empty() {
-            return Err(problem_response(
-                "stream name cannot be empty",
-                instance.as_deref(),
-            ));
-        }
-
         let Extension(limits) = Extension::<StreamNameLimits>::from_request_parts(parts, state)
             .await
             .map_err(|_| {
@@ -152,9 +144,6 @@ mod tests {
     /// Helper: strip leading slash then validate, mirroring the extractor flow.
     fn strip_and_validate(raw: &str, limits: &StreamNameLimits) -> Result<String, String> {
         let name = raw.strip_prefix('/').unwrap_or(raw);
-        if name.is_empty() {
-            return Err("stream name cannot be empty".to_string());
-        }
         validate(name, limits)?;
         Ok(name.to_string())
     }
