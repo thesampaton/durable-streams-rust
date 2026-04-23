@@ -41,3 +41,9 @@ real code instead of anticipation.
 3. Introduce additional crates only when real code boundaries justify them.
 4. Revisit release automation and packaging policy once the workspace shape has
    stabilised.
+
+## Focused Design Notes
+
+- `docs/server-request-outcome-architecture.md` describes the target server-side
+  request, error, and observability architecture that should precede any
+  detailed field taxonomy or schema work.
