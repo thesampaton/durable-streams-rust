@@ -1,6 +1,9 @@
-//! Axum router construction for the Durable Streams HTTP surface.
+//! Axum router construction for the Durable Streams HTTP surfaces.
 //!
 //! [`build_router`] is the main embedding entry point for library consumers.
+//! Protocol routes are always mounted at `Config::http.stream_base_path`;
+//! optional admin/operator routes are mounted separately at
+//! `Config::admin.base_path` only when `admin.enabled = true`.
 
 use crate::config::Config;
 use crate::middleware::proxy_trust::ProxyTrustState;
@@ -41,9 +44,11 @@ pub(crate) struct StreamBasePath(pub Arc<str>);
 /// Build the application router with storage state.
 ///
 /// Routes:
-/// - `GET /healthz`        – Liveness probe (always 200)
-/// - `GET/PUT/... <path>`  – Protocol routes mounted at the configured
-///   `config.stream_base_path` (default [`DEFAULT_STREAM_BASE_PATH`])
+/// - `GET /healthz`         – Liveness probe (always 200)
+/// - `GET/PUT/... <path>`   – Protocol routes mounted at the configured
+///   `config.http.stream_base_path` (default [`DEFAULT_STREAM_BASE_PATH`])
+/// - `GET <admin>/streams`  – Optional operator list route, mounted only when
+///   `config.admin.enabled` is true
 ///
 /// Uses a no-op cancellation token (never cancelled). For production
 /// use with graceful shutdown, prefer [`build_router_with_ready`].
@@ -59,6 +64,14 @@ pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> R
 ///
 /// The `shutdown` token is propagated to long-poll and SSE handlers so they
 /// can observe server shutdown and drain in-flight connections cleanly.
+///
+/// The admin router is composed separately from the protocol router so future
+/// operators or embedders can apply different Tower layers to admin traffic
+/// (filtering, rate limiting, load shedding, audit logging, IP restrictions)
+/// without contaminating the Durable Streams protocol surface. The server does
+/// not implement authentication or authorization for admin routes; enable them
+/// only behind a trusted network, reverse proxy, or external access-control
+/// layer.
 pub fn build_router_with_ready<S: Storage + 'static>(
     storage: Arc<S>,
     config: &Config,
@@ -70,8 +83,17 @@ pub fn build_router_with_ready<S: Storage + 'static>(
         .route("/healthz", get(handlers::health::health_check))
         .nest(
             stream_base_path.as_ref(),
-            protocol_routes(storage, config, shutdown, Arc::clone(&stream_base_path)),
+            protocol_routes(
+                Arc::clone(&storage),
+                config,
+                shutdown,
+                Arc::clone(&stream_base_path),
+            ),
         );
+
+    if config.admin.enabled {
+        app = app.nest(config.admin.base_path.as_str(), admin_routes(storage));
+    }
 
     if let Some(flag) = ready {
         app = app
@@ -112,9 +134,11 @@ fn cors_layer(origins: &str) -> CorsLayer {
         .expose_headers(tower_http::cors::Any)
 }
 
-/// Protocol routes under /v1/stream
+/// Protocol routes under /v1/stream.
 ///
-/// All protocol routes have security headers applied via middleware.
+/// This router owns only the Durable Streams protocol surface. Operator/admin
+/// routes are kept out of this tree so protocol handlers do not need to know
+/// about admin enablement or policy.
 fn protocol_routes<S: Storage + 'static>(
     storage: Arc<S>,
     config: &Config,
@@ -140,6 +164,20 @@ fn protocol_routes<S: Storage + 'static>(
             shutdown,
         }))
         .layer(Extension(StreamBasePath(stream_base_path)))
+        .layer(axum_middleware::from_fn(
+            middleware::security::add_security_headers,
+        ))
+        .with_state(storage)
+}
+
+/// Admin routes mounted under `admin.base_path`.
+///
+/// These routes are operator-focused and opt-in. Keep them in a separate
+/// subrouter so different Tower middleware can be layered around admin traffic
+/// without changing protocol behaviour.
+fn admin_routes<S: Storage + 'static>(storage: Arc<S>) -> Router {
+    Router::new()
+        .route("/streams", get(handlers::list::list_streams::<S>))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
         ))
