@@ -176,24 +176,13 @@ pub struct ReadResult {
     pub closed: bool,
 }
 
-/// Stream-level metadata returned by [`Storage::head`].
-#[derive(Debug, Clone)]
-pub struct StreamMetadata {
-    /// Stream configuration
-    pub config: StreamConfig,
-    /// Next offset that will be assigned
-    pub next_offset: Offset,
-    /// Whether the stream is closed
-    pub closed: bool,
-    /// Total bytes stored in this stream
-    pub total_bytes: u64,
-    /// Number of messages in the stream
-    pub message_count: u64,
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-    /// Last modification timestamp (append, close, producer write)
-    pub updated_at: Option<DateTime<Utc>>,
-}
+/// Compatibility alias for stream metadata returned by [`Storage::head`].
+///
+/// The canonical type definition lives in [`crate::streams::StreamMetadata`],
+/// but storage keeps this public path stable for the current release line.
+/// Prefer the `streams` path in new code; this alias can be removed at the next
+/// breaking version boundary.
+pub type StreamMetadata = crate::streams::StreamMetadata;
 
 /// Outcome of [`Storage::create_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
