@@ -28,7 +28,8 @@ cargo run -p durable-streams-server
 ```
 
 By default the server listens on `http://0.0.0.0:4437`, exposes health checks
-at `/healthz` and `/readyz`, and mounts the protocol at `/v1/stream`.
+at `/healthz` and `/readyz`, and mounts the protocol at `/v1/stream`. Admin
+routes are disabled by default.
 
 Use `http.stream_base_path` or `DS_HTTP__STREAM_BASE_PATH` to mount the
 protocol at another path.
@@ -88,6 +89,10 @@ max_stream_bytes = 10485760
 cors_origins = "*"
 stream_base_path = "/v1/stream"
 
+[admin]
+enabled = false
+base_path = "/admin"
+
 [storage]
 mode = "memory"
 data_dir = "./data/streams"
@@ -133,6 +138,7 @@ In practice, operators usually only need a small subset:
 |---------|-----------|-------------|
 | Bind and logging | `DS_SERVER__BIND_ADDRESS`, `DS_OBSERVABILITY__RUST_LOG`, `RUST_LOG` | Override the listen address or log verbosity without editing TOML |
 | Storage selection | `DS_STORAGE__MODE`, `DS_STORAGE__DATA_DIR` | Pick persistence mode and storage path |
+| Admin routes | `DS_ADMIN__ENABLED`, `DS_ADMIN__BASE_PATH` | Opt in to operator routes such as `GET /admin/streams`; protect externally |
 | Direct TLS | `DS_TRANSPORT__MODE`, `DS_TRANSPORT__TLS__CERT_PATH`, `DS_TRANSPORT__TLS__KEY_PATH` | Required for `tls` deployments |
 | Direct mTLS | `DS_TRANSPORT__MODE`, `DS_TRANSPORT__TLS__CLIENT_CA_PATH` | Required in addition to TLS vars for `mtls` deployments |
 | HTTP/2 and ALPN | `DS_TRANSPORT__HTTP__VERSIONS`, `DS_TRANSPORT__TLS__ALPN_PROTOCOLS` | Only when you need to override the profile defaults |

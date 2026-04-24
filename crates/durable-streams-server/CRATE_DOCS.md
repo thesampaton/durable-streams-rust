@@ -14,6 +14,7 @@ The crate supports:
 - stream create, append, read, head, close, and delete operations
 - live reads via long-poll and Server-Sent Events
 - in-memory, file-backed, and ACID (`redb`) storage backends
+- optional admin routes for trusted operator tooling
 - explicit transport modes: `http`, `tls`, and `mtls`
 - layered config via TOML files and `DS_*` environment overrides
 - phase-aware startup diagnostics and structured telemetry
@@ -27,7 +28,28 @@ cargo run -p durable-streams-server
 ```
 
 By default it listens on `http://0.0.0.0:4437`, exposes `/healthz` and
-`/readyz`, and mounts the protocol at `/v1/stream`.
+`/readyz`, and mounts the protocol at `/v1/stream`. Admin routes are disabled
+by default.
+
+# Architecture
+
+`storage` owns persistence contracts and backend mechanics. `streams` owns
+stream-domain types and services such as `StreamMetadata`, `StreamService`, and
+operator list projections. Protocol routes expose the Durable Streams protocol
+surface under `http.stream_base_path`.
+
+Admin routes are optional, separate, and operator-focused. When
+`admin.enabled = true`, `GET <admin.base_path>/streams` lists streams through
+the stream-domain service. The admin router is intentionally composed
+separately from protocol routes so embedders and operators can apply different
+Tower middleware around admin traffic. The server does not implement
+authentication or authorization for admin routes; put them behind trusted
+networks, reverse proxies, or external access-control layers.
+
+The `durable-streams-server list` CLI command is local-by-default for
+disk-backed storage. It opens configured `file-*` or `acid` storage directly for
+operator inspection instead of depending on a running HTTP server. For remote
+listing, pass an explicit admin endpoint with `--url`.
 
 # Configuration
 
@@ -79,6 +101,7 @@ In practice, most deployments only need a small subset:
 |---------|-----------|
 | Bind and logging | `DS_SERVER__BIND_ADDRESS`, `DS_OBSERVABILITY__RUST_LOG`, `RUST_LOG` |
 | Storage selection | `DS_STORAGE__MODE`, `DS_STORAGE__DATA_DIR` |
+| Admin routes | `DS_ADMIN__ENABLED`, `DS_ADMIN__BASE_PATH` |
 | Direct TLS | `DS_TRANSPORT__MODE`, `DS_TRANSPORT__TLS__CERT_PATH`, `DS_TRANSPORT__TLS__KEY_PATH` |
 | Direct mTLS | `DS_TRANSPORT__TLS__CLIENT_CA_PATH` |
 | Reverse proxy trust | `DS_PROXY__ENABLED`, `DS_PROXY__FORWARDED_HEADERS`, `DS_PROXY__TRUSTED_PROXIES` |
