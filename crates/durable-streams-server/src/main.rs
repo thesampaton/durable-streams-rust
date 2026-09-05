@@ -4,7 +4,9 @@ use axum_server::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use durable_streams_server::{
-    config::{Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode},
+    config::{
+        AcidBackend, Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode,
+    },
     router,
     startup::{
         StartupError, StartupPhase, bind_tcp_listener, build_tls_server_config, log_phase,
@@ -53,7 +55,7 @@ enum Command {
         /// Output as JSON instead of a table
         #[arg(long)]
         json: bool,
-        /// Full URL for explicit remote admin listing, e.g. http://127.0.0.1:4437/admin/streams
+        /// Full URL for explicit remote admin listing, e.g. <http://127.0.0.1:4437/admin/streams>
         #[arg(long)]
         url: Option<String>,
     },
@@ -271,6 +273,14 @@ where
 // ── List command ────────────────────────────────────────────────────
 
 fn run_list_local(config: &Config, json: bool) -> Result<(), String> {
+    if config.storage.mode == StorageMode::Acid
+        && config.storage.acid_backend == AcidBackend::InMemory
+    {
+        return Err(
+            "cannot list local streams for storage.acid_backend='in-memory': storage is process-local and has no durable state to inspect; use acid_backend='file', or pass --url to query an explicitly enabled admin endpoint"
+                .to_string(),
+        );
+    }
     match config.storage.mode {
         StorageMode::Memory => Err(
             "cannot list local streams for storage.mode='memory': in-memory storage is process-local and has no durable state to inspect; use file or acid storage, or pass --url to query an explicitly enabled admin endpoint"

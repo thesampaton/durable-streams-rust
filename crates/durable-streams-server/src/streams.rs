@@ -110,6 +110,10 @@ impl<S: Storage> StreamService<S> {
     ///
     /// This preserves the storage contract's `(name, metadata)` shape for
     /// callers that need full metadata snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying storage error if stream metadata cannot be read.
     pub fn list(&self) -> Result<Vec<(String, StreamMetadata)>> {
         self.storage.list_streams()
     }
@@ -119,6 +123,10 @@ impl<S: Storage> StreamService<S> {
     /// This is the preferred surface for CLI and admin list operations because
     /// it keeps projection rules in the stream domain rather than duplicating
     /// them in each transport or command path.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying storage error if stream metadata cannot be read.
     pub fn list_entries(&self) -> Result<Vec<StreamListEntry>> {
         self.list().map(|streams| {
             streams
@@ -131,6 +139,11 @@ impl<S: Storage> StreamService<S> {
     /// Return metadata for a single stream.
     ///
     /// Delegates to [`Storage::head`] today.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::protocol::error::Error::NotFound`] if the stream
+    /// does not exist or has expired, or a storage error if metadata cannot be read.
     pub fn head(&self, name: &str) -> Result<StreamMetadata> {
         self.storage.head(name)
     }

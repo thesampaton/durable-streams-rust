@@ -1142,7 +1142,9 @@ impl Config {
         validate_cors_origins(&self.http.cors_origins)?;
         validate_stream_base_path(&self.http.stream_base_path)?;
         validate_admin_base_path(&self.admin.base_path)?;
-        validate_admin_path_separation(&self.http.stream_base_path, &self.admin.base_path)?;
+        if self.admin.enabled {
+            validate_admin_path_separation(&self.http.stream_base_path, &self.admin.base_path)?;
+        }
         self.validate_limits()?;
         self.validate_storage()?;
         self.validate_transport()?;
@@ -1683,6 +1685,12 @@ fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_admin_base_path(raw: &str) -> Result<(), ConfigValidationError> {
+    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*']) {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must be a literal path without whitespace or route parameters".to_string(),
+        });
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(ConfigValidationError::InvalidAdminBasePath {
@@ -1722,7 +1730,9 @@ fn validate_admin_path_separation(
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {
-    left == right
+    left == "/"
+        || right == "/"
+        || left == right
         || left
             .strip_prefix(right)
             .is_some_and(|suffix| suffix.starts_with('/'))
@@ -2080,6 +2090,65 @@ key_path = "/tmp/key.pem"
         assert!(rendered.contains("\"transport\""));
         assert!(rendered.contains("\"observability\""));
         assert!(rendered.contains("\"proxy\""));
+    }
+
+    #[test]
+    fn test_disabled_admin_allows_overlapping_stream_mounts() {
+        for path in ["/admin", "/admin/events", "/"] {
+            let mut config = Config::default();
+            config.http.stream_base_path = path.to_string();
+            assert!(config.validate().is_ok(), "disabled admin reserves {path}");
+        }
+    }
+
+    #[test]
+    fn test_enabled_admin_rejects_overlapping_stream_mounts() {
+        for path in ["/admin", "/admin/events", "/"] {
+            let mut config = Config::default();
+            config.admin.enabled = true;
+            config.http.stream_base_path = path.to_string();
+            assert_eq!(
+                config.validate(),
+                Err(ConfigValidationError::AdminBasePathConflictsWithStreamBasePath),
+                "overlapping mount: {path}"
+            );
+        }
+
+        let mut config = Config::default();
+        config.admin.enabled = true;
+        config.admin.base_path = "/v1/stream/admin".to_string();
+        assert_eq!(
+            config.validate(),
+            Err(ConfigValidationError::AdminBasePathConflictsWithStreamBasePath)
+        );
+        config.admin.base_path = "/v1/streams-admin".to_string();
+        assert!(
+            config.validate().is_ok(),
+            "shared text prefix is not overlap"
+        );
+    }
+
+    #[test]
+    fn test_admin_base_path_rejects_nonliteral_or_whitespace_paths() {
+        for path in [
+            " /admin",
+            "/admin ",
+            "/{*path}",
+            "/{tenant}",
+            "/:admin",
+            "/*admin",
+        ] {
+            let mut config = Config::default();
+            config.admin.enabled = true;
+            config.admin.base_path = path.to_string();
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigValidationError::InvalidAdminBasePath { .. })
+                ),
+                "invalid admin mount: {path}"
+            );
+        }
     }
 
     #[test]
