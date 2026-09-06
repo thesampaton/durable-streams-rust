@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACID creation and replacement retain nonempty batches of zero-byte records,
+  advancing record sequence offsets consistently with append and the other backends.
+- Memory fork reads retain the requested local payload, tail offset, and closed
+  state from one snapshot when another writer appends after the lock is released.
 - Long-poll timeout rereads return newly available data instead of advancing an
   empty response past it. Shutdown preserves the last empty snapshot's offset.
 - Keep completed webhook results bounded and pending through storage saturation.
@@ -75,6 +79,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Share storage convenience defaults, append validation, byte accounting, fork
+  read planning, and backend-local ACID record insertion. Existing storage
+  implementations can retain `close_stream` and `create_fork` overrides.
+- Load environment settings through the same configuration patch merger as TOML,
+  preserving precedence and legacy aliases. Subscription services now hold
+  initialized state directly; shared private parsers serve validation and use.
 - Track protocol revision `a172acc389351cb3db6deb5cd60e3dec11e7ff39` and server
   conformance `0.3.6`, with subscription coverage enabled.
 - The reserved `__ds` namespace is unavailable for application streams.

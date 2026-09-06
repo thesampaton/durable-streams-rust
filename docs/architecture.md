@@ -22,7 +22,10 @@ and metadata/listing access. Protocol and admin handlers use that service;
 backend implementations retain their lock and transaction boundaries.
 
 `Server` validates HTTP settings and loads subscription control state before
-Tokio is required. `start` creates one worker; `RunningServer` exposes cloneable
+Tokio is required. Subscription construction produces a `Mutex<Database>` only
+after loading and persistence succeed. State changes clone the committed database
+and save before replacing it; pull-wake processing retains both save boundaries
+around publication. `start` creates one worker; `RunningServer` exposes cloneable
 route groups and cancellation with awaited completion. A storage instance has
 one independent server owner. Route clones retain that owner and share state.
 
@@ -42,8 +45,11 @@ uses its own error envelope and private state; see
 [subscriptions](subscriptions.md).
 
 Keep semantic helpers shared where backends must agree. Separate persisted
-formats and runtime resources where their invariants differ. Introduce a shared
-crate only when multiple real consumers need a common implementation.
+formats and runtime resources where their invariants differ. Environment and TOML
+inputs both produce private configuration patches and use one merge path. Peer parsing, mount-path checks, and structural stream-name
+predicates are shared while each boundary retains its limits and error envelope.
+Introduce a shared crate only when multiple real consumers need a common
+implementation.
 
 ## Storage read boundaries
 
@@ -51,8 +57,19 @@ The storage implementations share access/expiry rules, fork bounds, append
 validation, and metadata construction. Memory and file reads capture an owned
 `PendingRead` under the stream lock. Root and `offset=now` reads are complete
 at that point; fork reads defer ancestor traversal until the stream lock is
-released. This keeps the stream-map/entry lock ordering explicit and handles
+released. The captured local suffix, tail, and closed state stay together even
+if a writer appends before ancestor assembly. Shared `PendingRead::finish` combines
+that suffix with the bounded inherited prefix without rereading the leaf.
+This keeps the stream-map/entry lock ordering explicit and handles
 root, fork, and tail reads once per backend instead of once per TTL branch.
+
+The fallible fork plan builder reads ACID lineage from the caller's transaction;
+ordinary reads and fork-prefix creation share its backend-local range reader.
+Memory/file indexes share inclusive-start, exclusive-end range selection.
+
+Global capacity reservation and saturating release share atomic arithmetic.
+Backend operations retain their reservation, commit, and recovery points,
+including replacement staging capacity and uncertain-commit handling.
 
 TTL persistence remains backend-local. Memory renews after successful read
 assembly, file storage persists renewal after reading the local payload, and

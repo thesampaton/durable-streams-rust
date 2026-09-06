@@ -103,6 +103,16 @@ are non-exhaustive. Start configuration from `Config::default()` and modify the
 relevant fields. Use the metadata/result constructors when implementing storage
 and include wildcard arms when matching extensible enums.
 
+`close_stream` and `create_fork` now have defaults that call `append_batch` and
+`create_fork_with_options`, respectively. Existing overrides remain valid; custom
+backends can omit identical forwarding implementations. This simplification adds
+no required methods, runtime ownership changes, or data-format migration.
+
+Direct Rust writes distinguish an empty batch from a batch containing zero-byte
+records. ACID creation/replacement now retain those records and advance their
+sequence offsets, matching ordinary append and the other backends. This corrects
+future writes; records discarded by older versions cannot be reconstructed.
+
 `storage::StreamMetadata` has been removed; import `streams::StreamMetadata`.
 The unused `ShutdownToken`, `LongPollTimeout`, and `SseReconnectInterval` wrappers
 have also been removed.
