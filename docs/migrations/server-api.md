@@ -152,3 +152,17 @@ no throughput improvement is claimed.
 Storage and `StreamService` remain synchronous. The proposed execution boundary
 for HTTP/background callers will be reviewed separately, following the
 correctness and API work above.
+
+## Legacy transport configuration
+
+Legacy TOML fields are still accepted, but new configuration should use these paths:
+
+| Legacy field | Current field |
+| --- | --- |
+| `server.port` | `server.bind_address` (for example, `0.0.0.0:4437`) |
+| `tls.cert_path`, `tls.key_path` | `transport.tls.cert_path`, `transport.tls.key_path` |
+| `log.rust_log` | `observability.rust_log` |
+
+Set `transport.mode` explicitly when migrating TLS configuration. The
+[profile files](../../crates/durable-streams-server/README.md#configuration)
+show matching HTTP versions, TLS settings, and proxy trust options.

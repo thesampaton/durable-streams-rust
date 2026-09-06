@@ -10,10 +10,16 @@
 mode = "file" # memory | file | acid
 data_dir = "/var/lib/durable-streams" # used by file or acid
 
+# Acid-only example:
+# acid_shard_count = 16 # power of two in 1..=256
+# acid_backend = "file" # file | in-memory
+
 [limits]
 max_memory_bytes = 536870912 # total in-process payload bytes
 max_stream_bytes = 268435456 # max bytes retained per stream
 
-# Acid-only example:
-# acid_shard_count = 16 # power of two in 1..=256
-# acid_backend = "file" # file | in-memory
+# Example trusted proxy forwarding:
+# [proxy]
+# enabled = true
+# forwarded_headers = "x-forwarded"
+# trusted_proxies = ["10.0.0.0/24"]
