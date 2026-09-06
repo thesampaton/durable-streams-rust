@@ -42,18 +42,17 @@ The default storage mode is in-memory. For persistence, choose a backend via
 | Mode | Durability | Use case |
 |------|------------|----------|
 | `memory` | None (lost on restart) | Development and testing |
-| `file-fast` | Journaled append commits; fewer extra syncs | Local per-stream log files |
-| `file-durable` | Journaled commits plus extra write syncing | Local files with stronger initial-write syncing |
+| `file` | Journaled append/replacement commits; synced initial data | Local per-stream log files |
 | `acid` | Crash-resilient (`redb`) | Production workloads requiring transactional durability |
 
-Both file modes now sync append/replacement journals. See the
+The file backend syncs append/replacement journals. See the
 [migration notes](../../docs/migrations/server-api.md#import-and-file-persistence)
 for recovery limits and the added filesystem cost.
 
 Examples:
 
 ```bash
-DS_STORAGE__MODE=file-durable DS_STORAGE__DATA_DIR=./data cargo run -p durable-streams-server
+DS_STORAGE__MODE=file DS_STORAGE__DATA_DIR=./data cargo run -p durable-streams-server
 DS_STORAGE__MODE=acid DS_STORAGE__DATA_DIR=./data cargo run -p durable-streams-server
 ```
 
@@ -176,7 +175,7 @@ cargo run -p durable-streams-server -- --profile dev
 Or with persistence:
 
 ```bash
-DS_STORAGE__MODE=file-durable \
+DS_STORAGE__MODE=file \
 DS_STORAGE__DATA_DIR=./data \
 cargo run -p durable-streams-server -- --profile dev
 ```
@@ -195,7 +194,7 @@ Example config:
 
 ```toml
 [storage]
-mode = "file-durable"
+mode = "file"
 data_dir = "/var/lib/durable-streams"
 
 [limits]
@@ -237,7 +236,7 @@ Example config:
 
 ```toml
 [storage]
-mode = "file-durable"
+mode = "file"
 data_dir = "/var/lib/durable-streams"
 
 [limits]

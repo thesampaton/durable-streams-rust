@@ -84,12 +84,12 @@ macro_rules! storage_backend_tests {
                 $crate::common::StorageTestBackend::Memory;
             $($body)*
         }
-        mod file_durable {
+        mod file {
             #[allow(unused_imports)]
             use super::*;
             #[allow(dead_code)]
             const BACKEND: $crate::common::StorageTestBackend =
-                $crate::common::StorageTestBackend::FileDurable;
+                $crate::common::StorageTestBackend::File;
             $($body)*
         }
         mod acid {

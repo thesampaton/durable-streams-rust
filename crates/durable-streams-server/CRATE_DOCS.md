@@ -48,7 +48,7 @@ authentication or authorization for admin routes; put them behind trusted
 networks, reverse proxies, or external access-control layers.
 
 The `durable-streams-server list` CLI command is local-by-default for
-disk-backed storage. It opens configured `file-*` or file-backed `acid` storage
+disk-backed storage. It opens configured `file` or file-backed `acid` storage
 directly for operator inspection instead of depending on a running HTTP server. For remote
 listing, pass an explicit admin endpoint with `--url`. The `memory` mode and
 `acid_backend = "in-memory"` have no persistent state for a separate CLI process

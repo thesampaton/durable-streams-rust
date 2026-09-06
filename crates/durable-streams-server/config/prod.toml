@@ -7,8 +7,8 @@
 #   forwarded origin metadata
 
 [storage]
-mode = "file-durable" # memory | file-fast | file-durable | acid
-data_dir = "/var/lib/durable-streams" # used by file-fast, file-durable, acid
+mode = "file" # memory | file | acid
+data_dir = "/var/lib/durable-streams" # used by file or acid
 
 [limits]
 max_memory_bytes = 536870912 # total in-process payload bytes

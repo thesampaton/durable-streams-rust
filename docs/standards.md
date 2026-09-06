@@ -128,3 +128,23 @@ Working-tree validation used Rust 1.94.1 and Node 20.16.0 (the CI Node major):
 - Production storage calls have not been offloaded. No throughput or contention
   benchmark was run. The release candidate still needs the repository's CI/MSRV
   gates.
+
+### 2026-09-06 file backend consolidation
+
+The append-log backend now has one `file` mode. The release conformance matrix
+covers memory, file, ACID memory, and ACID file; the earlier results above retain
+the mode names used when those runs were made. Protocol and package pins are
+unchanged.
+
+Validation used Rust 1.94.1 and Node 20.16.0:
+
+- Workspace tests: 678 passed, zero failed; the ignored nightly API test passed
+  separately with the pinned compiler, after reviewing the snapshot changes.
+- Formatting, workspace all-target check, strict server Clippy, advisory client
+  Clippy, and rustdoc with warnings denied passed. Generated storage API docs
+  expose the single mode and the constructor without a durability toggle.
+- Server conformance 0.3.6: all 338 tests passed on `file`, using a fresh data
+  directory and separate port without competing test load.
+- New regressions cover rejected retired configuration names, initial stream
+  and fork data after reopen, and capacity release after an initial sync error.
+  These checks do not establish power-loss guarantees for creation/deletion.

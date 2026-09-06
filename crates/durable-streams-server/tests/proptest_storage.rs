@@ -31,7 +31,7 @@ use proptest::prelude::*;
 
 const BACKENDS: [StorageTestBackend; 4] = [
     StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
+    StorageTestBackend::File,
     StorageTestBackend::Acid,
     StorageTestBackend::AcidInMemory,
 ];
@@ -321,7 +321,7 @@ proptest! {
 
     #[test]
     fn random_ops_file(ops in prop::collection::vec(op_strategy(), 1..80)) {
-        run_random_ops(StorageTestBackend::FileDurable, ops);
+        run_random_ops(StorageTestBackend::File, ops);
     }
 
     #[test]
@@ -638,7 +638,7 @@ proptest! {
     fn producer_state_machine_file(
         ops in prop::collection::vec(producer_op_strategy(), 1..40)
     ) {
-        run_producer_state_machine(StorageTestBackend::FileDurable, ops);
+        run_producer_state_machine(StorageTestBackend::File, ops);
     }
 
     #[test]

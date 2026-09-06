@@ -189,7 +189,7 @@ To exercise the file-backed or ACID backends against the same suite:
 
 ```bash
 # file-backed
-DS_STORAGE__MODE=file-fast ./scripts/conformance/run-server-suite.sh
+DS_STORAGE__MODE=file ./scripts/conformance/run-server-suite.sh
 
 # ACID (redb)
 DS_STORAGE__MODE=acid DS_STORAGE__ACID_BACKEND=memory ./scripts/conformance/run-server-suite.sh

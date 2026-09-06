@@ -300,7 +300,7 @@ impl Storage for FileStorage {
         let mut entry = StreamEntry::new(config, file, dir.clone());
 
         if !messages.is_empty()
-            && let Err(e) = self.append_records(name, &mut entry, &messages)
+            && let Err(e) = self.append_initial_records(name, &mut entry, &messages)
         {
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
@@ -601,7 +601,7 @@ impl Storage for FileStorage {
             fork_offset: resolved_offset,
         });
 
-        if let Err(e) = self.append_records(name, &mut entry, &initial_messages) {
+        if let Err(e) = self.append_initial_records(name, &mut entry, &initial_messages) {
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
             }

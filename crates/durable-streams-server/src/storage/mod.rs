@@ -9,8 +9,7 @@
 //! The two disk-backed families serve different needs:
 //!
 //! - [`file::FileStorage`] is the simpler "one directory plus one log file per
-//!   stream" backend used by [`crate::config::StorageMode::FileFast`] and
-//!   [`crate::config::StorageMode::FileDurable`]
+//!   stream" backend used by [`crate::config::StorageMode::File`]
 //! - [`acid::AcidStorage`] is the transactional backend used by
 //!   [`crate::config::StorageMode::Acid`], with
 //!   [`crate::config::AcidBackend::File`] persisting redb databases to disk

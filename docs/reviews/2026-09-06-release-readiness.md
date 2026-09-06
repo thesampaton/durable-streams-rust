@@ -20,7 +20,7 @@ Its documentation describes this current role. The original suggestion below
 to make the wrapper private is superseded by this clarification.
 
 See the [migration guide](../migrations/server-api.md) for the final surface and
-persistence limits. File journal commits add syncing in both file modes;
+persistence limits. The file backend now has one synced mode (`file`);
 replacement requires capacity for old and new payloads. Uncertain final-sync
 outcomes require recovery and do not prove a write was absent.
 

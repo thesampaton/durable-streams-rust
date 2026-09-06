@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- Consolidate `file-fast` and `file-durable` into `file` (`StorageMode::File`).
+  Remove their aliases, `StorageMode::sync_on_append()`, and the boolean argument
+  to `FileStorage::new`. Existing data directories need no conversion. Initial
+  data remains synced; appends/replacements sync at the journal commit boundary.
 - Replace router builders with `Server::new(StreamService, config, options)` and
   explicit `start()`. Construction is fallible, supports `Arc<dyn Storage>`, and
   validates HTTP settings before mounting. Cloned running handles/route groups
@@ -45,8 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Ordinary final append and closure share one storage commit and resume snapshot.
   File operations use an undo journal to recover interrupted log/metadata updates
-  and preserve ordinary append timestamps on reopen. Journal commits add syncing
-  in both file modes.
+  and preserve ordinary append timestamps on reopen. Journal commits sync the
+  log, metadata, and directory.
 - Validate all import payloads before mutation and preserve originals on pre-commit
   replacement failure. Recovery resolves uncertain final-sync outcomes.
 - Initialize direct-Rust TTL streams and reject unrepresentable TTL/deadline arithmetic.

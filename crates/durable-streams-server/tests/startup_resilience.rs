@@ -33,8 +33,7 @@ fn unique_dir(prefix: &str) -> PathBuf {
 }
 
 fn new_file_storage(root: &Path) -> FileStorage {
-    FileStorage::new(root, 10 * 1024 * 1024, 1024 * 1024, true)
-        .expect("storage init should succeed")
+    FileStorage::new(root, 10 * 1024 * 1024, 1024 * 1024).expect("storage init should succeed")
 }
 
 fn new_acid(root: &Path) -> AcidStorage {

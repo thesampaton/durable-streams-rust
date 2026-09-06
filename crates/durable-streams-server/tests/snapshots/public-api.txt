@@ -116,13 +116,11 @@ impl core::fmt::Display for durable_streams_server::config::ProxyIdentityMode
 pub fn durable_streams_server::config::ProxyIdentityMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub enum durable_streams_server::config::StorageMode
 pub durable_streams_server::config::StorageMode::Acid
-pub durable_streams_server::config::StorageMode::FileDurable
-pub durable_streams_server::config::StorageMode::FileFast
+pub durable_streams_server::config::StorageMode::File
 pub durable_streams_server::config::StorageMode::Memory
 impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
 impl durable_streams_server::config::StorageMode
-pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -470,7 +468,7 @@ pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name
 pub mod durable_streams_server::storage::file
 pub struct durable_streams_server::storage::file::FileStorage
 impl durable_streams_server::storage::file::FileStorage
-pub fn durable_streams_server::storage::file::FileStorage::new(root_dir: impl core::convert::Into<std::path::PathBuf>, max_total_bytes: u64, max_stream_bytes: u64, sync_on_append: bool) -> durable_streams_server::protocol::error::Result<Self>
+pub fn durable_streams_server::storage::file::FileStorage::new(root_dir: impl core::convert::Into<std::path::PathBuf>, max_total_bytes: u64, max_stream_bytes: u64) -> durable_streams_server::protocol::error::Result<Self>
 pub fn durable_streams_server::storage::file::FileStorage::total_bytes(&self) -> u64
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::file::FileStorage
 pub fn durable_streams_server::storage::file::FileStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::AppendResult>
@@ -775,13 +773,11 @@ pub durable_streams_server::ServerError::Storage(durable_streams_server::protoco
 pub durable_streams_server::ServerError::StorageAlreadyOwned
 pub enum durable_streams_server::StorageMode
 pub durable_streams_server::StorageMode::Acid
-pub durable_streams_server::StorageMode::FileDurable
-pub durable_streams_server::StorageMode::FileFast
+pub durable_streams_server::StorageMode::File
 pub durable_streams_server::StorageMode::Memory
 impl durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::as_str(self) -> &'static str
 impl durable_streams_server::config::StorageMode
-pub fn durable_streams_server::config::StorageMode::sync_on_append(self) -> bool
 pub fn durable_streams_server::config::StorageMode::uses_file_backend(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::StorageMode
 pub fn durable_streams_server::config::StorageMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -837,7 +833,7 @@ impl core::default::Default for durable_streams_server::config::ConfigLoadOption
 pub fn durable_streams_server::config::ConfigLoadOptions::default() -> Self
 pub struct durable_streams_server::FileStorage
 impl durable_streams_server::storage::file::FileStorage
-pub fn durable_streams_server::storage::file::FileStorage::new(root_dir: impl core::convert::Into<std::path::PathBuf>, max_total_bytes: u64, max_stream_bytes: u64, sync_on_append: bool) -> durable_streams_server::protocol::error::Result<Self>
+pub fn durable_streams_server::storage::file::FileStorage::new(root_dir: impl core::convert::Into<std::path::PathBuf>, max_total_bytes: u64, max_stream_bytes: u64) -> durable_streams_server::protocol::error::Result<Self>
 pub fn durable_streams_server::storage::file::FileStorage::total_bytes(&self) -> u64
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::file::FileStorage
 pub fn durable_streams_server::storage::file::FileStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::AppendResult>

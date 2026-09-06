@@ -76,7 +76,7 @@ string_enum! {
     /// This is the main operator-facing choice when deciding how the server should
     /// persist streams.
     ///
-    /// The `file-*` modes use the simple append-log implementation from
+    /// The `file` mode uses the simple append-log implementation from
     /// [`crate::storage::file::FileStorage`]. The `acid` mode uses
     /// [`crate::storage::acid::AcidStorage`], which stores data in redb databases
     /// instead of per-stream log files.
@@ -85,21 +85,16 @@ string_enum! {
         ///
         /// Best suited to tests, demos, and ephemeral development environments.
         Memory => "memory",
-        /// File logs with journaled append commits and fewer lower-level syncs.
+        /// Per-stream file logs with synced initial data and journaled append commits.
         ///
-        /// Append/replacement transactions sync their journal, data, and metadata
-        /// in both file modes. This mode omits extra syncs on lower-level writes,
-        /// including initial stream data. See [`crate::storage::file`].
-        FileFast => "file-fast" | "fast",
-        /// File logs with journaled commits and additional write syncing.
-        ///
-        /// Uses the same layout and append journal as [`Self::FileFast`], with
-        /// extra `fsync`/`fdatasync` calls on lower-level writes.
-        FileDurable => "file-durable" | "file" | "durable",
+        /// Append/replacement transactions sync their journal, data, metadata,
+        /// and directory before returning. See [`crate::storage::file`] for
+        /// creation/deletion recovery limits.
+        File => "file",
         /// Transactional redb-backed storage.
         ///
         /// Choose this when you want stronger transactional durability for
-        /// metadata and message updates than the plain file-log modes provide.
+        /// metadata and message updates than the plain file-log backend provides.
         /// The concrete redb persistence medium is controlled separately by
         /// [`AcidBackend`].
         Acid => "acid" | "redb",
@@ -111,13 +106,7 @@ impl StorageMode {
     /// Whether this mode selects the append-log backend, excluding file-backed ACID storage.
     #[must_use]
     pub fn uses_file_backend(self) -> bool {
-        matches!(self, Self::FileFast | Self::FileDurable)
-    }
-
-    /// Whether the append-log backend should sync writes before acknowledging them.
-    #[must_use]
-    pub fn sync_on_append(self) -> bool {
-        matches!(self, Self::FileDurable)
+        matches!(self, Self::File)
     }
 }
 
@@ -125,7 +114,7 @@ string_enum! {
     /// Redb persistence medium used by [`StorageMode::Acid`].
     ///
     /// This only applies when `storage.mode = "acid"`. It does not affect the
-    /// separate `file-fast` / `file-durable` storage family.
+    /// separate `file` storage backend.
     pub enum AcidBackend {
         /// File-backed redb (default).
         ///
@@ -1609,7 +1598,7 @@ impl Default for Config {
 }
 
 /// Shared defaults applied to every `prod*` profile: stricter limits and
-/// file-durable on-disk storage.
+/// persistent file storage.
 fn prod_base_patch() -> ConfigPatch {
     ConfigPatch {
         limits: LimitsConfigPatch {
@@ -1618,7 +1607,7 @@ fn prod_base_patch() -> ConfigPatch {
             ..LimitsConfigPatch::default()
         },
         storage: StorageConfigPatch {
-            mode: Some(StorageMode::FileDurable),
+            mode: Some(StorageMode::File),
             data_dir: Some("/var/lib/durable-streams".to_string()),
             acid_shard_count: Some(16),
             ..StorageConfigPatch::default()
@@ -2007,6 +1996,32 @@ mod tests {
     }
 
     #[test]
+    fn file_mode_rejects_retired_names_in_toml_and_environment() {
+        let options = ConfigLoadOptions::default();
+        for retired in ["file-fast", "fast", "file-durable", "durable"] {
+            let pairs = [("DS_STORAGE__MODE", retired)];
+            let env = lookup(&pairs);
+            assert!(Config::from_sources_with_lookup(&options, &env).is_err());
+            let toml = format!("[storage]\nmode = {retired:?}");
+            assert!(
+                Figment::new()
+                    .merge(Toml::string(&toml))
+                    .extract::<ConfigPatch>()
+                    .is_err()
+            );
+        }
+        let patch = Figment::new()
+            .merge(Toml::string("[storage]\nmode = \"file\""))
+            .extract::<ConfigPatch>()
+            .unwrap();
+        assert_eq!(patch.storage.mode, Some(StorageMode::File));
+        assert_eq!(
+            serde_json::to_string(&StorageMode::File).unwrap(),
+            "\"file\""
+        );
+    }
+
+    #[test]
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.server.bind_address, "0.0.0.0:4437");
@@ -2048,7 +2063,7 @@ mod tests {
             ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "5"),
             ("DS_SERVER__SSE_RECONNECT_INTERVAL_SECS", "120"),
             ("DS_HTTP__STREAM_BASE_PATH", "/streams"),
-            ("DS_STORAGE__MODE", "file-fast"),
+            ("DS_STORAGE__MODE", "file"),
             ("DS_STORAGE__DATA_DIR", "/tmp/ds-store"),
             ("DS_STORAGE__ACID_SHARD_COUNT", "32"),
             ("DS_TRANSPORT__MODE", "tls"),
@@ -2066,7 +2081,7 @@ mod tests {
         assert_eq!(config.transport.connection.long_poll_timeout_secs, 5);
         assert_eq!(config.transport.connection.sse_reconnect_interval_secs, 120);
         assert_eq!(config.http.stream_base_path, "/streams");
-        assert_eq!(config.storage.mode, StorageMode::FileFast);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/tmp/ds-store");
         assert_eq!(config.storage.acid_shard_count, 32);
         assert_eq!(config.transport.mode, TransportMode::Tls);
@@ -2123,7 +2138,7 @@ mod tests {
         )
         .expect("config");
 
-        assert_eq!(config.storage.mode, StorageMode::FileDurable);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/var/lib/durable-streams");
         assert_eq!(config.transport.mode, TransportMode::Tls);
         assert_eq!(
@@ -2169,7 +2184,7 @@ bind_address = "127.0.0.1:7777"
 stream_base_path = "/streams"
 
 [storage]
-mode = "file-fast"
+mode = "file"
 data_dir = "/tmp/dev-store"
 "#,
         )
@@ -2198,7 +2213,7 @@ bind_address = "127.0.0.1:8888"
 
         assert_eq!(config.server.bind_address, "127.0.0.1:9999");
         assert_eq!(config.http.stream_base_path, "/streams");
-        assert_eq!(config.storage.mode, StorageMode::FileFast);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/tmp/dev-store");
         assert_eq!(config.observability.rust_log, "debug");
     }

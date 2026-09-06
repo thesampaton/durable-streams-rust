@@ -124,7 +124,7 @@ async fn test_subscription_fencing_and_ack_validation_across_backends() {
     let client = reqwest::Client::new();
     for backend in [
         StorageTestBackend::Memory,
-        StorageTestBackend::FileDurable,
+        StorageTestBackend::File,
         StorageTestBackend::Acid,
         StorageTestBackend::AcidInMemory,
     ] {
@@ -299,7 +299,7 @@ fn persistent_storage(path: &std::path::Path, acid: bool) -> TestStorage {
             AcidStorage::new(path, 2, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap(),
         )
     } else {
-        TestStorage::File(FileStorage::new(path, 1024 * 1024, 100 * 1024, true).unwrap())
+        TestStorage::File(FileStorage::new(path, 1024 * 1024, 100 * 1024).unwrap())
     }
 }
 

@@ -37,7 +37,7 @@ fn test_cli_list_file_storage_local_by_default() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("streams");
     let storage =
-        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024, false).expect("create file storage");
+        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024).expect("create file storage");
     storage
         .create_stream(
             "local-file-stream",
@@ -54,7 +54,7 @@ fn test_cli_list_file_storage_local_by_default() {
         .expect("append data");
     drop(storage);
     let storage =
-        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024, false).expect("reopen file storage");
+        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024).expect("reopen file storage");
     let metadata = storage
         .head("local-file-stream")
         .expect("read persisted metadata");
@@ -65,7 +65,7 @@ fn test_cli_list_file_storage_local_by_default() {
         &format!(
             r#"
 [storage]
-mode = "file-fast"
+mode = "file"
 data_dir = "{}"
 "#,
             data_dir.display()

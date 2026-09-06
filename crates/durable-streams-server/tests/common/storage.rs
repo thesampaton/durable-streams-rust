@@ -18,7 +18,7 @@ static STORAGE_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[derive(Debug, Clone, Copy)]
 pub enum StorageTestBackend {
     Memory,
-    FileDurable,
+    File,
     Acid,
     AcidInMemory,
 }
@@ -28,7 +28,7 @@ impl StorageTestBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Memory => "memory",
-            Self::FileDurable => "file-durable",
+            Self::File => "file",
             Self::Acid => "acid",
             Self::AcidInMemory => "acid-in-memory",
         }
@@ -291,9 +291,9 @@ pub fn create_test_storage_with_limits(
             storage: TestStorage::Memory(InMemoryStorage::new(max_total_bytes, max_stream_bytes)),
             _storage_dir: None,
         },
-        StorageTestBackend::FileDurable => {
+        StorageTestBackend::File => {
             let storage_dir = unique_storage_dir("file");
-            let storage = FileStorage::new(&storage_dir, max_total_bytes, max_stream_bytes, true)
+            let storage = FileStorage::new(&storage_dir, max_total_bytes, max_stream_bytes)
                 .expect("failed to initialize test file storage");
             TestStorageHandle {
                 storage: TestStorage::File(storage),

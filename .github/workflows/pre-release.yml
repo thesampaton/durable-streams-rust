@@ -45,12 +45,9 @@ jobs:
         backend:
           - name: memory
             env: {}
-          - name: file-fast
+          - name: file
             env:
-              DS_STORAGE__MODE: file-fast
-          - name: file-durable
-            env:
-              DS_STORAGE__MODE: file-durable
+              DS_STORAGE__MODE: file
           - name: acid-file
             env:
               DS_STORAGE__MODE: acid

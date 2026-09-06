@@ -1,8 +1,7 @@
 //! Local-filesystem storage built from one append-only log per stream.
 //!
 //! [`FileStorage`] is the implementation behind the config-level
-//! [`crate::config::StorageMode::FileFast`] and
-//! [`crate::config::StorageMode::FileDurable`] modes. Both use the same simple
+//! [`crate::config::StorageMode::File`] mode. It uses a simple
 //! layout on disk:
 //!
 //! - one directory per stream under the configured storage root
@@ -13,15 +12,12 @@
 //! remain fast while the on-disk format stays straightforward to inspect and
 //! recover.
 //!
-//! # `FileFast` vs `FileDurable`
+//! # Durability
 //!
-//! Both modes journal append/replacement commits and sync the journal, log,
-//! metadata, and directory. `file-durable` additionally syncs lower-level writes,
-//! including initial stream data; `file-fast` omits those extra syncs. The names
-//! are retained for configuration compatibility, but ordinary appends now incur
-//! journal syncs in both modes. This is not a fully transactional filesystem:
-//! creation/deletion and commit-acknowledgement failures have separate recovery
-//! boundaries.
+//! Append/replacement commits sync the undo journal, log, metadata, and
+//! directory. Creation and forks sync their initial log data before writing
+//! metadata. This is not a fully transactional filesystem: creation/deletion
+//! and commit-acknowledgement failures have separate recovery boundaries.
 //!
 //! # When To Use This Backend
 //!
@@ -177,8 +173,8 @@ impl StreamEntry {
 /// - Stream-level write lock serializes appends and preserves monotonic offsets
 /// - Batched write per append call reduces syscall overhead
 ///
-/// `sync_on_append` controls extra lower-level write syncing. Both settings
-/// sync journaled append/replacement commits; see the module durability notes.
+/// Initial data and journaled append/replacement commits are synced before
+/// returning; see the module durability notes for recovery limits.
 #[allow(clippy::module_name_repetitions)]
 pub struct FileStorage {
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
@@ -187,7 +183,6 @@ pub struct FileStorage {
     max_stream_bytes: u64,
     root_dir: PathBuf,
     root_dir_canonical: PathBuf,
-    sync_on_append: bool,
 }
 
 impl FileStorage {
@@ -204,7 +199,6 @@ impl FileStorage {
         root_dir: impl Into<PathBuf>,
         max_total_bytes: u64,
         max_stream_bytes: u64,
-        sync_on_append: bool,
     ) -> Result<Self> {
         let root_dir = root_dir.into();
         retry_on_eintr(|| fs::create_dir_all(&root_dir)).map_err(|e| {
@@ -233,7 +227,6 @@ impl FileStorage {
             max_stream_bytes,
             root_dir,
             root_dir_canonical,
-            sync_on_append,
         };
         storage.load_existing_streams()?;
         Ok(storage)

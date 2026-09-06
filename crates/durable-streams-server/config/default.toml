@@ -25,8 +25,8 @@ enabled = false # opt-in operator routes only; protect with trusted network/prox
 base_path = "/admin" # GET /admin/streams when enabled
 
 [storage]
-mode = "memory" # memory | file-fast | file-durable | acid
-# data_dir = "./data/streams" # required for file-fast, file-durable, or acid
+mode = "memory" # memory | file | acid
+# data_dir = "./data/streams" # required for file or acid
 # acid_shard_count = 16 # acid only; power of two in 1..=256
 # acid_backend = "file" # acid only; file | in-memory
 

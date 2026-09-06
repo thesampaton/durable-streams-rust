@@ -52,6 +52,30 @@ impl FileStorage {
         Ok(())
     }
 
+    /// Creation has no append journal, so sync its data before publishing metadata.
+    /// The caller must discard the new entry and remove its directory on failure.
+    pub(super) fn append_initial_records(
+        &self,
+        name: &str,
+        stream: &mut StreamEntry,
+        messages: &[Bytes],
+    ) -> Result<()> {
+        self.append_records(name, stream, messages)?;
+        if !messages.is_empty()
+            && let Err(e) = super::retry_on_eintr(|| stream.file.sync_data())
+        {
+            self.rollback_total_bytes(stream.total_bytes);
+            return Err(Error::classify_io_failure(
+                "file",
+                "sync initial stream log",
+                format!("failed to sync initial stream log for {name}: {e}"),
+                &e,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Write records; the caller owns the commit sync and failure recovery.
     pub(super) fn append_records(
         &self,
         name: &str,
@@ -115,21 +139,6 @@ impl FileStorage {
             return Err(Error::Storage(format!(
                 "failed to append stream log for {name}: {e}"
             )));
-        }
-
-        if self.sync_on_append
-            && let Err(e) = super::retry_on_eintr(|| stream.file.sync_data())
-        {
-            if let Ok(m) = stream.file.metadata() {
-                stream.file_len = m.len();
-            }
-            self.rollback_total_bytes(total_batch_bytes);
-            return Err(Error::classify_io_failure(
-                "file",
-                "sync stream log",
-                format!("failed to sync stream log for {name}: {e}"),
-                &e,
-            ));
         }
 
         let mut cursor = before_len;

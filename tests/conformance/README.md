@@ -86,7 +86,7 @@ this option disabled. Use a separate data directory and port for each backend
 run; short TTL and SSE tests should run without competing load.
 
 ```bash
-DS_STORAGE__MODE=file-durable DS_STORAGE__DATA_DIR=/tmp/ds-file-conformance \
+DS_STORAGE__MODE=file DS_STORAGE__DATA_DIR=/tmp/ds-file-conformance \
   ./scripts/conformance/run-server-suite.sh
 DS_STORAGE__MODE=acid DS_STORAGE__ACID_BACKEND=file \
   DS_STORAGE__DATA_DIR=/tmp/ds-acid-conformance \

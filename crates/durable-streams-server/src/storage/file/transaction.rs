@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn ordinary_append_preserves_update_timestamp_on_reopen() {
         let root = tempfile::tempdir().unwrap();
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         storage
             .create_stream("s", StreamOptions::new("text/plain"))
             .unwrap();
@@ -187,14 +187,14 @@ mod tests {
         let timestamp = storage.head("s").unwrap().updated_at;
         assert!(timestamp.is_some());
         drop(storage);
-        let reopened = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let reopened = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         assert_eq!(reopened.head("s").unwrap().updated_at, timestamp);
     }
 
     #[test]
     fn failed_initial_metadata_write_releases_payload_capacity() {
         let root = tempfile::tempdir().unwrap();
-        let storage = FileStorage::new(root.path().to_owned(), 8, 8, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 8, 8).unwrap();
         let dir = storage.stream_dir_for_name("s").unwrap();
         fs::create_dir_all(dir.join("meta.json.tmp")).unwrap();
         assert!(
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn metadata_failure_rolls_back_final_body_and_sequence_on_disk() {
         let root = tempfile::tempdir().unwrap();
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         storage
             .create_stream("s", StreamOptions::new("text/plain"))
             .unwrap();
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(before.total_bytes, 3);
         fs::remove_dir(dir.join("meta.json.tmp")).unwrap();
         drop(storage);
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         assert_eq!(
             storage.read("s", &Offset::start()).unwrap().messages,
             vec![Bytes::from_static(b"old")]
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn reopen_undoes_a_crash_between_log_and_metadata_commit() {
         let root = tempfile::tempdir().unwrap();
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         storage
             .create_stream("s", StreamOptions::new("text/plain"))
             .unwrap();
@@ -297,7 +297,7 @@ mod tests {
         )
         .unwrap();
         drop(storage);
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         let read = storage.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages, vec![Bytes::from_static(b"old")]);
         assert!(!read.closed);
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn failed_replacement_restores_original_log_and_accounting() {
         let root = tempfile::tempdir().unwrap();
-        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let storage = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         storage
             .create_stream("s", StreamOptions::new("text/plain"))
             .unwrap();
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(read.messages, vec![Bytes::from_static(b"original")]);
         assert!(!read.closed);
         drop(storage);
-        let restored = FileStorage::new(root.path().to_owned(), 1024, 1024, true).unwrap();
+        let restored = FileStorage::new(root.path().to_owned(), 1024, 1024).unwrap();
         assert_eq!(
             restored.read("s", &Offset::start()).unwrap().messages,
             read.messages

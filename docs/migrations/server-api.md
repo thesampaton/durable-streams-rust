@@ -105,6 +105,26 @@ and include wildcard arms when matching extensible enums.
 The unused `ShutdownToken`, `LongPollTimeout`, and `SseReconnectInterval` wrappers
 have also been removed.
 
+## File backend configuration
+
+The append-log backend now has one mode: `file`. Change `storage.mode` in TOML
+or `DS_STORAGE__MODE` from `file-fast`, `fast`, `file-durable`, or `durable` to
+`file`. The old names are rejected. Existing data directories keep the same
+layout and can be reopened without conversion.
+
+Replace `StorageMode::FileFast` and `StorageMode::FileDurable` with
+`StorageMode::File`. Remove calls to `StorageMode::sync_on_append()` and the
+last boolean argument to `FileStorage::new`:
+
+```rust
+let storage = FileStorage::new(data_dir, max_total_bytes, max_stream_bytes)?;
+```
+
+Initial stream and fork data is always synced. Append/replacement transactions
+sync at commit without a redundant sync during the record write. Creation and
+deletion still have separate recovery limits; this consolidation does not make
+all filesystem operations transactional.
+
 ## Import and file persistence
 
 Import decodes and validates every payload and creation option before its first
@@ -127,7 +147,7 @@ acknowledgement fails, recovery may expose the committed operation; the error
 does not prove that the write was absent. Replacement uses a
 full backup of the old log; normal append records only its original length.
 These commits sync their journal, log, metadata, and directory before returning;
-this adds filesystem work in both file modes. No throughput improvement is claimed.
+no throughput improvement is claimed.
 
 Storage and `StreamService` remain synchronous. The proposed execution boundary
 for HTTP/background callers will be reviewed separately, following the

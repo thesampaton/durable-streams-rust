@@ -31,7 +31,7 @@ fn unique_dir(prefix: &str) -> PathBuf {
 }
 
 fn new_storage(root: &Path) -> FileStorage {
-    FileStorage::new(root, 1024 * 1024, 100 * 1024, true).expect("storage init should succeed")
+    FileStorage::new(root, 1024 * 1024, 100 * 1024).expect("storage init should succeed")
 }
 
 fn stream_dir(root: &Path, name: &str) -> PathBuf {
@@ -349,7 +349,7 @@ fn corrupted_meta_json_invalid_json() {
     fs::write(&meta_path, "not valid json {{{").unwrap();
 
     // Opening storage should fail because meta.json cannot be parsed
-    let result = FileStorage::new(&root, 1024 * 1024, 100 * 1024, true);
+    let result = FileStorage::new(&root, 1024 * 1024, 100 * 1024);
     assert!(
         result.is_err(),
         "corrupted meta.json should cause storage init error"

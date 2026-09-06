@@ -231,17 +231,14 @@ fn build_in_memory_storage(config: &Config) -> InMemoryStorage {
 }
 
 fn build_file_storage(config: &Config) -> Result<FileStorage, String> {
-    let sync_on_append = config.storage.mode.sync_on_append();
     let storage = FileStorage::new(
         &config.storage.data_dir,
         config.limits.max_memory_bytes,
         config.limits.max_stream_bytes,
-        sync_on_append,
     )
     .map_err(|e| format!("failed to initialize file storage: {e}"))?;
     tracing::info!(
         storage.dir = config.storage.data_dir,
-        storage.sync_on_append = sync_on_append,
         "file storage initialized"
     );
     Ok(storage)
@@ -271,7 +268,7 @@ where
 {
     match config.storage.mode {
         StorageMode::Memory => f(&build_in_memory_storage(config)),
-        StorageMode::FileFast | StorageMode::FileDurable => f(&build_file_storage(config)?),
+        StorageMode::File => f(&build_file_storage(config)?),
         StorageMode::Acid => f(&build_acid_storage(config)?),
     }
 }
@@ -292,7 +289,7 @@ fn run_list_local(config: &Config, json: bool) -> Result<(), String> {
             "cannot list local streams for storage.mode='memory': in-memory storage is process-local and has no durable state to inspect; use file or acid storage, or pass --url to query an explicitly enabled admin endpoint"
                 .to_string(),
         ),
-        StorageMode::FileFast | StorageMode::FileDurable => {
+        StorageMode::File => {
             let service = StreamService::new(Arc::new(build_file_storage(config)?));
             let entries = service
                 .list_entries()
@@ -510,7 +507,7 @@ async fn run_serve(config: Config, profile: &DeploymentProfile) -> Result<(), St
         StorageMode::Memory => {
             serve(Arc::new(build_in_memory_storage(&runtime.config)), &runtime).await
         }
-        StorageMode::FileFast | StorageMode::FileDurable => {
+        StorageMode::File => {
             let storage = build_file_storage(&runtime.config).map_err(StartupError::runtime)?;
             serve(Arc::new(storage), &runtime).await
         }
