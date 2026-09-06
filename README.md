@@ -200,3 +200,7 @@ the Rust conformance adapter binary via Cargo. The server suite uses
 `tests/conformance/server/start-server.sh` by default, which launches the
 workspace server crate on the configured base URL before handing off to the
 upstream suite.
+
+## License
+
+Licensed under the [MIT License](LICENSE).
