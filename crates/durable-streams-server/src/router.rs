@@ -65,10 +65,9 @@ pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> R
 /// The `shutdown` token is propagated to long-poll and SSE handlers so they
 /// can observe server shutdown and drain in-flight connections cleanly.
 ///
-/// The admin router is composed separately from the protocol router so future
-/// operators or embedders can apply different Tower layers to admin traffic
-/// (filtering, rate limiting, load shedding, audit logging, IP restrictions)
-/// without contaminating the Durable Streams protocol surface. The server does
+/// Admin and protocol routes are built in separate internal subrouters. This
+/// builder returns the combined application and does not expose a hook for
+/// adding middleware to just the admin subrouter. The server does
 /// not implement authentication or authorization for admin routes; enable them
 /// only behind a trusted network, reverse proxy, or external access-control
 /// layer.

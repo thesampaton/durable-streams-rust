@@ -341,9 +341,26 @@ fn print_stream_entries(entries: &[StreamListEntry], json: bool) {
 }
 
 fn print_streams_json(entries: &[StreamListEntry]) {
+    // Keep the CLI's established JSON contract independent of the admin response.
+    let entries: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "status": if entry.closed { "closed" } else { "open" },
+                "message_count": entry.message_count,
+                "total_bytes": entry.total_bytes,
+                "content_type": entry.content_type,
+                "created_at": entry.created_at.to_rfc3339(),
+                "updated_at": entry.updated_at.map(|t| t.to_rfc3339()),
+                "ttl_seconds": entry.ttl_seconds,
+                "expires_at": entry.expires_at.map(|t| t.to_rfc3339()),
+            })
+        })
+        .collect();
     println!(
         "{}",
-        serde_json::to_string_pretty(entries).expect("JSON serialization should not fail")
+        serde_json::to_string_pretty(&entries).expect("JSON serialization should not fail")
     );
 }
 

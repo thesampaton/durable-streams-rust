@@ -40,9 +40,10 @@ surface under `http.stream_base_path`.
 
 Admin routes are optional, separate, and operator-focused. When
 `admin.enabled = true`, `GET <admin.base_path>/streams` lists streams through
-the stream-domain service. The admin router is intentionally composed
-separately from protocol routes so embedders and operators can apply different
-Tower middleware around admin traffic. The server does not implement
+the stream-domain service. Admin and protocol routes are built in separate
+internal subrouters. The public router builders return the combined application;
+they do not expose a hook for adding middleware to just the admin subrouter.
+The server does not implement
 authentication or authorization for admin routes; put them behind trusted
 networks, reverse proxies, or external access-control layers.
 

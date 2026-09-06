@@ -6,8 +6,8 @@ use durable_streams_server::{
     Config, Storage,
     config::AcidBackend,
     storage::{StreamConfig, acid::AcidStorage, file::FileStorage},
-    streams::StreamListEntry,
 };
+use serde_json::{Value, json};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
@@ -50,6 +50,12 @@ fn test_cli_list_file_storage_local_by_default() {
         )
         .expect("append data");
     drop(storage);
+    let storage =
+        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024, false).expect("reopen file storage");
+    let metadata = storage
+        .head("local-file-stream")
+        .expect("read persisted metadata");
+    drop(storage);
 
     let config_path = write_config(
         &temp,
@@ -70,11 +76,22 @@ data_dir = "{}"
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let entries: Vec<StreamListEntry> =
-        serde_json::from_slice(&output.stdout).expect("list JSON should parse");
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "local-file-stream");
-    assert_eq!(entries[0].message_count, 1);
+    // Assert the CLI's established wire format independently of the admin DTO.
+    let entries: Value = serde_json::from_slice(&output.stdout).expect("list JSON should parse");
+    assert_eq!(
+        entries,
+        json!([{
+            "name": "local-file-stream",
+            "status": "open",
+            "message_count": 1,
+            "total_bytes": 5,
+            "content_type": "text/plain",
+            "created_at": metadata.created_at.to_rfc3339(),
+            "updated_at": metadata.updated_at.map(|t| t.to_rfc3339()),
+            "ttl_seconds": null,
+            "expires_at": null,
+        }])
+    );
 }
 
 /// Validates: local ACID listing reopens persisted streams without an HTTP server.
@@ -97,6 +114,9 @@ fn test_cli_list_acid_storage_local_by_default() {
             "text/plain",
         )
         .expect("append data");
+    storage
+        .close_stream("local-acid-stream")
+        .expect("close stream");
     drop(storage);
 
     let config_path = write_config(
@@ -118,12 +138,14 @@ data_dir = "{}"
         "list failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let entries: Vec<StreamListEntry> =
+    let entries: Vec<Value> =
         serde_json::from_slice(&output.stdout).expect("list JSON should parse");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "local-acid-stream");
-    assert_eq!(entries[0].message_count, 1);
-    assert_eq!(entries[0].total_bytes, 5);
+    assert_eq!(entries[0]["name"], "local-acid-stream");
+    assert_eq!(entries[0]["status"], "closed");
+    assert_eq!(entries[0]["message_count"], 1);
+    assert_eq!(entries[0]["total_bytes"], 5);
+    assert!(entries[0].get("closed").is_none());
 }
 
 /// Validates: local `list` fails clearly for memory storage because there is no
@@ -204,8 +226,10 @@ mode = "memory"
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let entries: Vec<StreamListEntry> =
+    let entries: Vec<Value> =
         serde_json::from_slice(&output.stdout).expect("list JSON should parse");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].name, "remote-listed");
+    assert_eq!(entries[0]["name"], "remote-listed");
+    assert_eq!(entries[0]["status"], "open");
+    assert!(entries[0].get("closed").is_none());
 }
