@@ -585,6 +585,17 @@ mod extended_contract {
                 assert_eq!(storage.read("child", &anchor).unwrap().messages, vec![Bytes::from("d")]);
             }
 
+            /// Subscription control data is private and independent of stream quotas/listing.
+            #[test]
+            fn test_subscription_snapshot_replaces_state_without_creating_streams() {
+                let handle = create_test_storage(BACKEND);
+                let storage = &handle.storage;
+                assert!(storage.load_subscription_state().unwrap().is_none());
+                storage.save_subscription_state(b"one").unwrap();
+                storage.save_subscription_state(b"two").unwrap();
+                assert_eq!(storage.load_subscription_state().unwrap(), Some(b"two".to_vec()));
+                assert!(storage.list_streams().unwrap().is_empty());
+            }
         }
     }
 }

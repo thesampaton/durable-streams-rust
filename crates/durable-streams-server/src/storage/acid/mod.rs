@@ -46,6 +46,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+const SUBSCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("subscriptions");
 const STREAMS: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new("messages");
 

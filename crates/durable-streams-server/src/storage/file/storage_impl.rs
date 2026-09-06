@@ -547,6 +547,52 @@ impl Storage for FileStorage {
         Ok(result)
     }
 
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.root_dir.join("subscriptions.json")) {
+            Ok(data) => Ok(Some(data)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::classify_io_failure(
+                "file",
+                "read subscriptions",
+                "failed to read subscription state",
+                &e,
+            )),
+        }
+    }
+
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let temporary = self.root_dir.join("subscriptions.json.tmp");
+        let result = (|| -> std::io::Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            // Remove an abandoned temporary file from an interrupted prior write.
+            match fs::remove_file(&temporary) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(state)?;
+            file.sync_all()?;
+            fs::rename(&temporary, self.root_dir.join("subscriptions.json"))?;
+            fs::File::open(&self.root_dir)?.sync_all()
+        })();
+        result.map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "persist subscriptions",
+                "failed to persist subscription state",
+                &e,
+            )
+        })
+    }
+
     fn create_fork(
         &self,
         name: &str,

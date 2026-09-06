@@ -20,6 +20,7 @@ pedantic = { level = "warn", priority = -1 }
 # - Conformance: 0.3.0
 
 [dependencies]
+ring = "0.17"
 axum = { version = "0.8.8", features = ["macros"] }
 tokio = { version = "1.50", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }

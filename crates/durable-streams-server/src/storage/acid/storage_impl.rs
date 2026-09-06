@@ -767,6 +767,36 @@ impl Storage for AcidStorage {
         Ok(result)
     }
 
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.shards[0]
+            .db
+            .begin_read()
+            .map_err(|e| Self::storage_err("read subscription state", e))?;
+        let table = match txn.open_table(super::SUBSCRIPTIONS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(Self::storage_err("open subscription state", e)),
+        };
+        Ok(table
+            .get("state")
+            .map_err(|e| Self::storage_err("read subscription state", e))?
+            .map(|v| v.value().to_vec()))
+    }
+
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        let txn = Self::begin_write_txn(&self.shards[0].db)?;
+        {
+            let mut table = txn
+                .open_table(super::SUBSCRIPTIONS)
+                .map_err(|e| Self::storage_err("open subscription state", e))?;
+            table
+                .insert("state", state)
+                .map_err(|e| Self::storage_err("write subscription state", e))?;
+        }
+        txn.commit()
+            .map_err(|e| Self::storage_err("commit subscription state", e))
+    }
+
     fn create_fork(
         &self,
         name: &str,

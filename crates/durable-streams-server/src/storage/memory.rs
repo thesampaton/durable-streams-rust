@@ -82,6 +82,7 @@ impl StreamEntry {
 /// Appends to the same stream are serialized via `RwLock::write()`.
 /// Appends to different streams can proceed concurrently.
 pub struct InMemoryStorage {
+    subscription_state: RwLock<Option<Vec<u8>>>,
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
     total_bytes: AtomicU64,
     max_total_bytes: u64,
@@ -93,6 +94,7 @@ impl InMemoryStorage {
     #[must_use]
     pub fn new(max_total_bytes: u64, max_stream_bytes: u64) -> Self {
         Self {
+            subscription_state: RwLock::new(None),
             streams: RwLock::new(HashMap::new()),
             total_bytes: AtomicU64::new(0),
             max_total_bytes,
@@ -843,6 +845,22 @@ impl Storage for InMemoryStorage {
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)
+    }
+
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .subscription_state
+            .read()
+            .expect("subscription lock poisoned")
+            .clone())
+    }
+
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        *self
+            .subscription_state
+            .write()
+            .expect("subscription lock poisoned") = Some(state.to_vec());
+        Ok(())
     }
 
     fn create_fork(

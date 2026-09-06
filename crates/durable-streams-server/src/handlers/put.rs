@@ -183,6 +183,9 @@ fn create_fork_stream<S: Storage>(
     options: ForkOptions,
 ) -> ProblemResult<Response> {
     let source_name = strip_stream_base_path(forked_from, stream_base_path);
+    if source_name.split('/').next() == Some("__ds") {
+        return Err(Error::InvalidStreamName("reserved control namespace".into()).into());
+    }
     let fork_offset = match fork_offset_raw {
         Some(raw) => Some(Offset::from_str(raw)?),
         None => None,

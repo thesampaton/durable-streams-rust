@@ -445,4 +445,16 @@ pub trait Storage: Send + Sync {
         }
         self.create_fork(name, source_name, fork_offset, config)
     }
+    /// Load the private subscription control snapshot, separate from application streams.
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Atomically replace the private subscription control snapshot.
+    /// Durable backends must persist the replacement before returning success.
+    fn save_subscription_state(&self, _state: &[u8]) -> Result<()> {
+        Err(crate::protocol::error::Error::Storage(
+            "subscription persistence is unsupported by this backend".into(),
+        ))
+    }
 }
