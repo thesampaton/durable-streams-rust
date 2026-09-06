@@ -84,20 +84,23 @@ impl FileStorage {
 
         let mut all_messages: Vec<Bytes> = Vec::new();
 
-        for segment in &plan {
+        for (i, segment) in plan.iter().enumerate() {
             let Some(seg_arc) = streams.get(&segment.name) else {
                 continue;
             };
             let seg_stream = seg_arc.read().expect("stream lock poisoned");
 
-            let effective_up_to = Some(
-                segment
-                    .read_up_to
-                    .as_ref()
-                    .map_or(up_to, |bound| bound.min(up_to)),
-            );
+            let effective_up_to = if i == plan.len() - 1 {
+                Some(up_to)
+            } else {
+                segment.read_up_to.as_ref()
+            };
 
-            let effective_from = from_offset;
+            let effective_from = if i == 0 {
+                from_offset
+            } else {
+                &Offset::start()
+            };
 
             let start_idx = if effective_from.is_start() {
                 0

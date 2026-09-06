@@ -40,9 +40,6 @@ pub struct StreamName(pub String);
 /// 5. Byte length within limit
 /// 6. Segment count within limit
 fn validate(name: &str, limits: &StreamNameLimits) -> Result<(), String> {
-    if name.split('/').next() == Some("__ds") {
-        return Err("__ds is reserved for control APIs".into());
-    }
     if name.is_empty() {
         return Err("stream name cannot be empty".to_string());
     }

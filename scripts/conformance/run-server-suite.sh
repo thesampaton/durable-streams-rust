@@ -62,11 +62,8 @@ tmp_dir="$(mktemp -d "$repo_root/target/ds-server-conformance.XXXXXX")"
 cat >"$tmp_dir/conformance.test.mjs" <<'EOF'
 import { runConformanceTests } from "@durable-streams/server-conformance-tests";
 
-runConformanceTests({ baseUrl: process.env.CONFORMANCE_TEST_URL, subscriptions: true });
+runConformanceTests({ baseUrl: process.env.CONFORMANCE_TEST_URL });
 EOF
 
 cd "$repo_root"
-# Recent suites run multiple timed live-read scenarios inside one test. Keep
-# their individual deadlines while allowing enough time for the whole test.
-CONFORMANCE_TEST_URL="$server_url" npm exec -- vitest run "$tmp_dir/conformance.test.mjs" \
-    --testTimeout "${DURABLE_STREAMS_SERVER_TEST_TIMEOUT_MS:-30000}" "$@"
+CONFORMANCE_TEST_URL="$server_url" npm exec vitest run "$tmp_dir/conformance.test.mjs" "$@"

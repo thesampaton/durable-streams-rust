@@ -533,7 +533,6 @@ dependencies = [
  "public-api",
  "redb",
  "reqwest 0.13.2",
- "ring",
  "rustdoc-json",
  "rustls",
  "rustls-pemfile",

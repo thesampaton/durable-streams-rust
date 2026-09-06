@@ -27,16 +27,7 @@ pub async fn add_security_headers(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|ct| ct.starts_with("text/event-stream"));
 
-    let is_jwks = headers
-        .get("content-type")
-        .is_some_and(|ct| ct == "application/jwk-set+json");
-    let cache_control = if is_jwks {
-        "public, max-age=300"
-    } else if is_sse {
-        "no-cache"
-    } else {
-        "no-store"
-    };
+    let cache_control = if is_sse { "no-cache" } else { "no-store" };
     headers.insert("cache-control", cache_control.parse().unwrap());
     headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
     headers.insert(

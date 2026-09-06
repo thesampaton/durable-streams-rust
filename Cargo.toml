@@ -26,9 +26,9 @@ unwrap_used = "warn"
 
 [workspace.metadata.durable-streams]
 protocol_document = "https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md"
-protocol_revision = "a172acc389351cb3db6deb5cd60e3dec11e7ff39"
+protocol_revision = "8e3ef080ec3a74745ce363d59322f1cbe6de19cc"
 protocol_version = "1.0-draft"
 client_conformance_package = "@durable-streams/client-conformance-tests"
 client_conformance_version = "0.2.3"
 server_conformance_package = "@durable-streams/server-conformance-tests"
-server_conformance_version = "0.3.6"
+server_conformance_version = "0.3.0"

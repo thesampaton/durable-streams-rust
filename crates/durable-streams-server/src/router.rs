@@ -160,14 +160,13 @@ fn protocol_routes<S: Storage + 'static>(
         .layer(Extension(ReadStreamConfig {
             long_poll_timeout: config.long_poll_timeout(),
             sse_reconnect_interval_secs: config.transport.connection.sse_reconnect_interval_secs,
-            shutdown: shutdown.clone(),
+            shutdown,
         }))
         .layer(Extension(StreamBasePath(stream_base_path)))
-        .with_state(storage.clone())
-        .merge(crate::subscriptions::routes(storage, config, shutdown))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
         ))
+        .with_state(storage)
 }
 
 /// Admin routes mounted under `admin.base_path`.

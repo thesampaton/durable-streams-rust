@@ -276,37 +276,14 @@ struct SseEncoding {
 
 /// Encode a read result as SSE frames: optional `data` frame + `control` frame.
 fn encode_read_as_sse_frames(read_result: &ReadResult, encoding: SseEncoding) -> Vec<String> {
-    if encoding.is_json || read_result.messages.is_empty() {
-        let mut frames = sse::format_data_frames(&read_result.messages, false, encoding.is_json);
-        frames.push_str(&sse::format_control_frame(&build_sse_control(read_result)));
-        return vec![frames];
+    let mut frames = Vec::with_capacity(2);
+    let data_frames =
+        sse::format_data_frames(&read_result.messages, encoding.is_binary, encoding.is_json);
+    if !data_frames.is_empty() {
+        frames.push(data_frames);
     }
-    let (tail_seq, tail_bytes) = read_result
-        .next_offset
-        .parse_components()
-        .expect("server-minted tail offset");
-    let mut remaining_bytes: u64 = read_result
-        .messages
-        .iter()
-        .map(|m| u64::try_from(m.len()).unwrap_or(u64::MAX))
-        .sum();
-    let mut frames = String::new();
-    for (i, message) in read_result.messages.iter().enumerate() {
-        remaining_bytes -= u64::try_from(message.len()).unwrap_or(u64::MAX);
-        let remaining_messages =
-            u64::try_from(read_result.messages.len() - i - 1).unwrap_or(u64::MAX);
-        let at_tail = remaining_messages == 0 && read_result.at_tail;
-        let next_offset = Offset::new(tail_seq - remaining_messages, tail_bytes - remaining_bytes);
-        let control = build_sse_control(&ReadResult {
-            messages: Vec::new(),
-            next_offset,
-            at_tail,
-            closed: read_result.closed && at_tail,
-        });
-        frames.push_str(&sse::format_data_frame(message, encoding.is_binary, false));
-        frames.push_str(&sse::format_control_frame(&control));
-    }
-    vec![frames]
+    frames.push(sse::format_control_frame(&build_sse_control(read_result)));
+    frames
 }
 
 /// Build a byte stream that yields raw SSE frame strings.

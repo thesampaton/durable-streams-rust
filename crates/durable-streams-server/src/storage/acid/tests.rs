@@ -198,7 +198,6 @@ fn test_reopen_rejects_legacy_cross_shard_fork_lineage() {
         last_seq: None,
         producers: HashMap::new(),
         fork_info: Some(ForkInfo {
-            sub_offset: 0,
             source_name: source.clone(),
             fork_offset: Offset::start(),
         }),
