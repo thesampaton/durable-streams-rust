@@ -2,7 +2,7 @@
 
 use super::model::DeliveryType;
 use super::{ApiError, ApiResult, Service, crypto, delivery, issue_wake, pending, refresh};
-use crate::{execution::ExecutionError, storage::Storage};
+use crate::execution::ExecutionError;
 use axum::body::Bytes;
 use chrono::Utc;
 use serde_json::json;
@@ -24,10 +24,7 @@ struct DeliveryOutcome {
     result: ApiResult<bool>,
 }
 
-pub(crate) async fn run<S: Storage + ?Sized + 'static>(
-    weak: Weak<Service<S>>,
-    shutdown: CancellationToken,
-) {
+pub(crate) async fn run(weak: Weak<Service>, shutdown: CancellationToken) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut jobs = tokio::task::JoinSet::new();
@@ -82,8 +79,8 @@ pub(crate) async fn run<S: Storage + ?Sized + 'static>(
     while jobs.join_next().await.is_some() {}
 }
 
-async fn persist_completions<S: Storage + ?Sized + 'static>(
-    service: &Arc<Service<S>>,
+async fn persist_completions(
+    service: &Arc<Service>,
     completions: &mut BTreeMap<DeliveryKey, Arc<ApiResult<bool>>>,
     active: &mut BTreeSet<DeliveryKey>,
 ) -> Result<(), ExecutionError> {
@@ -117,16 +114,9 @@ struct Job {
     signature: String,
 }
 
-fn tick<S: Storage + ?Sized>(
-    service: &Service<S>,
-    active: &BTreeSet<(String, u64)>,
-) -> ApiResult<Vec<Job>> {
-    let mut guard = service
-        .database
-        .lock()
-        .expect("subscription database lock poisoned");
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
+fn tick(service: &Service, active: &BTreeSet<(String, u64)>) -> ApiResult<Vec<Job>> {
+    let mut guard = service.lock_database();
+    let mut db = guard.clone();
     // Avoid scanning application streams when no subscriptions need reconciliation.
     if db.subscriptions.values().all(|s| s.deleted) {
         return Ok(Vec::new());
@@ -214,18 +204,9 @@ fn tick<S: Storage + ?Sized>(
     Ok(jobs)
 }
 
-fn finish<S: Storage + ?Sized>(
-    service: &Service<S>,
-    id: &str,
-    generation: u64,
-    result: &ApiResult<bool>,
-) -> ApiResult<()> {
-    let mut guard = service
-        .database
-        .lock()
-        .expect("subscription database lock poisoned");
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
+fn finish(service: &Service, id: &str, generation: u64, result: &ApiResult<bool>) -> ApiResult<()> {
+    let mut guard = service.lock_database();
+    let mut db = guard.clone();
     let Some(sub) = db.subscriptions.get_mut(id).filter(|s| !s.deleted) else {
         return Ok(());
     };

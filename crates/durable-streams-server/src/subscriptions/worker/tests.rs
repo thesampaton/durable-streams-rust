@@ -1,6 +1,7 @@
 use super::*;
 use crate::middleware::proxy_trust::ProxyTrustResult;
 use crate::protocol::error::Error;
+use crate::storage::Storage;
 use crate::subscriptions::{api, initialize};
 use crate::{
     Config, InMemoryStorage, execution::Execution, router::StorageLease, storage::StreamOptions,
@@ -12,7 +13,7 @@ use axum::{
 };
 use std::sync::mpsc;
 
-async fn subscriptions() -> Arc<Service<dyn Storage>> {
+async fn subscriptions() -> Arc<Service> {
     let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(4096, 4096));
     storage
         .create_stream_with_data(

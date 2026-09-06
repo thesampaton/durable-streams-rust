@@ -3,9 +3,7 @@ use super::{
     ApiError, ApiResult, Completion, Service, crypto, delivery, issue_wake, model, pending, refresh,
 };
 use crate::execution::JobError;
-use crate::{
-    middleware::proxy_trust::ProxyTrustResult, protocol::offset::Offset, storage::Storage,
-};
+use crate::{middleware::proxy_trust::ProxyTrustResult, protocol::offset::Offset};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -106,8 +104,8 @@ fn complete(sub: &mut Subscription, context: CompletionContext<'_>) -> ApiResult
     }
 }
 
-pub(super) async fn control<S: Storage + ?Sized + 'static>(
-    State(service): State<Arc<Service<S>>>,
+pub(super) async fn control(
+    State(service): State<Arc<Service>>,
     Path(control): Path<String>,
     Extension(origin): Extension<ProxyTrustResult>,
     method: Method,
@@ -132,8 +130,8 @@ pub(super) async fn control<S: Storage + ?Sized + 'static>(
         .map_err(ApiError::from_execution)?
 }
 
-fn control_transaction<S: Storage + ?Sized>(
-    service: &Service<S>,
+fn control_transaction(
+    service: &Service,
     control: &str,
     origin: &ProxyTrustResult,
     method: Method,
@@ -141,12 +139,8 @@ fn control_transaction<S: Storage + ?Sized>(
     body: &Bytes,
     mut configuration: Option<Configuration>,
 ) -> ApiResult<Response> {
-    let mut guard = service
-        .database
-        .lock()
-        .expect("subscription database lock poisoned");
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
+    let mut guard = service.lock_database();
+    let mut db = guard.clone();
     let jwk = crypto::jwk(&db.signing_key)?;
     if control == "jwks.json" && method == Method::GET {
         return Ok((
@@ -322,8 +316,8 @@ fn add_streams(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-fn create_subscription<S: Storage + ?Sized>(
-    service: &Service<S>,
+fn create_subscription(
+    service: &Service,
     db: &mut Database,
     id: &str,
     config: Configuration,

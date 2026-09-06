@@ -88,12 +88,6 @@ impl From<crate::protocol::error::Error> for ApiError {
         Self::internal("subscription storage operation failed")
     }
 }
-impl From<crate::router::ServerError> for ApiError {
-    fn from(error: crate::router::ServerError) -> Self {
-        tracing::warn!(%error, "subscription initialization failed");
-        Self::internal("subscription initialization failed")
-    }
-}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut error = json!({"code":self.code, "message":self.message});
@@ -110,10 +104,10 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub(crate) struct Service<S: ?Sized> {
-    storage: Arc<S>,
+pub(crate) struct Service {
+    storage: Arc<dyn Storage>,
     execution: Arc<Execution>,
-    database: Mutex<Option<Database>>,
+    database: Mutex<Database>,
     base_path: String,
     allow_local: bool,
 }
@@ -122,11 +116,12 @@ pub(crate) fn initialize(
     storage: Arc<dyn Storage>,
     config: &Config,
     execution: Arc<Execution>,
-) -> Result<Arc<Service<dyn Storage>>, crate::router::ServerError> {
-    let mut service = Service {
+) -> Result<Arc<Service>, crate::router::ServerError> {
+    let database = Service::load_database(storage.as_ref())?;
+    let service = Service {
         storage,
         execution,
-        database: Mutex::new(None),
+        database: Mutex::new(database),
         base_path: config
             .http
             .stream_base_path
@@ -134,28 +129,19 @@ pub(crate) fn initialize(
             .to_string(),
         allow_local: config.http.allow_insecure_webhooks,
     };
-    let mut database = None;
-    service.load(&mut database)?;
-    *service
-        .database
-        .get_mut()
-        .expect("new subscription database lock") = database;
     Ok(Arc::new(service))
 }
 
-pub(crate) fn routes(service: Arc<Service<dyn Storage>>) -> Router {
+pub(crate) fn routes(service: Arc<Service>) -> Router {
     Router::new()
-        .route("/__ds/{*control}", any(api::control::<dyn Storage>))
+        .route("/__ds/{*control}", any(api::control))
         .route("/__ds", any(|| async { ApiError::missing() }))
         .with_state(service)
 }
 
-impl<S: Storage + ?Sized> Service<S> {
-    fn load(&self, database: &mut Option<Database>) -> Result<(), crate::router::ServerError> {
-        if database.is_some() {
-            return Ok(());
-        }
-        let db = match self.storage.load_subscription_state()? {
+impl Service {
+    fn load_database(storage: &dyn Storage) -> Result<Database, crate::router::ServerError> {
+        let db = match storage.load_subscription_state()? {
             Some(bytes) => {
                 let db: Database = serde_json::from_slice(&bytes).map_err(|_| {
                     crate::router::ServerError::Initialization(
@@ -178,26 +164,27 @@ impl<S: Storage + ?Sized> Service<S> {
                 subscriptions: BTreeMap::new(),
             },
         };
-        self.storage.save_subscription_state(
+        storage.save_subscription_state(
             &serde_json::to_vec(&db)
                 .map_err(|e| crate::router::ServerError::Initialization(e.to_string()))?,
         )?;
-        *database = Some(db);
+        Ok(db)
+    }
+
+    fn save(&self, current: &mut Database, next: Database) -> ApiResult<()> {
+        let bytes = serde_json::to_vec(&next).map_err(ApiError::json)?;
+        let old = serde_json::to_vec(current).map_err(ApiError::json)?;
+        if old != bytes {
+            self.storage.save_subscription_state(&bytes)?;
+        }
+        *current = next;
         Ok(())
     }
 
-    fn save(&self, current: &mut Option<Database>, next: Database) -> ApiResult<()> {
-        let bytes = serde_json::to_vec(&next).map_err(ApiError::json)?;
-        let old = current
-            .as_ref()
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(ApiError::json)?;
-        if old.as_deref() != Some(bytes.as_slice()) {
-            self.storage.save_subscription_state(&bytes)?;
-        }
-        *current = Some(next);
-        Ok(())
+    fn lock_database(&self) -> std::sync::MutexGuard<'_, Database> {
+        self.database
+            .lock()
+            .expect("subscription database lock poisoned")
     }
 
     fn tails(&self) -> ApiResult<BTreeMap<String, String>> {

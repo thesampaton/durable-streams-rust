@@ -122,7 +122,7 @@ impl Drop for StorageLease {
 
 struct ServerState {
     service: Arc<AsyncStreams>,
-    subscriptions: Arc<crate::subscriptions::Service<dyn Storage>>,
+    subscriptions: Arc<crate::subscriptions::Service>,
     config: Config,
     options: RouterOptions,
     worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -358,7 +358,7 @@ fn protocol_routes(
     config: &Config,
     shutdown: CancellationToken,
     stream_base_path: Arc<str>,
-    subscriptions: Arc<crate::subscriptions::Service<dyn Storage>>,
+    subscriptions: Arc<crate::subscriptions::Service>,
 ) -> Router {
     Router::new()
         .route(
