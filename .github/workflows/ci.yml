@@ -2,8 +2,7 @@ name: CI
 
 on:
   pull_request:
-    # Intermediate bases need the same checks as PRs targeting trunk.
-    branches: [trunk, "codex/**"]
+    branches: [trunk]
   push:
     branches: [trunk]
 

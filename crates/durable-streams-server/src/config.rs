@@ -317,8 +317,6 @@ pub struct HttpConfig {
     /// When `true`, wildcard CORS (`"*"`) is accepted without warnings or
     /// profile-level validation errors. Defaults to `false`.
     pub allow_wildcard_cors: bool,
-    /// Permit HTTP webhook targets on localhost for development only.
-    pub allow_insecure_webhooks: bool,
 }
 
 /// Optional operator/admin HTTP surface configuration.
@@ -597,7 +595,6 @@ struct HttpConfigPatch {
     cors_origins: Option<String>,
     stream_base_path: Option<String>,
     allow_wildcard_cors: Option<bool>,
-    allow_insecure_webhooks: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -826,9 +823,6 @@ impl Config {
     }
 
     fn apply_http_patch(&mut self, patch: &HttpConfigPatch) {
-        if let Some(value) = patch.allow_insecure_webhooks {
-            self.http.allow_insecure_webhooks = value;
-        }
         if let Some(cors_origins) = &patch.cors_origins {
             self.http.cors_origins.clone_from(cors_origins);
         }
@@ -1022,7 +1016,6 @@ impl Config {
         if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
             self.http.stream_base_path = stream_base_path;
         }
-        env_parse_into!(self, get, "DS_HTTP__ALLOW_INSECURE_WEBHOOKS" => http.allow_insecure_webhooks : bool);
         env_parse_into!(self, get, "DS_HTTP__ALLOW_WILDCARD_CORS" => http.allow_wildcard_cors : bool);
         Ok(())
     }
@@ -1413,7 +1406,6 @@ impl Default for Config {
                 cors_origins: "*".to_string(),
                 stream_base_path: DEFAULT_STREAM_BASE_PATH.to_string(),
                 allow_wildcard_cors: false,
-                allow_insecure_webhooks: false,
             },
             admin: AdminConfig {
                 enabled: false,

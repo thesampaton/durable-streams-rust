@@ -6,13 +6,13 @@ and updated in-repo rather than inferred from tribal knowledge.
 
 ## Verified Baselines
 
-Verified on **2026-09-06**:
+Verified on **2026-04-14**:
 
 | Standard | Baseline | Source |
 | --- | --- | --- |
 | Protocol document | Durable Streams Protocol `1.0-draft` | `https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md` |
-| Protocol revision | `a172acc389351cb3db6deb5cd60e3dec11e7ff39` | `durable-streams` `main` branch tip at verification time |
-| Server conformance suite | `@durable-streams/server-conformance-tests@0.3.6` | npm registry |
+| Protocol revision | `8e3ef080ec3a74745ce363d59322f1cbe6de19cc` | `durable-streams` `main` branch tip at verification time |
+| Server conformance suite | `@durable-streams/server-conformance-tests@0.3.0` | npm registry |
 | Client conformance suite | `@durable-streams/client-conformance-tests@0.2.3` | npm registry |
 
 ## Governance Rules
@@ -63,42 +63,3 @@ Verified on **2026-09-06**:
   conventions and Elastic-style dotted keys through `tracing`, so they can be
   mapped cleanly into a future OpenTelemetry exporter without renaming the
   server-side instrumentation surface.
-
-## September 2026 Server Alignment
-
-The server implements protocol revision `a172acc389351cb3db6deb5cd60e3dec11e7ff39`, including
-fork sub-offsets and the reserved subscription APIs in sections 6–7. The server
-suite is pinned to `0.3.6` and its optional subscription tests are enabled by
-default in the workspace runner (338 tests total). The runner forwards Vitest
-flags correctly and gives each whole test 30 seconds for sequential race probes;
-individual upstream read deadlines and assertions are unchanged. The client suite remains at
-`0.2.3`; this update does not add subscription APIs to the Rust client.
-
-Fork sub-offsets materialize only the requested prefix, followed atomically by
-any initial body. They count bytes for non-JSON streams and flattened messages
-for JSON streams. Creation identity includes the sub-offset; omitted and zero
-are equivalent. Forks have fresh producer and `Stream-Seq` state. File recovery
-preserves the anchor offsets and retained ancestors.
-
-SSE emits a control event with a resumable offset after each data event. Text and
-binary message boundaries are preserved; JSON reads may batch messages in an
-array. Frame pairs are emitted together while payload line endings remain safely
-prefixed as data.
-
-See [Subscriptions](subscriptions.md) for delivery, persistence, authentication,
-and deployment details. Subscription errors use the protocol's
-`{"error":{"code":...}}` envelope, while stream errors retain RFC 9457 problem
-responses. This is an intentional distinction between the two protocol surfaces.
-
-### Validation for this update
-
-- `cargo test --workspace`: 628 passed; the nightly-only API snapshot test is
-  ignored in this command and was run separately with success.
-- `cargo check --workspace --all-targets` and strict server Clippy passed.
-- `cargo fmt --all -- --check` and shell syntax checks passed.
-- Server conformance 0.3.6: all 338 tests passed separately on memory, file-fast,
-  file-durable, ACID in-memory, and ACID file, using Node 20.20.2 to match CI.
-- Added coverage for partial-fork failure atomicity, nested fork read bounds,
-  file recovery offsets, subscription snapshot isolation, token tampering,
-  invalid ack batches, lease renewal/expiry, deletion fencing, persisted claims
-  and signing keys, and webhook retry deadlines across restart.

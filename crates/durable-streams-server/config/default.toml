@@ -11,8 +11,6 @@ max_stream_name_bytes = 1024 # max UTF-8 bytes in a stream name
 max_stream_name_segments = 8 # max "/"-separated path segments
 
 [http]
-# Development-only exception for HTTP webhooks on localhost.
-allow_insecure_webhooks = false
 cors_origins = "*" # "*" or comma-separated origins
 stream_base_path = "/v1/stream"
 # Set to true to acknowledge wildcard CORS and suppress the warning/error.

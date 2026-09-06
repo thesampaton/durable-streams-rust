@@ -112,14 +112,8 @@ impl FileStorage {
             })?;
 
             let mut file = self.open_stream_file(&path)?;
-            let (mut index, mut next_read_seq, mut next_byte_offset) =
-                Self::rebuild_index(&mut file)?;
+            let (index, next_read_seq, next_byte_offset) = Self::rebuild_index(&mut file)?;
             let total_bytes = next_byte_offset;
-            if let Some(fork) = &meta.fork_info {
-                let (seq, byte) = Self::restore_fork_offsets(&mut index, fork);
-                next_read_seq += seq;
-                next_byte_offset += byte;
-            }
             let file_len = file
                 .metadata()
                 .map_err(|e| Error::Storage(format!("failed to stat stream log: {e}")))?
@@ -161,11 +155,8 @@ impl FileStorage {
             };
 
             if super::super::is_stream_expired(&entry.config) {
-                if entry.ref_count == 0 {
-                    self.remove_stream_dir(&entry.dir)?;
-                    continue;
-                }
-                entry.state = super::super::StreamState::Tombstone;
+                self.remove_stream_dir(&entry.dir)?;
+                continue;
             }
 
             super::super::cleanup_stale_producers(&mut entry.producers);
@@ -187,16 +178,5 @@ impl FileStorage {
         self.total_bytes.store(restored_total, Ordering::Release);
 
         Ok(())
-    }
-}
-
-impl FileStorage {
-    fn restore_fork_offsets(index: &mut [MessageIndex], fork: &super::ForkInfo) -> (u64, u64) {
-        let (seq, byte) = fork.fork_offset.parse_components().unwrap_or((0, 0));
-        for entry in index {
-            let (local_seq, local_byte) = entry.offset.parse_components().expect("rebuilt offset");
-            entry.offset = Offset::new(seq + local_seq, byte + local_byte);
-        }
-        (seq, byte)
     }
 }

@@ -11,6 +11,6 @@
   },
   "devDependencies": {
     "@durable-streams/client-conformance-tests": "0.2.3",
-    "@durable-streams/server-conformance-tests": "0.3.6"
+    "@durable-streams/server-conformance-tests": "0.3.0"
   }
 }
