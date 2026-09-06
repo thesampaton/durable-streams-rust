@@ -10,17 +10,18 @@ Verified on **2026-09-06**:
 
 | Standard | Baseline | Source |
 | --- | --- | --- |
-| Protocol document | Durable Streams Protocol `1.0-draft` | `https://github.com/durable-streams/durable-streams/blob/main/PROTOCOL.md` |
+| Protocol document | Durable Streams Protocol `1.0-draft` | [Pinned PROTOCOL.md](https://github.com/durable-streams/durable-streams/blob/a172acc389351cb3db6deb5cd60e3dec11e7ff39/PROTOCOL.md) |
 | Protocol revision | `a172acc389351cb3db6deb5cd60e3dec11e7ff39` | `durable-streams` `main` branch tip at verification time |
 | Server conformance suite | `@durable-streams/server-conformance-tests@0.3.6` | npm registry |
 | Client conformance suite | `@durable-streams/client-conformance-tests@0.2.3` | npm registry |
 
 ## Governance Rules
 
-1. Treat the upstream protocol as the semantic baseline for client and server
-   behavior.
-2. Treat the upstream conformance suites as the primary ecosystem integration
-   checks until better cross-implementation standards exist.
+1. Treat the recorded upstream protocol revision as the semantic baseline for
+   client and server behavior. Adoption of a newer revision is an explicit change.
+2. Use the pinned conformance suites as ecosystem integration checks alongside
+   local tests. Investigate disagreements between implementation, test assumptions,
+   and specification; document deliberate compatibility deviations here.
 3. Update `docs/standards.md`, `Cargo.toml` workspace metadata, and
    `package.json` together when alignment baselines change.
 4. Keep repository-internal Rust design idiomatic even when harness plumbing
@@ -28,10 +29,10 @@ Verified on **2026-09-06**:
 
 ## Harness Ownership
 
-- `tests/conformance/client` will hold the client adapter contract and fixtures.
-- `tests/conformance/server` will hold the server launcher contract and related
+- `tests/conformance/client` holds the client adapter contract and fixtures.
+- `tests/conformance/server` holds the server launcher contract and related
   fixtures for running the upstream suite against a base URL.
-- `scripts/conformance` will remain the thin execution layer that invokes the
+- `scripts/conformance` is the thin execution layer that invokes the
   pinned upstream suites.
 
 ## Current State
@@ -43,9 +44,9 @@ Verified on **2026-09-06**:
 - The server conformance launcher is implemented in
   `tests/conformance/server/start-server.sh` and targets
   `crates/durable-streams-server`.
-- The in-tree server crate is currently a lift-and-shift of published
-  `durable-streams-server` `0.1.3`, so server maintenance should distinguish
-  between migration-preservation work and intentional semantic change.
+- The server is maintained and released from this workspace. Its version and
+  release scope are defined by its manifest and changelog; API changes follow
+  the compatibility policy in `CONTRIBUTING.md`.
 
 ## Local Compatibility Notes
 

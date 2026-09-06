@@ -1,3 +1,10 @@
+//! Integration coverage for concurrent stress.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Concurrent-access stress tests that exercise race conditions across
 //! all storage backends.
 //!

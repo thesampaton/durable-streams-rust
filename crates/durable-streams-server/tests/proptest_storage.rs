@@ -1,3 +1,10 @@
+//! Integration coverage for proptest storage.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Property-based tests for storage backends using proptest.
 //!
 //! These exercise random operation sequences against all backends to catch

@@ -1,3 +1,5 @@
+//! Integration coverage for custom mount path.
+
 mod common;
 
 use common::test_client;

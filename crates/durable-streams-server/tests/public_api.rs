@@ -1,3 +1,5 @@
+//! Integration coverage for public api.
+
 use public_api::Builder as PublicApiBuilder;
 use rustdoc_json::Builder as RustdocJsonBuilder;
 use std::error::Error;

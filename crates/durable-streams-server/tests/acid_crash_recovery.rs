@@ -1,3 +1,10 @@
+//! Integration coverage for acid crash recovery.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! White-box crash-recovery tests for [`AcidStorage`].
 //!
 //! These test reopen-after-shutdown behavior, shard configuration validation,

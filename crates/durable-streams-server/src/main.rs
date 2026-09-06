@@ -1,3 +1,12 @@
+//! Standalone server, configuration inspection, and stream transfer CLI.
+
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "test setup and assertions fail the test on error"
+    )
+)]
 use axum_server::{
     Handle, from_tcp,
     tls_rustls::{RustlsConfig, from_tcp_rustls},

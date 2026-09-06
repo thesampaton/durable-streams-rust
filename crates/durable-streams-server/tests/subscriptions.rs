@@ -1,3 +1,10 @@
+//! Integration coverage for subscriptions.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Protocol sections 6–7: control namespace, durable delivery, and worker fencing.
 mod common;
 

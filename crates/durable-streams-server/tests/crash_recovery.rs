@@ -1,3 +1,10 @@
+//! Integration coverage for crash recovery.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! White-box crash-recovery tests for [`FileStorage`].
 //!
 //! These simulate mid-write crashes by directly manipulating the on-disk

@@ -1,125 +1,58 @@
 ---
 name: durable-streams-server-code
-description: >
-  Source-level conventions for the Durable Streams Rust server. Use when
-  changing code under crates/durable-streams-server/src, especially around
-  protocol types, storage contracts, handlers, streaming paths, concurrency, or
-  error handling.
-sources:
-  - "crates/durable-streams-server/src"
-  - "crates/durable-streams-server/src/config.rs"
-  - "crates/durable-streams-server/src/protocol"
-  - "crates/durable-streams-server/src/storage"
-  - "crates/durable-streams-server/src/router.rs"
-  - "crates/durable-streams-server/tests"
-user-invocable: false
+description: Maintain Durable Streams server handlers, storage, routing, and runtime code with explicit atomicity, locking, and error boundaries.
 ---
 
-# Durable Streams Server Code
+# Durable Streams server implementation
 
-This skill captures repo-local coding guidance for
-`crates/durable-streams-server/src`.
+Source paths below are relative to the repository root. Read the affected
+module and its tests; use the protocol skill only when wire semantics are at
+issue, and the conformance skill only when changing external suite wiring.
 
-Use it when changing protocol handling, storage implementations, router wiring,
-middleware, configuration, or live-read behaviour in the server crate.
+## Storage and concurrency
 
-## Design Bias
+- `src/storage` under `crates/durable-streams-server` owns backend mechanics.
+  Shared semantic rules live in `storage/shared.rs` and `storage/fork.rs`.
+  [Architecture](../../../docs/architecture.md#storage-read-boundaries) records
+  the backend-specific lock and transaction boundaries.
+- Validate and commit a logical operation within its atomic boundary. Return
+  offsets and closed state from that same snapshot, avoiding a separate HEAD
+  that can race with another writer. Treat known gaps as defects to fix when
+  in scope, not as guarantees provided by the current trait.
+- Memory/file fork reads release the entry lock before ancestor traversal can
+  acquire the stream map. ACID fork lineage reads share a shard transaction.
+  Preserve these lock orders when changing read or expiry handling.
+- The current `Storage` trait is synchronous. Blocking disk I/O and lock waits
+  still need an execution boundary appropriate to the async caller. Decide
+  whether to retain the trait or change it based on actual callers; a sync
+  signature is not permission to block Tokio workers without consideration.
+- Document ownership and shutdown for spawned workers. Router cloning and
+  multiple listeners must not accidentally create competing owners of state.
 
-- Preserve protocol and operational semantics first.
-- Prefer explicit, boring code over compact or clever code.
-- Parse and validate at module boundaries, then work with typed values
-  internally.
-- Keep behaviourally meaningful logic out of HTTP handlers.
+## Protocol and error boundaries
 
-## Strong Typing
+- Parse request framing in handlers, then pass validated domain values to
+  storage/domain operations. Check arithmetic and resource bounds before
+  mutation; user input must not trigger invariant panics.
+- The server owns its offset format, `{read_seq:016x}_{byte_offset:016x}`.
+  Preserve monotonic ordering and reserved `-1`/`now` request sentinels.
+  Clients treat returned offsets as opaque.
+- `protocol/error.rs` owns the exhaustive mapping from domain errors to HTTP
+  status, problem code, public detail, and telemetry. Storage emits typed
+  errors; handlers attach request context and operation-specific headers.
+- `protocol/problem.rs` builds RFC 9457 stream-error responses. Subscription
+  control errors use their separate protocol envelope; see
+  [subscriptions](../../../docs/subscriptions.md).
+- Preserve error causes for diagnostics while keeping internal storage details
+  out of public responses. An `expect` must describe a real internal invariant.
 
-- Use newtypes and enums to make invalid states unrepresentable.
-- Prefer domain types such as `Offset`, `ProducerEpoch`, and `ProducerSeq`
-  instead of raw strings or integers once input has been parsed.
-- Parse and validate at the edges. Internal functions should assume validated
-  types rather than re-parse raw input.
+## HTTP surfaces
 
-## Offset Invariants
-
-- Offsets must be monotonically increasing within a stream.
-- The server offset format is `{read_seq:016x}_{byte_offset:016x}`.
-- Reserved sentinels are `-1` and `now`.
-- Lexicographic ordering must match temporal ordering.
-- Concurrent appends must be serialized per stream so monotonicity holds.
-
-When touching append logic, check that locking or storage sequencing still
-preserves per-stream monotonic offsets.
-
-## Storage Trait Contract
-
-The `Storage` trait is the core persistence boundary. Implementations should
-preserve these properties:
-
-- Thread-safe under concurrent access.
-- Atomic appends and create-with-data operations.
-- Stream isolation: work on one stream should not leak into another except for
-  global resource limits.
-- Synchronous operations by default, with async boundaries used only where they
-  are genuinely required for notifications or live reads.
-
-Use interior mutability deliberately. Avoid introducing async into storage APIs
-unless it is necessary for observable behaviour.
-
-## Error Handling
-
-- Keep one core error surface in
-  `crates/durable-streams-server/src/protocol/error.rs`.
-- Map domain errors to HTTP status codes in handlers, not in storage or
-  protocol modules.
-- Avoid opaque error flow in core logic.
-- If `expect()` or `panic!()` remains, it should correspond to an internal
-  invariant, not user input.
-
-## Boundary Types
-
-- Prefer owned boundary types such as `Bytes`, `String`, and `Arc<T>` when data
-  crosses module boundaries.
-- Use borrowing freely within a module, but avoid borrow-heavy API surfaces that
-  make call sites harder to reason about.
-
-## Handler Boundary
-
-Handlers should stay thin:
-
-- parse request input
-- validate request framing
-- call protocol or storage logic
-- map results into HTTP responses
-
-Do not move business rules or storage coordination into handler code just
-because the request arrived there first.
-
-## Streaming Paths
-
-- Keep SSE and long-poll behaviour isolated in dedicated modules or focused
-  helper logic.
-- Do not leak streaming-specific state machines across unrelated modules.
-- Keep live-read behaviour explicit and testable.
-
-## Code Shape
-
-- Prefer single-purpose functions.
-- If a function grows to the point where it needs section comments to explain
-  itself, extract helpers.
-- Avoid iterator-heavy or lifetime-heavy rewrites in hot paths when a simple
-  loop is clearer.
-
-## Lints
-
-- Workspace clippy pedantic lints are on by default.
-- Suppress lints locally and intentionally, with a short reason, rather than
-  weakening crate-wide standards.
-
-## Coordination With Other Skills
-
-Use this skill together with:
-
-- `durable-streams-protocol` for protocol semantics
-- `durable-streams-conformance-harness` for workspace-level harness and runner
-  wiring
-- `coding-guidelines` for general Rust style guidance
+- Keep protocol, subscription, admin, and probe behavior explicit when changing
+  routing or middleware. Admin authentication belongs to the embedding or
+  deployment layer; document the hooks actually exposed by the public API.
+- Long-poll and SSE must preserve resume offsets, closure, cursor propagation,
+  and shutdown behavior across framing and concurrency changes.
+- Keep separate storage metadata representations when durability/recovery needs
+  differ. Extract shared rules rather than forcing one mutable representation
+  across all backends.

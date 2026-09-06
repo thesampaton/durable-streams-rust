@@ -1,3 +1,5 @@
+//! Integration coverage for proxy trust.
+
 mod common;
 
 use common::{spawn_test_server, spawn_test_server_with_config, test_client, unique_stream_name};

@@ -1,3 +1,5 @@
+//! Integration coverage for http backend parity subset.
+
 mod common;
 
 use common::{spawn_test_server_for_backend, test_client, unique_stream_name};

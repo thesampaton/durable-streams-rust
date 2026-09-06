@@ -1,3 +1,10 @@
+//! Integration coverage for storage backend contract.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use bytes::Bytes;

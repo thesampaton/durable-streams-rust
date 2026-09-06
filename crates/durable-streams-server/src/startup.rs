@@ -67,6 +67,7 @@ pub struct StartupError {
 }
 
 impl StartupError {
+    /// Attach a typed failure to the startup phase that produced it.
     #[must_use]
     pub fn new(phase: StartupPhase, kind: StartupErrorKind) -> Self {
         Self { phase, kind }
@@ -86,15 +87,26 @@ pub enum StartupErrorKind {
 
     /// A required TLS file is missing from the filesystem.
     #[error("TLS file not found: {path}")]
-    TlsFileNotFound { path: String },
+    TlsFileNotFound {
+        /// Configured TLS file path.
+        path: String,
+    },
 
     /// A TLS file exists but is not a regular file (e.g. directory, symlink to dir).
     #[error("TLS path is not a regular file: {path}")]
-    TlsFileNotRegular { path: String },
+    TlsFileNotRegular {
+        /// Configured TLS file path.
+        path: String,
+    },
 
     /// A TLS file exists but could not be read (permissions, I/O).
     #[error("TLS file is not readable: {path}: {reason}")]
-    TlsFileNotReadable { path: String, reason: String },
+    TlsFileNotReadable {
+        /// Configured TLS file path.
+        path: String,
+        /// Underlying file access diagnostic.
+        reason: String,
+    },
 
     /// The rustls `ServerConfig` could not be built from the provided PEM files.
     #[error("failed to build TLS context: {0}")]
@@ -102,7 +114,12 @@ pub enum StartupErrorKind {
 
     /// The TCP listener could not bind to the configured address.
     #[error("failed to bind {addr}: {source}")]
-    Bind { addr: SocketAddr, source: io::Error },
+    Bind {
+        /// Socket address the listener tried to bind.
+        addr: SocketAddr,
+        /// Underlying bind error.
+        source: io::Error,
+    },
 
     /// A runtime error after the server began accepting connections.
     #[error("server error: {0}")]
@@ -428,16 +445,19 @@ pub fn log_startup_failure(error: &StartupError) {
 // ── Helper constructors ────────────────────────────────────────────
 
 impl StartupError {
+    /// Attach a source-loading error to the configuration loading phase.
     #[must_use]
     pub fn config_load(source: ConfigLoadError) -> Self {
         Self::new(StartupPhase::LoadConfig, source.into())
     }
 
+    /// Attach a validation error to the configuration validation phase.
     #[must_use]
     pub fn config_validation(source: ConfigValidationError) -> Self {
         Self::new(StartupPhase::ValidateConfig, source.into())
     }
 
+    /// Record a failure to construct the TLS server context.
     pub fn tls_context(message: impl Into<String>) -> Self {
         Self::new(
             StartupPhase::BuildTlsContext,
@@ -445,6 +465,7 @@ impl StartupError {
         )
     }
 
+    /// Record a listener bind failure with its address and I/O cause.
     #[must_use]
     pub fn bind(addr: SocketAddr, source: io::Error) -> Self {
         Self::new(
@@ -453,6 +474,7 @@ impl StartupError {
         )
     }
 
+    /// Record a failure starting or serving the HTTP runtime.
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::new(
             StartupPhase::StartServer,

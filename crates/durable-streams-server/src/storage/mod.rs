@@ -239,16 +239,24 @@ pub struct CreateWithDataResult {
 pub enum ProducerAppendResult {
     /// New data accepted (200 OK)
     Accepted {
+        /// Acknowledged producer epoch.
         epoch: u64,
+        /// Acknowledged producer sequence.
         seq: u64,
+        /// Resume offset from the same snapshot as the producer operation.
         next_offset: Offset,
+        /// Whether the stream is closed in that snapshot.
         closed: bool,
     },
     /// Duplicate detected, data already persisted (204 No Content)
     Duplicate {
+        /// Acknowledged producer epoch.
         epoch: u64,
+        /// Acknowledged producer sequence.
         seq: u64,
+        /// Resume offset from the same snapshot as the producer operation.
         next_offset: Offset,
+        /// Whether the stream is closed in that snapshot.
         closed: bool,
     },
 }

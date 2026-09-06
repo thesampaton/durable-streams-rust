@@ -1,149 +1,58 @@
 ---
 name: durable-streams-server-testing
-description: >
-  Testing and conformance guidance for the Durable Streams Rust server. Use
-  when adding or changing tests under crates/durable-streams-server/tests,
-  deciding between unit and integration coverage, or wiring the upstream server
-  conformance suite from this workspace.
-sources:
-  - "crates/durable-streams-server/tests"
-  - "crates/durable-streams-server/tests/common/mod.rs"
-  - "tests/conformance/README.md"
-  - "tests/conformance/server/start-server.sh"
-  - "scripts/conformance/run-server-suite.sh"
-  - "package.json"
-user-invocable: false
+description: Choose and maintain unit, backend-contract, HTTP, and public API tests for the Durable Streams server.
 ---
 
-# Durable Streams Server Testing
+# Durable Streams server testing
 
-This skill captures repo-local testing conventions for
-`crates/durable-streams-server`.
+Tests provide evidence about specific guarantees. Upstream conformance is a
+required release check alongside local tests; it does not cover every storage,
+concurrency, or Rust embedding contract.
 
-The main rule is simple: crate-local tests provide fast feedback, while the
-upstream server conformance suite is the final acceptance gate.
+## Choose the boundary
 
-## Test Layers
+| Behavior | Coverage location under `crates/durable-streams-server` |
+| --- | --- |
+| Parsing and internal invariants | `#[cfg(test)]` modules beside source |
+| Shared persistence behavior | `tests/storage_backend_contract.rs` |
+| Backend-specific recovery and layout | Tests beside the backend implementation |
+| HTTP behavior shared across backends | `tests/http_backend_parity_subset.rs` |
+| HTTP status, headers, bodies, and live reads | Focused `tests/*.rs` integrations |
+| Downstream API shape | `tests/public_api.rs` plus compiled usage examples |
 
-### Unit tests
+HTTP tests should exercise a real in-process server and observable responses.
+Use backend tests for internal storage assertions. A controlled fault or
+interleaving backend is appropriate when testing an observable failure boundary.
+Reuse `tests/common` helpers; keep backend-neutral suites independent of file
+paths, shard layout, and lock implementation.
 
-Unit tests belong in `#[cfg(test)]` modules inside source files.
+Use descriptive names and independent fixtures/stream names. Prefer explicit
+synchronization for races. Time-based expiry tests should use the smallest
+reliable wait and avoid competing conformance load.
 
-Use them for:
+## Trace behavior to a source
 
-- parsing and validation logic
-- offset and cursor rules
-- producer sequencing rules
-- internal state-machine behaviour
-- backend-specific invariants that do not require HTTP
+For protocol tests, identify the requirement in the pinned `PROTOCOL.md`
+revision recorded in [standards](../../../docs/standards.md), such as
+`PROTOCOL.md §5.1 Create Stream`. For local extensions or regression tests,
+reference a real repository document or describe the observable regression.
+Embedding, resource-limit, and recovery tests need not invent a protocol clause.
 
-Keep them fast and focused. Prefer no networking and no external I/O unless the
-module being tested is itself storage-specific.
+When a test fails, investigate code, test assumptions, environment, and the
+pinned specification. Do not weaken an assertion or change semantics solely to
+agree with another suite. Record intentional deviations in the standards notes.
 
-### Integration tests
+## Verification
 
-Integration tests live under `crates/durable-streams-server/tests/*.rs`.
+Use focused `cargo test -p durable-streams-server --test NAME` or `--lib`
+commands during development. Full checks are in
+[CONTRIBUTING.md](../../../CONTRIBUTING.md#expected-local-checks).
 
-Use them for:
+Run `./scripts/check-server-public-api.sh` for public-surface changes. It needs
+nightly and is ignored by ordinary `cargo test`; inspect the diff before
+updating its snapshot. A matching snapshot establishes API shape, not usability.
 
-- real HTTP requests against a running server
-- observable protocol behaviour
-- status/header/body assertions
-- end-to-end behaviour that should stay black-box from the caller perspective
-
-Each test should map to a concrete protocol requirement or a documented local
-gap.
-
-### External conformance
-
-The upstream `@durable-streams/server-conformance-tests@0.3.6` suite is the
-acceptance gate for server behaviour in this workspace.
-
-Run it through the workspace harness:
-
-- `./scripts/conformance/run-server-suite.sh`
-
-The default launcher is:
-
-- `tests/conformance/server/start-server.sh`
-
-## Backend Parity Policy
-
-- Shared backend invariants belong in
-  `crates/durable-streams-server/tests/storage_backend_contract.rs`.
-- Backend-specific storage behaviour should stay close to the implementation in
-  the corresponding `src/storage/*.rs` tests.
-- HTTP parity checks that matter across backends belong in
-  `crates/durable-streams-server/tests/http_backend_parity_subset.rs`.
-- Keep shared suites backend-neutral. Avoid assertions about file paths, shard
-  routing details, or lock structure outside backend-specific tests.
-
-## Black-Box Rule For HTTP Tests
-
-HTTP integration tests should validate observable server behaviour, not
-implementation details.
-
-They should:
-
-- start a real in-process server instance
-- use an HTTP client such as `reqwest`
-- assert on status codes, headers, and bodies
-
-They should not depend on internal storage state to decide whether the server is
-correct.
-
-## Test Helpers
-
-Shared helpers live in:
-
-- `crates/durable-streams-server/tests/common/mod.rs`
-
-Prefer extending those helpers lightly over building a large custom framework.
-
-Important existing helpers include server spawning, HTTP client creation, unique
-stream-name generation, and backend-aware storage setup for contract tests.
-
-## Naming And Independence
-
-- Use descriptive test names of the form
-  `test_{operation}_{expected_behaviour}`.
-- Keep tests independent.
-- Use unique stream names so tests do not interfere with one another.
-
-## Spec And Gap References
-
-For integration tests, prefer doc comments that reference the spec document or
-documented gap the test is intended to cover.
-
-Examples:
-
-- `Validates spec: 01-stream-lifecycle.md#create-stream`
-- `Validates gap: docs/gaps.md#cors-preflight`
-
-This keeps local tests aligned with protocol intent instead of drifting into
-implementation-only assertions.
-
-## Failure Triage
-
-- If a unit test fails, internal logic is broken.
-- If a local integration test fails, either the implementation or the test no
-  longer matches the protocol expectation.
-- If upstream conformance fails, treat that as the authoritative behavioural
-  signal and reconcile local expectations to it.
-
-## Running Tests
-
-- `cargo test --workspace`
-- `cargo test -p durable-streams-server`
-- `cargo test -p durable-streams-server --lib`
-- `cargo test -p durable-streams-server --test tls_transport`
-- `./scripts/conformance/run-server-suite.sh`
-
-## Coordination With Other Skills
-
-Use this skill together with:
-
-- `durable-streams-protocol` for protocol truth
-- `durable-streams-conformance-harness` for workspace runner and package wiring
-- `durable-streams-server-code` when a test change depends on source-level
-  design constraints
+Run upstream server conformance via `./scripts/conformance/run-server-suite.sh`.
+The package version belongs in `package.json`; runner controls and backend
+examples are maintained in [the harness README](../../../tests/conformance/README.md).
+Consult the conformance-harness skill when changing those scripts or pins.

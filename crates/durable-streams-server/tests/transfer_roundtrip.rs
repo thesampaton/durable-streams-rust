@@ -1,3 +1,10 @@
+//! Integration coverage for transfer roundtrip.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 use bytes::Bytes;
 use durable_streams_server::{
     InMemoryStorage, Storage,

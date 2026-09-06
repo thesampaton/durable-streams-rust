@@ -1,3 +1,10 @@
+//! Integration coverage for tls transport.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use axum_server::{Handle, tls_rustls::RustlsConfig};

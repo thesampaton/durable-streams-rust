@@ -1,3 +1,5 @@
+//! Integration coverage for cli list.
+
 mod common;
 
 use bytes::Bytes;

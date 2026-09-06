@@ -12,8 +12,8 @@ keywords = ["streaming", "event-sourcing", "durable-streams", "sse", "long-polli
 categories = ["web-programming::http-server", "network-programming"]
 exclude = ["CLAUDE.md", "**/CLAUDE.md"]
 
-[lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+[lints]
+workspace = true
 
 # Spec versions implemented:
 # - Spec SHA: a172acc389351cb3db6deb5cd60e3dec11e7ff39

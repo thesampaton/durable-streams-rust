@@ -111,11 +111,13 @@ string_enum! {
 }
 
 impl StorageMode {
+    /// Whether this mode selects the append-log backend, excluding file-backed ACID storage.
     #[must_use]
     pub fn uses_file_backend(self) -> bool {
         matches!(self, Self::FileFast | Self::FileDurable)
     }
 
+    /// Whether the append-log backend should sync writes before acknowledging them.
     #[must_use]
     pub fn sync_on_append(self) -> bool {
         matches!(self, Self::FileDurable)
@@ -158,6 +160,7 @@ string_enum! {
 }
 
 impl TransportMode {
+    /// Whether the listener requires a TLS context, including mutual TLS.
     #[must_use]
     pub fn uses_tls(self) -> bool {
         matches!(self, Self::Tls | Self::Mtls)
@@ -225,15 +228,22 @@ string_enum! {
 /// Typed profile selection for config loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentProfile {
+    /// Minimal HTTP profile with the built-in defaults.
     Default,
+    /// Loopback development profile.
     Dev,
+    /// Production profile for externally terminated TLS.
     Prod,
+    /// Production profile with server-side TLS termination.
     ProdTls,
+    /// Production profile requiring client TLS certificates.
     ProdMtls,
+    /// Custom profile name selecting an additional TOML file.
     Named(String),
 }
 
 impl DeploymentProfile {
+    /// Profile name used to select the corresponding TOML file.
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
@@ -385,6 +395,7 @@ pub struct TransportTlsConfig {
 }
 
 impl TransportTlsConfig {
+    /// Whether both certificate and private-key paths are set; does not check their contents.
     #[must_use]
     pub fn has_server_credentials(&self) -> bool {
         self.cert_path.is_some() && self.key_path.is_some()
@@ -431,6 +442,7 @@ pub struct ObservabilityConfig {
     pub rust_log: String,
 }
 
+/// Select configuration files and the profile used by [`Config::from_sources`].
 #[derive(Debug, Clone)]
 pub struct ConfigLoadOptions {
     /// Directory containing `default.toml`, `<profile>.toml`, and `local.toml`.
@@ -455,14 +467,27 @@ impl Default for ConfigLoadOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigLoadError {
     #[error("config override file not found: '{path}'")]
-    OverrideFileNotFound { path: PathBuf },
+    /// An explicitly requested override file does not exist.
+    OverrideFileNotFound {
+        /// Requested override file path.
+        path: PathBuf,
+    },
     #[error("failed to parse TOML config: {message}")]
-    TomlParse { message: String },
+    /// A configuration source could not be decoded as the expected TOML structure.
+    TomlParse {
+        /// Parser diagnostic from the configuration provider.
+        message: String,
+    },
     #[error("invalid {input_source} value for {key}: '{value}' ({reason})")]
+    /// A source value could not be converted to the expected setting type.
     InvalidValue {
+        /// Source category, such as an environment override.
         input_source: &'static str,
+        /// Configuration key that failed conversion.
         key: &'static str,
+        /// Unconverted input value.
         value: String,
+        /// Explanation of the failed conversion.
         reason: String,
     },
 }
@@ -471,90 +496,173 @@ pub enum ConfigLoadError {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConfigValidationError {
     #[error("server.bind_address is invalid: '{value}' ({reason})")]
-    InvalidBindAddress { value: String, reason: String },
+    /// The listener address is not a valid socket address.
+    InvalidBindAddress {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("http.stream_base_path is invalid: '{value}' ({reason})")]
-    InvalidStreamBasePath { value: String, reason: String },
+    /// The protocol mount path violates route constraints.
+    InvalidStreamBasePath {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("admin.base_path is invalid: '{value}' ({reason})")]
-    InvalidAdminBasePath { value: String, reason: String },
+    /// The admin mount path violates route constraints.
+    InvalidAdminBasePath {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("admin.base_path must not overlap http.stream_base_path")]
+    /// Enabled admin routes overlap the protocol mount path.
     AdminBasePathConflictsWithStreamBasePath,
     #[error("http.cors_origins contains an empty origin entry")]
+    /// The CORS list includes an empty entry.
     EmptyCorsOrigin,
     #[error("http.cors_origins entry is invalid: '{value}'")]
-    InvalidCorsOrigin { value: String },
+    /// A CORS entry is not an accepted origin.
+    InvalidCorsOrigin {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error("limits.max_memory_bytes must be at least 1")]
+    /// The total payload byte limit is zero.
     MaxMemoryBytesTooSmall,
     #[error("limits.max_stream_bytes must be at least 1")]
+    /// The per-stream payload byte limit is zero.
     MaxStreamBytesTooSmall,
     #[error("limits.max_stream_name_bytes must be at least 1")]
+    /// The stream-name byte limit is zero.
     MaxStreamNameBytesTooSmall,
     #[error("limits.max_stream_name_segments must be at least 1")]
+    /// The stream-name segment limit is zero.
     MaxStreamNameSegmentsTooSmall,
     #[error("storage.data_dir must be a non-empty path when storage.mode is '{mode}'")]
-    EmptyStorageDataDir { mode: StorageMode },
+    /// A persistence mode requires a non-empty data directory.
+    EmptyStorageDataDir {
+        /// Configured mode involved in the conflict or requirement.
+        mode: StorageMode,
+    },
     #[error(
         "storage.acid_shard_count must be a power of two in 1..=256 when storage.mode is 'acid'"
     )]
+    /// ACID shard count must be a power of two between 1 and 256.
     InvalidAcidShardCount,
     #[error("transport.connection.long_poll_timeout_secs must be at least 1")]
+    /// The long-poll timeout is zero.
     LongPollTimeoutTooSmall,
     #[error("transport.http.versions must include at least one version")]
+    /// No HTTP protocol version is enabled.
     EmptyHttpVersions,
     #[error("transport.mode='http' does not support transport.http.versions containing http2")]
+    /// HTTP/2 was requested for the plain HTTP listener.
     HttpModeDoesNotSupportHttp2,
     #[error("transport.tls.min_version must be less than or equal to transport.tls.max_version")]
+    /// The minimum TLS version exceeds the maximum.
     InvalidTlsVersionRange,
     #[error("transport.mode='{mode}' requires transport.tls.{field}")]
+    /// The selected TLS mode lacks a required credential path.
     MissingTlsField {
+        /// Configured mode involved in the conflict or requirement.
         mode: TransportMode,
+        /// TLS field requiring correction.
         field: &'static str,
     },
     #[error("transport.mode='http' cannot be combined with transport.tls.{field}")]
-    HttpModeDisallowsTlsField { field: &'static str },
+    /// A TLS credential path was supplied for plain HTTP.
+    HttpModeDisallowsTlsField {
+        /// TLS field requiring correction.
+        field: &'static str,
+    },
     #[error("transport.mode='tls' cannot be combined with transport.tls.client_ca_path")]
+    /// A client CA was supplied for TLS without client authentication.
     ClientCaRequiresMtls,
     #[error("transport.tls.{field} must be a non-empty path when set")]
-    EmptyPath { field: &'static str },
+    /// A configured TLS file path is empty.
+    EmptyPath {
+        /// TLS field requiring correction.
+        field: &'static str,
+    },
     #[error(
         "transport.http.versions includes '{version}', but transport.tls.alpn_protocols is missing '{alpn}'"
     )]
+    /// An enabled HTTP version is absent from TLS ALPN negotiation.
     MissingAlpnProtocol {
+        /// Enabled HTTP version.
         version: HttpVersion,
+        /// ALPN identifier involved in the mismatch.
         alpn: AlpnProtocol,
     },
     #[error(
         "transport.tls.alpn_protocols includes '{alpn}', but transport.http.versions does not enable the matching HTTP version"
     )]
-    UnexpectedAlpnProtocol { alpn: AlpnProtocol },
+    /// TLS ALPN advertises an HTTP version that is not enabled.
+    UnexpectedAlpnProtocol {
+        /// ALPN identifier involved in the mismatch.
+        alpn: AlpnProtocol,
+    },
     #[error(
         "proxy.enabled=true requires proxy.forwarded_headers to be set to 'x-forwarded' or 'forwarded'"
     )]
+    /// Proxy trust is enabled without a forwarded-header family.
     ProxyEnabledRequiresForwardedHeaders,
     #[error("proxy.enabled=true requires at least one entry in proxy.trusted_proxies")]
+    /// Proxy trust is enabled without any trusted peer addresses.
     ProxyEnabledRequiresTrustedProxies,
     #[error("proxy.enabled=false cannot be combined with proxy.trusted_proxies")]
+    /// Trusted peers were configured while proxy trust is disabled.
     ProxyDisabledDisallowsTrustedProxies,
     #[error("proxy.enabled=false cannot be combined with proxy.forwarded_headers='{mode:?}'")]
-    ProxyDisabledDisallowsForwardedHeaders { mode: ForwardedHeadersMode },
+    /// Forwarded headers were enabled while proxy trust is disabled.
+    ProxyDisabledDisallowsForwardedHeaders {
+        /// Configured mode involved in the conflict or requirement.
+        mode: ForwardedHeadersMode,
+    },
     #[error("proxy.enabled=false cannot be combined with proxy.identity.mode='{mode:?}'")]
-    ProxyDisabledDisallowsIdentityMode { mode: ProxyIdentityMode },
+    /// Proxy identity handoff was enabled while proxy trust is disabled.
+    ProxyDisabledDisallowsIdentityMode {
+        /// Configured mode involved in the conflict or requirement.
+        mode: ProxyIdentityMode,
+    },
     #[error("proxy.enabled=false cannot be combined with proxy.identity.header_name")]
+    /// An identity header was set while proxy trust is disabled.
     ProxyDisabledDisallowsIdentityHeader,
     #[error("proxy.trusted_proxies entry is invalid: '{value}'")]
-    InvalidTrustedProxy { value: String },
+    /// A trusted proxy entry is not an accepted IP address or CIDR range.
+    InvalidTrustedProxy {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error("proxy.identity.mode='header' requires proxy.identity.header_name")]
+    /// Header-based identity handoff lacks a header name.
     HeaderIdentityRequiresHeaderName,
     #[error("proxy.identity.mode='header' requires transport.mode='mtls'")]
+    /// Header-based identity handoff requires mutual TLS.
     HeaderIdentityRequiresMtls,
     #[error("proxy.identity.mode='none' cannot be combined with proxy.identity.header_name")]
+    /// An identity header name was set without header-based identity handoff.
     IdentityHeaderRequiresHeaderMode,
     #[error("proxy.identity.header_name is invalid: '{value}'")]
-    InvalidIdentityHeaderName { value: String },
+    /// The identity header name is not a valid HTTP header name.
+    InvalidIdentityHeaderName {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error(
         "http.cors_origins='*' is not allowed for the '{profile}' deployment profile; \
          set http.allow_wildcard_cors=true to override, or specify explicit origins"
     )]
-    WildcardCorsOriginsProd { profile: String },
+    /// A production profile uses wildcard CORS without an explicit override.
+    WildcardCorsOriginsProd {
+        /// Deployment profile that requires an explicit CORS policy.
+        profile: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]

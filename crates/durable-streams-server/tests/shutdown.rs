@@ -1,3 +1,10 @@
+//! Integration coverage for shutdown.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Graceful shutdown tests.
 //!
 //! Verify that in-flight long-poll and SSE connections complete cleanly

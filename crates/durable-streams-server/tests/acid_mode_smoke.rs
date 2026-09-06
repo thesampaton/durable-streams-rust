@@ -1,3 +1,5 @@
+//! Integration coverage for acid mode smoke.
+
 mod common;
 
 use common::{spawn_test_server_acid, test_client, unique_stream_name};

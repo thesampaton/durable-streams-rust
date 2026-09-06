@@ -1,3 +1,5 @@
+//! Idempotent producer headers and sequencing validation.
+
 use super::error::{Error, Result};
 use super::headers::names;
 use axum::http::HeaderMap;

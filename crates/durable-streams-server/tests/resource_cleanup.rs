@@ -1,3 +1,10 @@
+//! Integration coverage for resource cleanup.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Resource management and cleanup tests.
 //!
 //! These validate that expired streams are reclaimed, producer state TTL works,

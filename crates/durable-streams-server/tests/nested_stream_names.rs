@@ -1,3 +1,10 @@
+//! Integration coverage for nested stream names.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use common::{spawn_test_server, test_client};

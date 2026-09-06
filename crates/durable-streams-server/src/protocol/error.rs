@@ -1,3 +1,5 @@
+//! Domain errors and their HTTP problem-response mappings.
+
 use crate::protocol::problem::{ProblemDetails, ProblemResponse, ProblemTelemetry};
 use axum::http::{HeaderValue, StatusCode, header::RETRY_AFTER};
 use std::io;
@@ -6,14 +8,17 @@ use thiserror::Error;
 /// Default `Retry-After` value for temporary backend unavailability.
 pub const DEFAULT_STORAGE_RETRY_AFTER_SECS: u32 = 1;
 
-/// Internal classification for storage-originated failures.
+/// Classification used for storage HTTP responses and telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageFailureClass {
+    /// Temporary backend failure, mapped to HTTP 503.
     Unavailable,
+    /// Backend capacity exhaustion, mapped to HTTP 507.
     InsufficientStorage,
 }
 
 impl StorageFailureClass {
+    /// Stable telemetry label for this failure class.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -23,13 +28,18 @@ impl StorageFailureClass {
     }
 }
 
-/// Internal metadata retained for storage-related failures.
+/// Backend failure context retained for diagnostics and retry guidance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageFailure {
+    /// Response and telemetry classification.
     pub class: StorageFailureClass,
+    /// Backend identifier used in diagnostics.
     pub backend: &'static str,
+    /// Operation that failed, such as reading metadata or committing an append.
     pub operation: String,
+    /// Internal diagnostic detail; classified responses keep this out of the public body.
     pub detail: String,
+    /// Suggested delay in seconds before retrying, if available.
     pub retry_after_secs: Option<u32>,
 }
 
@@ -39,10 +49,10 @@ impl std::fmt::Display for StorageFailure {
     }
 }
 
-/// Single error type for all storage and protocol operations
+/// Domain errors for stream storage and protocol operations.
 ///
-/// Maps to HTTP status codes in handlers. Following the single error enum
-/// pattern to avoid error type proliferation.
+/// This module defines the HTTP status, problem details, and telemetry for each
+/// variant. Handlers attach request context and operation-specific headers.
 #[derive(Debug, Error)]
 pub enum Error {
     /// Stream not found (404)
@@ -59,7 +69,12 @@ pub enum Error {
 
     /// Content type mismatch (409)
     #[error("Content type mismatch: expected {expected}, got {actual}")]
-    ContentTypeMismatch { expected: String, actual: String },
+    ContentTypeMismatch {
+        /// Content type fixed when the stream was created.
+        expected: String,
+        /// Content type supplied by the request.
+        actual: String,
+    },
 
     /// Stream is closed (409)
     #[error("Stream is closed")]
@@ -67,11 +82,21 @@ pub enum Error {
 
     /// Producer sequence gap (409)
     #[error("Producer sequence gap: expected {expected}, got {actual}")]
-    SequenceGap { expected: u64, actual: u64 },
+    SequenceGap {
+        /// Next producer sequence expected by the server.
+        expected: u64,
+        /// Producer sequence supplied by the request.
+        actual: u64,
+    },
 
     /// Producer epoch fenced (403)
     #[error("Producer epoch fenced: current {current}, received {received}")]
-    EpochFenced { current: u64, received: u64 },
+    EpochFenced {
+        /// Current producer epoch.
+        current: u64,
+        /// Producer epoch supplied by the request.
+        received: u64,
+    },
 
     /// Invalid producer state (400)
     #[error("Invalid producer state: {0}")]
@@ -111,7 +136,12 @@ pub enum Error {
 
     /// Invalid header value (400)
     #[error("Invalid header value for {header}: {reason}")]
-    InvalidHeader { header: String, reason: String },
+    InvalidHeader {
+        /// Header whose value is invalid.
+        header: String,
+        /// Why the header value was rejected.
+        reason: String,
+    },
 
     /// Invalid stream name (400)
     #[error("Invalid stream name: {0}")]
@@ -119,7 +149,12 @@ pub enum Error {
 
     /// Stream-Seq ordering violation (409)
     #[error("Stream-Seq ordering violation: last={last}, received={received}")]
-    SeqOrderingViolation { last: String, received: String },
+    SeqOrderingViolation {
+        /// Last accepted writer sequence.
+        last: String,
+        /// Writer sequence supplied by the request.
+        received: String,
+    },
 
     /// Storage backend is temporarily unavailable (503)
     #[error("Storage temporarily unavailable: {0}")]
@@ -333,6 +368,7 @@ impl Error {
         )
     }
 
+    /// Build a temporary failure with the default retry delay and internal diagnostic context.
     #[must_use]
     pub fn storage_unavailable(
         backend: &'static str,
@@ -348,6 +384,7 @@ impl Error {
         })
     }
 
+    /// Build a capacity failure retaining backend and operation details for telemetry.
     #[must_use]
     pub fn storage_insufficient(
         backend: &'static str,
@@ -363,6 +400,7 @@ impl Error {
         })
     }
 
+    /// Classify transient and capacity I/O failures; preserve other failures as storage errors.
     #[must_use]
     pub fn classify_io_failure(
         backend: &'static str,
@@ -381,6 +419,7 @@ impl Error {
         }
     }
 
+    /// Whether the I/O kind indicates interruption, a would-block condition, or timeout.
     #[must_use]
     pub fn is_retryable_io_error(error: &io::Error) -> bool {
         matches!(

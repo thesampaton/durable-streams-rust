@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        reason = "test setup and assertions fail the test on error"
+    )
+)]
 #![doc = include_str!("../CRATE_DOCS.md")]
 
 pub mod config;

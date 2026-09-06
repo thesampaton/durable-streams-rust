@@ -46,9 +46,10 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
 
-const SUBSCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("subscriptions");
-const STREAMS: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
-const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new("messages");
+const SUBSCRIPTIONS: TableDefinition<'static, &str, &[u8]> = TableDefinition::new("subscriptions");
+const STREAMS: TableDefinition<'static, &str, &[u8]> = TableDefinition::new("streams");
+const MESSAGES: TableDefinition<'static, (&str, u64, u64), &[u8]> =
+    TableDefinition::new("messages");
 
 const LAYOUT_FORMAT_VERSION: u32 = 1;
 const HASH_POLICY: &str = "seahash-v1";
@@ -89,6 +90,9 @@ struct AcidShard {
 }
 
 #[allow(clippy::module_name_repetitions)]
+/// Sharded redb storage with transactional stream metadata and payload updates.
+///
+/// The selected [`AcidBackend`] controls whether shard data survives shutdown.
 pub struct AcidStorage {
     shards: Vec<AcidShard>,
     shard_count: usize,

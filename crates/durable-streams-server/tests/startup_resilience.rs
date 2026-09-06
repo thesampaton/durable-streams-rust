@@ -1,3 +1,10 @@
+//! Integration coverage for startup resilience.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Startup resilience and initialization tests.
 //!
 //! These validate that storage backends handle various startup scenarios

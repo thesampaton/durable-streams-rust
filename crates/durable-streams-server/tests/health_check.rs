@@ -1,3 +1,5 @@
+//! Integration coverage for health check.
+
 mod common;
 
 use common::{spawn_test_server, test_client};

@@ -1,46 +1,34 @@
-# Architecture Note
+# Architecture
 
-## Current Shape
+## Workspace boundaries
 
-This repository is a Rust workspace that is now the long-term home for Durable
-Streams Rust components without prematurely committing to internal shared
-abstractions.
+- `crates/durable-streams-server` is the published server library and executable.
+  It includes protocol handlers, subscriptions, memory/file/ACID storage,
+  transport configuration, and operator transfer commands.
+- `crates/durable-streams-client` is the unpublished client implementation,
+  including HTTP operations, read subscriptions, producer sequencing, and
+  journal/replication helpers.
+- `tests/conformance` contains process entrypoints for the external suites;
+  `scripts/conformance` invokes them using the pins in `package.json`.
+- Release PR automation is configured in `release-plz.toml` and
+  `.github/workflows/release-plz.yml`. Publishing and tagging are manual; see
+  [CONTRIBUTING.md](../CONTRIBUTING.md#releasing).
 
-- `durable-streams-client` is the actively developed client crate.
-- `durable-streams-server` now contains the migrated server crate. The current
-  workspace copy is a deliberate lift-and-shift of the published
-  `durable-streams-server` `0.1.3` codebase so behaviour is preserved before any
-  later cleanup or redesign.
-- Workspace-level `tests/conformance` and `scripts/conformance` exist because
-  the upstream conformance suites exercise process-level behavior and external
-  standards alignment, not just crate-local Rust APIs.
+## Server boundaries
 
-## Deliberate Non-Decisions
+`storage` owns persistence operations and backend mechanics. `streams` contains
+metadata and the projections used by CLI/admin listing. Protocol handlers call
+storage; the current `StreamService` wraps metadata and listing operations.
 
-The workspace intentionally avoids adding a shared `core`, `protocol`, or
-`common` crate at this stage. Those splits should only appear once concrete code
-demands them.
+`protocol/error.rs` defines the exhaustive domain-error response mapping.
+`protocol/problem.rs` owns the RFC 9457 payload and response helpers. Handlers
+attach request context and operation-specific headers. Subscription control
+uses its own error envelope and private state; see
+[subscriptions](subscriptions.md).
 
-Likewise, the repository does not yet define shared-core extraction, release
-automation, or packaging policy beyond the minimum needed to make the workspace
-compile, test, and evolve cleanly.
-
-One concrete seam now exists: RFC 9457-style problem details and related error
-code mapping currently live in `durable-streams-server::protocol::problem`.
-That remains server-local for now because the client does not yet parse the
-same wire type directly, but it is the most likely candidate for future
-workspace extraction if shared problem serialization/deserialization becomes
-real code instead of anticipation.
-
-## Planned Evolution
-
-1. Continue evolving the Rust client inside `crates/durable-streams-client`.
-2. Keep the migrated server building and conforming inside
-   `crates/durable-streams-server` without mixing preservation work and
-   redesign work.
-3. Introduce additional crates only when real code boundaries justify them.
-4. Revisit release automation and packaging policy once the workspace shape has
-   stabilised.
+Keep semantic helpers shared where backends must agree. Separate persisted
+formats and runtime resources where their invariants differ. Introduce a shared
+crate only when multiple real consumers need a common implementation.
 
 ## Storage read boundaries
 
