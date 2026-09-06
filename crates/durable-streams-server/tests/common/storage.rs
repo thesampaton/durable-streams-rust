@@ -1,12 +1,14 @@
+use durable_streams_server::Storage;
 use durable_streams_server::config::AcidBackend;
 use durable_streams_server::protocol::error::Result;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
-    CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
-    StreamConfig, StreamMetadata, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
+    CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, StreamOptions,
+    acid::AcidStorage, file::FileStorage, memory::InMemoryStorage,
 };
+use durable_streams_server::streams::StreamMetadata;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
@@ -45,7 +47,7 @@ const _: fn() = || {
 };
 
 impl Storage for TestStorage {
-    fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
+    fn create_stream(&self, name: &str, config: StreamOptions) -> Result<CreateStreamResult> {
         match self {
             Self::Memory(inner) => inner.create_stream(name, config),
             Self::File(inner) => inner.create_stream(name, config),
@@ -53,7 +55,12 @@ impl Storage for TestStorage {
         }
     }
 
-    fn append(&self, name: &str, data: bytes::Bytes, content_type: &str) -> Result<Offset> {
+    fn append(
+        &self,
+        name: &str,
+        data: bytes::Bytes,
+        content_type: &str,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
         match self {
             Self::Memory(inner) => inner.append(name, data, content_type),
             Self::File(inner) => inner.append(name, data, content_type),
@@ -61,17 +68,18 @@ impl Storage for TestStorage {
         }
     }
 
-    fn batch_append(
+    fn append_batch(
         &self,
         name: &str,
         messages: Vec<bytes::Bytes>,
         content_type: &str,
         seq: Option<&str>,
-    ) -> Result<Offset> {
+        close: bool,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
         match self {
-            Self::Memory(inner) => inner.batch_append(name, messages, content_type, seq),
-            Self::File(inner) => inner.batch_append(name, messages, content_type, seq),
-            Self::Acid(inner) => inner.batch_append(name, messages, content_type, seq),
+            Self::Memory(inner) => inner.append_batch(name, messages, content_type, seq, close),
+            Self::File(inner) => inner.append_batch(name, messages, content_type, seq, close),
+            Self::Acid(inner) => inner.append_batch(name, messages, content_type, seq, close),
         }
     }
 
@@ -147,7 +155,7 @@ impl Storage for TestStorage {
     fn create_stream_with_data(
         &self,
         name: &str,
-        config: StreamConfig,
+        config: StreamOptions,
         messages: Vec<bytes::Bytes>,
         should_close: bool,
     ) -> Result<CreateWithDataResult> {
@@ -164,15 +172,21 @@ impl Storage for TestStorage {
         }
     }
 
-    fn exists(&self, name: &str) -> bool {
+    fn replace_stream(
+        &self,
+        name: &str,
+        config: StreamOptions,
+        messages: Vec<bytes::Bytes>,
+        closed: bool,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
         match self {
-            Self::Memory(inner) => inner.exists(name),
-            Self::File(inner) => inner.exists(name),
-            Self::Acid(inner) => inner.exists(name),
+            Self::Memory(inner) => inner.replace_stream(name, config, messages, closed),
+            Self::File(inner) => inner.replace_stream(name, config, messages, closed),
+            Self::Acid(inner) => inner.replace_stream(name, config, messages, closed),
         }
     }
 
-    fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>> {
+    fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>> {
         match self {
             Self::Memory(inner) => inner.subscribe(name),
             Self::File(inner) => inner.subscribe(name),
@@ -201,7 +215,7 @@ impl Storage for TestStorage {
         name: &str,
         source_name: &str,
         offset: Option<&Offset>,
-        config: StreamConfig,
+        config: StreamOptions,
         options: durable_streams_server::storage::ForkOptions,
     ) -> Result<CreateStreamResult> {
         match self {
@@ -235,7 +249,7 @@ impl Storage for TestStorage {
         name: &str,
         source_name: &str,
         fork_offset: Option<&StorageOffset>,
-        config: StreamConfig,
+        config: StreamOptions,
     ) -> Result<CreateStreamResult> {
         match self {
             Self::Memory(inner) => inner.create_fork(name, source_name, fork_offset, config),

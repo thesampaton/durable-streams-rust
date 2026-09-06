@@ -529,6 +529,7 @@ dependencies = [
  "clap",
  "figment",
  "futures-util",
+ "http-body-util",
  "proptest",
  "public-api",
  "redb",

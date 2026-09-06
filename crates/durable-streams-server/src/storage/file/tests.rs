@@ -21,10 +21,11 @@ fn test_storage() -> FileStorage {
 #[test]
 fn test_delete_removes_files() {
     let storage = test_storage();
-    let config = StreamConfig::new("text/plain".to_string());
+    let config = crate::storage::StreamOptions::new("text/plain".to_string());
     storage.create_stream("test", config).unwrap();
     storage
         .append("test", Bytes::from("data"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
     let dir = storage.stream_dir_for_name("test").unwrap();
@@ -43,13 +44,14 @@ fn test_delete_removes_files() {
 #[test]
 fn test_partial_record_truncation_on_recovery() {
     let root = test_storage_dir();
-    let config = StreamConfig::new("text/plain".to_string());
+    let config = crate::storage::StreamOptions::new("text/plain".to_string());
 
     {
         let storage = FileStorage::new(root.clone(), 1024 * 1024, 100 * 1024, false).unwrap();
         storage.create_stream("s", config.clone()).unwrap();
         storage
             .append("s", Bytes::from("good"), "text/plain")
+            .map(|result| result.start_offset)
             .unwrap();
     }
 

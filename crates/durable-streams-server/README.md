@@ -5,7 +5,7 @@
 built with `axum` and `tokio`.
 
 It can run as a standalone server or be embedded into an existing `axum`
-application with `build_router` and `RouterOptions`.
+application with `Server`, `StreamService`, and `RouterOptions`.
 
 ## Features
 
@@ -42,9 +42,13 @@ The default storage mode is in-memory. For persistence, choose a backend via
 | Mode | Durability | Use case |
 |------|------------|----------|
 | `memory` | None (lost on restart) | Development and testing |
-| `file-fast` | Buffered writes | Lower-latency persistence where recent data loss is acceptable |
-| `file-durable` | Fsynced writes | Durable persistence without external dependencies |
+| `file-fast` | Journaled append commits; fewer extra syncs | Local per-stream log files |
+| `file-durable` | Journaled commits plus extra write syncing | Local files with stronger initial-write syncing |
 | `acid` | Crash-resilient (`redb`) | Production workloads requiring transactional durability |
+
+Both file modes now sync append/replacement journals. See the
+[migration notes](../../docs/migrations/server-api.md#import-and-file-persistence)
+for recovery limits and the added filesystem cost.
 
 Examples:
 
@@ -531,7 +535,7 @@ Check:
 For embedding, the main entry points are:
 
 - `Config` and `ConfigLoadOptions` for configuration loading
-- `build_router` and `RouterOptions` for mounting the HTTP API and configuring runtime hooks
+- `Server`, `RunningServer`, and `RouterOptions` for HTTP routes and worker lifecycle
 - `InMemoryStorage`, `FileStorage`, and `AcidStorage` for backend selection
 
 ## Example Config Files
@@ -565,22 +569,37 @@ They support signed webhooks, pull-wake delivery, durable cursors, worker leases
 and generation fencing. See [the subscription guide](../../docs/subscriptions.md)
 for request examples, persistence, and deployment configuration.
 
-### Migrating router construction
+### Migrating the server API
 
-The next release replaces `build_router_with_ready` with a single
-`build_router(storage, &config, options)` entry point. Pass
-`RouterOptions::default()` for the old two-argument `build_router` behavior.
-For readiness and graceful shutdown:
+The next breaking release replaces router construction with an initialized
+`Server` and an explicit `start` step. `StreamService` consolidates stream
+operations and accepts `Arc<dyn Storage>` for runtime backend selection.
 
 ```rust
-use durable_streams_server::{build_router, RouterOptions};
+use durable_streams_server::{Config, InMemoryStorage, RouterOptions, Server, Storage, StreamService};
+use std::sync::{Arc, atomic::AtomicBool};
+use tokio_util::sync::CancellationToken;
 
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(1024 * 1024, 1024 * 1024));
+let ready = Arc::new(AtomicBool::new(true));
+let shutdown = CancellationToken::new();
 let options = RouterOptions::default()
     .with_readiness(ready)
-    .with_shutdown(shutdown);
-let app = build_router(storage, &config, options);
+    .with_shutdown(shutdown.clone());
+let server = Server::new(StreamService::new(storage), &Config::default(), options)?;
+// Construction can happen before entering Tokio; start runs inside the serving runtime.
+let running = server.start()?;
+let app = running.router();
+// Serve `app` using your listener. For shutdown, stop accepting requests, cancel
+// live reads, drain the listener, and await the worker:
+shutdown.cancel();
+running.shutdown().await?;
+Ok(())
+}
 ```
 
-The readiness flag and cancellation token are optional and independent. The
-shutdown token reaches long-poll, SSE, and subscription workers; the embedding
-application also needs to stop accepting HTTP connections when it cancels it.
+See the [migration guide](../../docs/migrations/server-api.md) for route groups,
+backend implementation changes, stream creation, append results, and import
+failure handling. The default readiness route remains opt-in. HTTP listeners
+are owned by the embedding application and must be stopped separately.

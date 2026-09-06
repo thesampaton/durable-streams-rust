@@ -118,7 +118,8 @@ crate [README](https://docs.rs/crate/durable-streams-server/latest/source/README
 
 Most embedders only need:
 
-- [`build_router`] to mount the Durable Streams HTTP API into an `axum` app
+- [`Server`] and [`RunningServer`] for initialized HTTP routes and worker lifecycle
+- [`StreamService`] for shared stream operations above persistence
 - [`RouterOptions`] to configure optional readiness and shutdown hooks
 - [`Storage`] plus one of [`InMemoryStorage`], [`FileStorage`], or [`AcidStorage`]
 
@@ -143,23 +144,66 @@ cargo test -p durable-streams-server
 cargo clippy -p durable-streams-server --all-targets
 ```
 
-## Router runtime hooks
+## Server lifecycle
 
 ```rust
-use durable_streams_server::{build_router, Config, InMemoryStorage, RouterOptions};
+use durable_streams_server::{Config, InMemoryStorage, RouterOptions, Server, Storage, StreamService};
 use std::sync::{Arc, atomic::AtomicBool};
 use tokio_util::sync::CancellationToken;
 
-# async fn example() {
-let storage = Arc::new(InMemoryStorage::new(1024 * 1024, 1024 * 1024));
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let storage: Arc<dyn Storage> = Arc::new(InMemoryStorage::new(1024 * 1024, 1024 * 1024));
 let ready = Arc::new(AtomicBool::new(true));
 let shutdown = CancellationToken::new();
 let options = RouterOptions::default()
     .with_readiness(ready)
     .with_shutdown(shutdown.clone());
-let app = build_router(storage, &Config::default(), options);
+let server = Server::new(StreamService::new(storage), &Config::default(), options)?;
+// Construction can happen before entering Tokio; start runs inside the serving runtime.
+let running = server.start()?;
+let app = running.router();
+// Serve `app` using your listener. For shutdown, stop accepting requests, cancel
+// live reads, drain the listener, and await the worker:
+shutdown.cancel();
+running.shutdown().await?;
+# Ok(())
 # }
 ```
 
-Pass `RouterOptions::default()` when no runtime hooks are needed. This replaces
-both the old two-argument `build_router` and `build_router_with_ready` APIs.
+`Server::new` is fallible and starts no tasks. `start` requires Tokio. Clone the
+running server or its routers for multiple listeners; a second independent
+server using the same storage `Arc` is rejected. Routers retain their shared
+owner. Dropping the last handle/router cancels the worker; explicit `shutdown`
+also waits for delivery tasks to finish cancellation. HTTP listeners remain
+caller-owned. External cancellation propagates to a child token, so shutting
+this server down does not cancel unrelated users of the parent token.
+
+Use `protocol_router`, `admin_router`, and `probe_router` to apply different
+middleware to each surface before merging them. `admin_router` is empty unless
+admin routes are enabled; the crate supplies no authentication policy.
+
+## Stream operations
+
+```rust
+use durable_streams_server::{InMemoryStorage, StreamService};
+use durable_streams_server::storage::StreamOptions;
+use bytes::Bytes;
+use std::sync::Arc;
+# fn example() -> Result<(), durable_streams_server::protocol::error::Error> {
+let streams = StreamService::new(Arc::new(InMemoryStorage::new(1024 * 1024, 1024 * 1024)));
+streams.create("events", StreamOptions::new("text/plain").with_ttl(60), vec![])?;
+let result = streams.append_batch("events", vec![Bytes::from_static(b"done")], "text/plain", None, true)?;
+assert!(result.closed);
+// result.start_offset identifies this batch; result.next_offset resumes after it.
+# Ok(())
+# }
+```
+
+`StreamOptions` expresses caller intent; storage resolves it to `StreamConfig`
+with normalized content type and an initialized expiration deadline. Choose one
+`Expiry` policy or use `with_ttl` / `with_expires_at`, which replace one another.
+Invalid TTL bounds fail before mutation. `with_closed(true)` creates a closed
+stream, including its initial body.
+
+The storage trait remains synchronous. File I/O and lock waits currently run
+on the calling thread; embedders should account for that execution cost.

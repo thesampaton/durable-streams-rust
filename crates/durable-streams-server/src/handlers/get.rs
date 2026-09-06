@@ -7,7 +7,7 @@ use crate::protocol::problem::ProblemResult;
 use crate::protocol::sse::{self, ControlPayload};
 use crate::protocol::stream_name::StreamName;
 use crate::router::ReadStreamConfig;
-use crate::storage::{ReadResult, Storage};
+use crate::storage::ReadResult;
 use axum::{
     Extension,
     body::Body,
@@ -48,8 +48,8 @@ pub struct ReadQuery {
 ///
 /// Returns error if stream doesn't exist, offset is invalid,
 /// or storage operation fails.
-pub async fn read_stream<S: Storage + 'static>(
-    State(storage): State<Arc<S>>,
+pub async fn read_stream(
+    State(storage): State<Arc<crate::streams::StreamService>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Query(query): Query<ReadQuery>,
@@ -132,8 +132,8 @@ fn resolve_offset(query: &ReadQuery) -> ProblemResult<String> {
 }
 
 /// Catch-up mode: immediate read of all available data.
-fn read_catch_up<S: Storage>(
-    storage: &Arc<S>,
+fn read_catch_up(
+    storage: &Arc<crate::streams::StreamService>,
     name: &str,
     offset: &Offset,
     raw_offset: &str,
@@ -157,8 +157,8 @@ struct ReadContext<'a> {
 }
 
 /// Long-poll mode: wait for new data at tail, return immediately if data exists.
-async fn read_long_poll<S: Storage>(
-    storage: &Arc<S>,
+async fn read_long_poll(
+    storage: &Arc<crate::streams::StreamService>,
     ctx: &ReadContext<'_>,
     timeout: Duration,
     shutdown: CancellationToken,
@@ -172,7 +172,7 @@ async fn read_long_poll<S: Storage>(
     } = *ctx;
     // Subscribe BEFORE read to avoid missing notifications between read and subscribe
     let mut receiver = storage
-        .subscribe(name)
+        .subscribe(name)?
         .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
     let read_result = storage.read(name, offset)?;
@@ -227,8 +227,8 @@ async fn read_long_poll<S: Storage>(
 /// starting the stream. Uses raw byte streaming for full control over
 /// the SSE wire format. Once streaming begins, errors are silently
 /// dropped (SSE has no error frame).
-fn read_sse<S: Storage + 'static>(
-    storage: Arc<S>,
+fn read_sse(
+    storage: Arc<crate::streams::StreamService>,
     name: String,
     offset: &Offset,
     content_type: &str,
@@ -241,7 +241,7 @@ fn read_sse<S: Storage + 'static>(
     };
 
     let receiver = storage
-        .subscribe(&name)
+        .subscribe(&name)?
         .ok_or_else(|| Error::NotFound(name.clone()))?;
 
     let read_result = storage.read(&name, offset)?;
@@ -312,8 +312,8 @@ fn encode_read_as_sse_frames(read_result: &ReadResult, encoding: SseEncoding) ->
 /// Build a byte stream that yields raw SSE frame strings.
 ///
 /// Manages keep-alive, idle timeout, and the subscribe-before-read pattern.
-fn build_sse_byte_stream<S: Storage + 'static>(
-    storage: Arc<S>,
+fn build_sse_byte_stream(
+    storage: Arc<crate::streams::StreamService>,
     name: String,
     initial_read: ReadResult,
     mut receiver: tokio::sync::broadcast::Receiver<()>,
@@ -429,8 +429,8 @@ fn build_sse_control(read_result: &ReadResult) -> ControlPayload {
 /// Handle wake-up from broadcast in long-poll mode.
 ///
 /// Re-reads from storage to get the actual data that triggered the notification.
-fn handle_long_poll_wake<S: Storage>(
-    storage: &Arc<S>,
+fn handle_long_poll_wake(
+    storage: &Arc<crate::streams::StreamService>,
     name: &str,
     offset: &Offset,
     raw_offset: &str,

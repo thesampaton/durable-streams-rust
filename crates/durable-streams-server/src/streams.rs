@@ -1,13 +1,9 @@
-//! Stream-domain types and service exposed above storage plumbing.
+//! Stream-domain operations and metadata above the storage contract.
 //!
-//! [`StreamService`] is the primary entry point for stream-domain operations.
-//! It wraps a [`Storage`] backend and provides a stream-centric surface that
-//! handlers, CLI tooling, and future admin/operator APIs can program against
-//! without reaching through to backend-specific storage internals.
-//!
-//! Today the service covers metadata and listing. Over time this module is the
-//! intended home for additional stream-domain concepts such as retention views,
-//! read-admission snapshots, lifecycle state, and operator surfaces.
+//! [`StreamService`] is the public consolidation point for stream operations.
+//! It currently delegates atomic persistence operations to [`Storage`] and owns
+//! the operator listing projection. HTTP handlers and CLI listing use this
+//! surface; backend implementations retain locking, transaction, and recovery rules.
 
 use crate::protocol::error::Result;
 use crate::protocol::offset::Offset;
@@ -19,10 +15,9 @@ use std::sync::Arc;
 ///
 /// This is the canonical metadata type for the server. Storage backends fill it
 /// from their backend-specific state, while handlers and operator tooling use
-/// it through [`StreamService`]. The `storage` module re-exports this type for
-/// compatibility, but it is owned here because it describes stream-domain
-/// state rather than backend mechanics.
+/// it through [`StreamService`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StreamMetadata {
     /// Stream configuration.
     pub config: StreamConfig,
@@ -40,6 +35,27 @@ pub struct StreamMetadata {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+impl StreamMetadata {
+    /// Construct basic stream metadata; set usage and update fields from the same snapshot.
+    #[must_use]
+    pub fn new(
+        config: StreamConfig,
+        next_offset: Offset,
+        closed: bool,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            config,
+            next_offset,
+            closed,
+            created_at,
+            total_bytes: 0,
+            message_count: 0,
+            updated_at: None,
+        }
+    }
+}
+
 /// Operator-facing representation of a stream returned by list operations.
 ///
 /// Carries the fields an operator or admin tool needs to inspect streams:
@@ -47,6 +63,7 @@ pub struct StreamMetadata {
 /// Serialises to JSON for `GET /admin/streams` when the optional admin router
 /// is enabled, and is also used by the CLI for local-by-default inspection.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct StreamListEntry {
     /// Stream name (the path segment used in protocol requests).
     pub name: String,
@@ -86,23 +103,19 @@ impl StreamListEntry {
     }
 }
 
-/// Stream-domain service that fronts storage operations.
+/// Shared stream operations used by HTTP handlers and operator tooling.
 ///
-/// `StreamService` is intentionally generic over `S: Storage` so it can wrap
-/// any backend. It holds an `Arc<S>` — the same ownership model handlers
-/// already use — and adds a domain-typed API surface on top.
-///
-/// The service owns stream-domain projections such as list entries and metadata
-/// views. Storage remains responsible for persistence and backend mechanics;
-/// protocol and admin handlers call this service instead of reaching through to
-/// backend-specific state.
-pub struct StreamService<S: Storage> {
-    storage: Arc<S>,
+/// Clones share the same storage. The service does not start background tasks;
+/// [`crate::router::Server`] owns HTTP configuration and worker lifecycle.
+#[derive(Clone)]
+pub struct StreamService {
+    pub(crate) storage: Arc<dyn Storage>,
 }
 
-impl<S: Storage> StreamService<S> {
-    /// Create a new stream service wrapping the given storage backend.
-    pub fn new(storage: Arc<S>) -> Self {
+impl StreamService {
+    /// Wrap a concrete or runtime-selected storage backend without starting workers.
+    #[must_use]
+    pub fn new(storage: Arc<dyn Storage>) -> Self {
         Self { storage }
     }
 
@@ -143,16 +156,109 @@ impl<S: Storage> StreamService<S> {
     /// # Errors
     ///
     /// Returns [`crate::protocol::error::Error::NotFound`] if the stream
-    /// does not exist or has expired, or a storage error if metadata cannot be read.
+    /// does not exist, `StreamExpired` if it has expired, or a storage error if metadata cannot be read.
     pub fn head(&self, name: &str) -> Result<StreamMetadata> {
         self.storage.head(name)
     }
-}
 
-impl<S: Storage> Clone for StreamService<S> {
-    fn clone(&self) -> Self {
-        Self {
-            storage: Arc::clone(&self.storage),
-        }
+    /// Create a stream with validated options and optional initial data.
+    ///
+    /// # Errors
+    /// Returns configuration, capacity, conflict, or persistence failures without partial creation.
+    pub fn create(
+        &self,
+        name: &str,
+        options: crate::storage::StreamOptions,
+        messages: Vec<bytes::Bytes>,
+    ) -> Result<crate::storage::CreateWithDataResult> {
+        let closed = options.closes_on_create();
+        self.storage
+            .create_stream_with_data(name, options, messages, closed)
+    }
+
+    /// Append one message with explicit starting and resume positions.
+    ///
+    /// # Errors
+    /// Returns access, content-type, capacity, or persistence failures.
+    pub fn append(
+        &self,
+        name: &str,
+        data: bytes::Bytes,
+        content_type: &str,
+    ) -> Result<crate::storage::AppendResult> {
+        self.storage.append(name, data, content_type)
+    }
+
+    /// Append and optionally close in one storage operation.
+    ///
+    /// # Errors
+    /// Returns access, content-type, writer-ordering, capacity, or persistence failures.
+    pub fn append_batch(
+        &self,
+        name: &str,
+        messages: Vec<bytes::Bytes>,
+        content_type: &str,
+        seq: Option<&str>,
+        close: bool,
+    ) -> Result<crate::storage::AppendResult> {
+        self.storage
+            .append_batch(name, messages, content_type, seq, close)
+    }
+
+    /// Append with producer deduplication and optional closure.
+    ///
+    /// # Errors
+    /// Returns producer fencing/sequence errors and ordinary append failures.
+    pub fn append_with_producer(
+        &self,
+        name: &str,
+        messages: Vec<bytes::Bytes>,
+        content_type: &str,
+        producer: &crate::protocol::producer::ProducerHeaders,
+        close: bool,
+        seq: Option<&str>,
+    ) -> Result<crate::storage::ProducerAppendResult> {
+        self.storage
+            .append_with_producer(name, messages, content_type, producer, close, seq)
+    }
+
+    /// Read a coherent batch and its resume position.
+    ///
+    /// # Errors
+    /// Returns access, offset, or persistence failures.
+    pub fn read(&self, name: &str, offset: &Offset) -> Result<crate::storage::ReadResult> {
+        self.storage.read(name, offset)
+    }
+
+    /// Delete a stream, retaining data needed by descendants.
+    ///
+    /// # Errors
+    /// Returns access or persistence failures.
+    pub fn delete(&self, name: &str) -> Result<()> {
+        self.storage.delete(name)
+    }
+
+    /// Subscribe to data/closure notifications for an existing visible stream.
+    ///
+    /// # Errors
+    /// Propagates backend failures rather than treating them as absence.
+    pub fn subscribe(&self, name: &str) -> Result<Option<tokio::sync::broadcast::Receiver<()>>> {
+        self.storage.subscribe(name)
+    }
+
+    /// Create a fork, inherited prefix, and initial body atomically.
+    ///
+    /// # Errors
+    /// Returns invalid lineage, configuration, capacity, or persistence failures.
+    pub fn create_fork_with_options(
+        &self,
+        name: &str,
+        source: &str,
+        offset: Option<&Offset>,
+        config: crate::storage::StreamOptions,
+        options: crate::storage::ForkOptions,
+    ) -> Result<crate::storage::CreateStreamResult> {
+        self.storage
+            .create_fork_with_options(name, source, offset, config, options)
     }
 }

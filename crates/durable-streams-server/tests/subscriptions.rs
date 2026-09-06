@@ -12,7 +12,7 @@ use axum::{Json, Router, routing::post};
 use bytes::Bytes;
 use common::{StorageTestBackend, TestStorage, create_test_storage};
 use durable_streams_server::{
-    Config, Storage, build_router,
+    Config, Storage,
     config::AcidBackend,
     storage::{acid::AcidStorage, file::FileStorage},
 };
@@ -41,11 +41,15 @@ impl Server {
         let shutdown = CancellationToken::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/stream", listener.local_addr().unwrap());
-        let app = build_router(
-            storage.clone(),
+        let app = durable_streams_server::Server::new(
+            durable_streams_server::StreamService::new(storage.clone()),
             &config,
             durable_streams_server::RouterOptions::default().with_shutdown(shutdown.clone()),
-        );
+        )
+        .expect("server initialization")
+        .start()
+        .expect("server startup")
+        .router();
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -431,17 +435,18 @@ async fn test_failed_webhook_retry_deadline_survives_restart() {
 fn test_file_fork_offsets_and_partial_prefix_survive_restart() {
     use durable_streams_server::{
         protocol::offset::Offset,
-        storage::{ForkOptions, StreamConfig},
+        storage::{ForkOptions, StreamOptions},
     };
     let dir = tempfile::tempdir().unwrap();
     let storage = persistent_storage(dir.path(), false);
-    let config = StreamConfig::new("text/plain".into());
+    let config = StreamOptions::new("text/plain");
     storage
         .create_stream_with_data("source", config.clone(), vec![Bytes::from("first")], false)
         .unwrap();
     let anchor = storage.head("source").unwrap().next_offset;
     storage
         .append("source", Bytes::from("second"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     storage
         .create_fork_with_options(
@@ -472,6 +477,7 @@ fn test_file_fork_offsets_and_partial_prefix_survive_restart() {
     assert!(storage.read("fork", &tail).unwrap().messages.is_empty());
     storage
         .append("fork", Bytes::from("next"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     assert_eq!(
         storage.read("fork", &tail).unwrap().messages.concat(),

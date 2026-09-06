@@ -105,7 +105,7 @@ fn complete(sub: &mut Subscription, context: CompletionContext<'_>) -> ApiResult
     }
 }
 
-pub(super) async fn control<S: Storage + 'static>(
+pub(super) async fn control<S: Storage + ?Sized + 'static>(
     State(service): State<Arc<Service<S>>>,
     Path(control): Path<String>,
     Extension(origin): Extension<ProxyTrustResult>,
@@ -292,7 +292,7 @@ fn add_streams(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-fn create_subscription<S: Storage>(
+fn create_subscription<S: Storage + ?Sized>(
     service: &Service<S>,
     db: &mut Database,
     id: &str,

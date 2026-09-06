@@ -1,9 +1,8 @@
-//! Axum router construction for the Durable Streams HTTP surfaces.
+//! HTTP route groups and explicit subscription-worker lifecycle.
 //!
-//! [`build_router`] is the main embedding entry point for library consumers.
-//! Protocol routes are always mounted at `Config::http.stream_base_path`;
-//! optional admin/operator routes are mounted separately at
-//! `Config::admin.base_path` only when `admin.enabled = true`.
+//! Construct [`Server`] outside or inside Tokio, then call [`Server::start`]
+//! inside the serving runtime. Clone [`RunningServer`] or its routers to expose
+//! multiple listeners with the same initialized state.
 
 use crate::config::Config;
 use crate::middleware::proxy_trust::ProxyTrustState;
@@ -16,13 +15,6 @@ use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
-/// Wrapper around [`CancellationToken`] for axum `Extension` extraction.
-///
-/// Long-poll and SSE handlers observe this token so they can drain cleanly
-/// when the server begins a graceful shutdown.
-#[derive(Clone)]
-pub struct ShutdownToken(pub CancellationToken);
-
 /// Combined read-stream configuration extracted as a single axum `Extension`.
 ///
 /// Groups the long-poll timeout, SSE reconnect interval, and shutdown token
@@ -34,6 +26,9 @@ pub(crate) struct ReadStreamConfig {
     pub(crate) shutdown: CancellationToken,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RequestBodyLimit(pub(crate) usize);
+
 /// Default mount path for the Durable Streams protocol routes.
 pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
 
@@ -41,11 +36,11 @@ pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
 #[derive(Clone)]
 pub(crate) struct StreamBasePath(pub Arc<str>);
 
-/// Optional runtime hooks for [`build_router`].
+/// Optional readiness and cancellation hooks for [`Server`].
 ///
-/// By default `/readyz` is omitted and the shutdown token is never cancelled.
-/// Production embedders should supply a token with [`Self::with_shutdown`] so
-/// long-poll, SSE, and subscription workers can drain during shutdown.
+/// By default `/readyz` is omitted. [`RunningServer::shutdown`] cancels and joins
+/// the worker. Supply an external token with [`Self::with_shutdown`] to integrate
+/// cancellation with caller-owned HTTP listeners.
 #[derive(Debug, Clone, Default)]
 pub struct RouterOptions {
     ready: Option<Arc<AtomicBool>>,
@@ -70,62 +65,237 @@ impl RouterOptions {
     }
 }
 
-/// Build the application router with optional runtime hooks.
-///
-/// Use [`RouterOptions::default()`] for a basic embedded router, or configure
-/// readiness and shutdown with [`RouterOptions::with_readiness`] and
-/// [`RouterOptions::with_shutdown`].
-///
-/// `/healthz` is always available. `/readyz` is registered only when a
-/// readiness flag is supplied, returning 200 after the flag is set to true.
-///
-/// The `shutdown` token is propagated to long-poll and SSE handlers so they
-/// can observe server shutdown and drain in-flight connections cleanly.
-///
-/// Admin and protocol routes are built in separate internal subrouters. This
-/// builder returns the combined application and does not expose a hook for
-/// adding middleware to just the admin subrouter. The server does
-/// not implement authentication or authorization for admin routes; enable them
-/// only behind a trusted network, reverse proxy, or external access-control
-/// layer.
-pub fn build_router<S: Storage + 'static>(
-    storage: Arc<S>,
-    config: &Config,
+/// Construction or startup failure for an embedded server.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServerError {
+    /// An HTTP route or middleware setting is invalid.
+    #[error("invalid HTTP configuration: {0}")]
+    Configuration(#[from] crate::config::ConfigValidationError),
+    /// An independent server already owns this storage instance.
+    #[error("storage already has a server owner; clone the existing server or its routers")]
+    StorageAlreadyOwned,
+    /// A backend operation failed while loading or persisting control state.
+    #[error("server storage initialization failed: {0}")]
+    Storage(#[from] crate::protocol::error::Error),
+    /// Persisted subscription state or signing-key initialization failed.
+    #[error("subscription initialization failed: {0}")]
+    Initialization(String),
+    /// Worker startup requires an entered Tokio runtime.
+    #[error("start the server inside the Tokio runtime that will serve it")]
+    RuntimeRequired,
+    /// The supplied cancellation source was already cancelled before startup.
+    #[error("server shutdown was requested before startup")]
+    ShutdownRequested,
+}
+
+struct StorageLease(usize);
+static OWNERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+    std::sync::OnceLock::new();
+impl StorageLease {
+    fn acquire(storage: &Arc<dyn Storage>) -> Result<Self, ServerError> {
+        let identity = Arc::as_ptr(storage).cast::<()>() as usize;
+        let mut owners = OWNERS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("storage owner registry lock poisoned");
+        if !owners.insert(identity) {
+            return Err(ServerError::StorageAlreadyOwned);
+        }
+        Ok(Self(identity))
+    }
+}
+impl Drop for StorageLease {
+    fn drop(&mut self) {
+        if let Some(owners) = OWNERS.get() {
+            owners
+                .lock()
+                .expect("storage owner registry lock poisoned")
+                .remove(&self.0);
+        }
+    }
+}
+
+struct ServerState {
+    service: Arc<crate::streams::StreamService>,
+    subscriptions: Arc<crate::subscriptions::Service<dyn Storage>>,
+    config: Config,
     options: RouterOptions,
-) -> Router {
-    let RouterOptions { ready, shutdown } = options;
-    let stream_base_path = Arc::<str>::from(config.http.stream_base_path.as_str());
-    let mut app = Router::new()
-        .route("/healthz", get(handlers::health::health_check))
-        .nest(
-            stream_base_path.as_ref(),
-            protocol_routes(
-                Arc::clone(&storage),
-                config,
-                shutdown,
-                Arc::clone(&stream_base_path),
-            ),
+    worker: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    lease: Arc<StorageLease>,
+}
+impl Drop for ServerState {
+    fn drop(&mut self) {
+        self.options.shutdown.cancel();
+    }
+}
+
+/// Validated HTTP configuration and initialized control state, without running tasks.
+///
+/// Construction performs synchronous storage initialization. It can run before
+/// Tokio starts. One server may own a given storage `Arc`; use clones of the
+/// running server for multiple listeners. Distinct wrappers around the same
+/// underlying database must still respect that backend's exclusive ownership.
+pub struct Server {
+    state: ServerState,
+}
+impl Server {
+    /// Validate HTTP settings and load control state before making routes available.
+    ///
+    /// # Errors
+    /// Rejects invalid route settings, competing ownership, and initialization failures.
+    pub fn new(
+        service: crate::streams::StreamService,
+        config: &Config,
+        options: RouterOptions,
+    ) -> Result<Self, ServerError> {
+        config.validate_router()?;
+        let options = RouterOptions {
+            shutdown: options.shutdown.child_token(),
+            ..options
+        };
+        let lease = StorageLease::acquire(&service.storage)?;
+        let subscriptions = crate::subscriptions::initialize(service.storage.clone(), config)?;
+        Ok(Self {
+            state: ServerState {
+                service: Arc::new(service),
+                subscriptions,
+                config: config.clone(),
+                options,
+                worker: tokio::sync::Mutex::new(None),
+                lease: Arc::new(lease),
+            },
+        })
+    }
+
+    /// Start the subscription worker in the currently entered Tokio runtime.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::RuntimeRequired`] outside Tokio.
+    pub fn start(mut self) -> Result<RunningServer, ServerError> {
+        if self.state.options.shutdown.is_cancelled() {
+            return Err(ServerError::ShutdownRequested);
+        }
+        let runtime =
+            tokio::runtime::Handle::try_current().map_err(|_| ServerError::RuntimeRequired)?;
+        let weak = Arc::downgrade(&self.state.subscriptions);
+        let shutdown = self.state.options.shutdown.clone();
+        let lease = self.state.lease.clone();
+        let worker = runtime.spawn(async move {
+            let _lease = lease;
+            crate::subscriptions::run(weak, shutdown).await;
+        });
+        *self.state.worker.get_mut() = Some(worker);
+        Ok(RunningServer {
+            state: Arc::new(self.state),
+        })
+    }
+}
+
+/// Cloneable server owner with composable HTTP surfaces and explicit shutdown.
+///
+/// Routers retain this owner's state. Dropping the final handle/router cancels
+/// the worker; use [`Self::shutdown`] to also await its completion. Stop HTTP
+/// listeners separately and drain them using the same cancellation source.
+#[derive(Clone)]
+pub struct RunningServer {
+    state: Arc<ServerState>,
+}
+impl RunningServer {
+    /// Access shared stream operations without backend-specific types.
+    #[must_use]
+    pub fn streams(&self) -> &crate::streams::StreamService {
+        &self.state.service
+    }
+
+    /// Combined protocol, subscriptions, optional admin, and probe routes.
+    pub fn router(&self) -> Router {
+        self.finish(
+            self.protocol_group()
+                .merge(self.admin_group())
+                .merge(self.probe_group()),
+        )
+    }
+
+    /// Protocol and reserved subscription routes at the configured stream mount.
+    pub fn protocol_router(&self) -> Router {
+        self.finish(self.protocol_group())
+    }
+
+    /// Admin routes at their configured mount, or an empty router when disabled.
+    /// Apply admin authentication middleware to this router before merging groups.
+    pub fn admin_router(&self) -> Router {
+        self.finish(self.admin_group())
+    }
+
+    /// Health and optional readiness probes, without protocol or admin routes.
+    pub fn probe_router(&self) -> Router {
+        self.finish(self.probe_group())
+    }
+
+    /// Cancel live reads and workers, then await worker and delivery-task completion.
+    ///
+    /// Concurrent callers all wait for completion. HTTP listeners are caller-owned.
+    /// # Errors
+    /// Returns the Tokio join error if the worker panicked or was aborted externally.
+    pub async fn shutdown(&self) -> Result<(), tokio::task::JoinError> {
+        self.state.options.shutdown.cancel();
+        let mut worker = self.state.worker.lock().await;
+        if let Some(task) = worker.as_mut() {
+            let result = task.await;
+            *worker = None;
+            result?;
+        }
+        Ok(())
+    }
+
+    fn protocol_group(&self) -> Router {
+        let config = &self.state.config;
+        let base_path = Arc::<str>::from(config.http.stream_base_path.as_str());
+        let routes = protocol_routes(
+            self.state.service.clone(),
+            config,
+            self.state.options.shutdown.clone(),
+            base_path.clone(),
+            self.state.subscriptions.clone(),
         );
-
-    if config.admin.enabled {
-        app = app.nest(config.admin.base_path.as_str(), admin_routes(storage));
+        if base_path.as_ref() == "/" {
+            routes
+        } else {
+            Router::new().nest(base_path.as_ref(), routes)
+        }
     }
-
-    if let Some(flag) = ready {
-        app = app
-            .route("/readyz", get(handlers::health::readiness_check))
-            .layer(Extension(flag));
+    fn admin_group(&self) -> Router {
+        if self.state.config.admin.enabled {
+            Router::new().nest(
+                &self.state.config.admin.base_path,
+                admin_routes(self.state.service.clone()),
+            )
+        } else {
+            Router::new()
+        }
     }
-
-    let proxy_trust_state = Arc::new(ProxyTrustState::from_config(config));
-
-    app.layer(axum_middleware::from_fn(
-        middleware::telemetry::track_requests,
-    ))
-    .layer(cors_layer(&config.http.cors_origins))
-    .layer(axum_middleware::from_fn(move |request, next| {
-        middleware::proxy_trust::enforce_proxy_trust(proxy_trust_state.clone(), request, next)
-    }))
+    fn probe_group(&self) -> Router {
+        let mut app = Router::new().route("/healthz", get(handlers::health::health_check));
+        if let Some(flag) = &self.state.options.ready {
+            app = app
+                .route("/readyz", get(handlers::health::readiness_check))
+                .layer(Extension(flag.clone()));
+        }
+        app
+    }
+    fn finish(&self, router: Router) -> Router {
+        let proxy = Arc::new(ProxyTrustState::from_config(&self.state.config));
+        router
+            .layer(Extension(self.state.clone()))
+            .layer(axum_middleware::from_fn(
+                middleware::telemetry::track_requests,
+            ))
+            .layer(cors_layer(&self.state.config.http.cors_origins))
+            .layer(axum_middleware::from_fn(move |request, next| {
+                middleware::proxy_trust::enforce_proxy_trust(proxy.clone(), request, next)
+            }))
+    }
 }
 
 /// Build a CORS layer from the configured origins string.
@@ -155,21 +325,25 @@ fn cors_layer(origins: &str) -> CorsLayer {
 /// This router owns only the Durable Streams protocol surface. Operator/admin
 /// routes are kept out of this tree so protocol handlers do not need to know
 /// about admin enablement or policy.
-fn protocol_routes<S: Storage + 'static>(
-    storage: Arc<S>,
+fn protocol_routes(
+    storage: Arc<crate::streams::StreamService>,
     config: &Config,
     shutdown: CancellationToken,
     stream_base_path: Arc<str>,
+    subscriptions: Arc<crate::subscriptions::Service<dyn Storage>>,
 ) -> Router {
     Router::new()
         .route(
             "/{*name}",
-            get(handlers::get::read_stream::<S>)
-                .put(handlers::put::create_stream::<S>)
-                .head(handlers::head::stream_metadata::<S>)
-                .post(handlers::post::append_data::<S>)
-                .delete(handlers::delete::delete_stream::<S>),
+            get(handlers::get::read_stream)
+                .put(handlers::put::create_stream)
+                .head(handlers::head::stream_metadata)
+                .post(handlers::post::append_data)
+                .delete(handlers::delete::delete_stream),
         )
+        .layer(Extension(RequestBodyLimit(
+            config.limits.max_request_body_bytes,
+        )))
         .layer(Extension(StreamNameLimits {
             max_bytes: config.limits.max_stream_name_bytes,
             max_segments: config.limits.max_stream_name_segments,
@@ -177,11 +351,11 @@ fn protocol_routes<S: Storage + 'static>(
         .layer(Extension(ReadStreamConfig {
             long_poll_timeout: config.long_poll_timeout(),
             sse_reconnect_interval_secs: config.transport.connection.sse_reconnect_interval_secs,
-            shutdown: shutdown.clone(),
+            shutdown,
         }))
         .layer(Extension(StreamBasePath(stream_base_path)))
-        .with_state(storage.clone())
-        .merge(crate::subscriptions::routes(storage, config, shutdown))
+        .with_state(storage)
+        .merge(crate::subscriptions::routes(subscriptions))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
         ))
@@ -192,9 +366,9 @@ fn protocol_routes<S: Storage + 'static>(
 /// These routes are operator-focused and opt-in. Keep them in a separate
 /// subrouter so different Tower middleware can be layered around admin traffic
 /// without changing protocol behaviour.
-fn admin_routes<S: Storage + 'static>(storage: Arc<S>) -> Router {
+fn admin_routes(storage: Arc<crate::streams::StreamService>) -> Router {
     Router::new()
-        .route("/streams", get(handlers::list::list_streams::<S>))
+        .route("/streams", get(handlers::list::list_streams))
         .layer(axum_middleware::from_fn(
             middleware::security::add_security_headers,
         ))

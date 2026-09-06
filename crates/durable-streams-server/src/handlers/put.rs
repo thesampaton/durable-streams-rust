@@ -8,17 +8,13 @@ use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemResponse, ProblemResult};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
-use crate::storage::{
-    CreateStreamResult, CreateWithDataResult, ForkOptions, Storage, StreamConfig,
-};
+use crate::storage::{CreateStreamResult, CreateWithDataResult, ForkOptions, StreamOptions};
 use axum::{
     Extension,
-    body::Body,
     extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -33,17 +29,21 @@ use std::sync::Arc;
 /// Returns error if Content-Type is explicitly provided but empty,
 /// both TTL and Expires-At are provided, TTL format is invalid, or stream
 /// exists with different configuration.
-pub async fn create_stream<S: Storage>(
-    State(storage): State<Arc<S>>,
+pub async fn create_stream(
+    State(storage): State<Arc<crate::streams::StreamService>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Extension(StreamBasePath(stream_base_path)): Extension<StreamBasePath>,
     Extension(request_origin): Extension<ProxyTrustResult>,
-    headers: HeaderMap,
-    body: Body,
+    axum::Extension(crate::router::RequestBodyLimit(body_limit)): axum::Extension<
+        crate::router::RequestBodyLimit,
+    >,
+    request: axum::extract::Request,
 ) -> ProblemResult<Response> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     with_instance(original_uri, || async move {
-        let body_bytes = read_body(body).await?;
+        let body_bytes = read_body(body, body_limit).await?;
         let normalized_ct = parse_content_type(&headers)?;
         let created_closed = parse_stream_closed(&headers);
         let config = build_config(&headers, normalized_ct.clone(), created_closed)?;
@@ -108,7 +108,6 @@ pub async fn create_stream<S: Storage>(
                 body_bytes,
                 &normalized_ct,
                 config,
-                created_closed,
                 &location,
             )
         }
@@ -140,7 +139,7 @@ fn build_config(
     headers: &HeaderMap,
     content_type: String,
     created_closed: bool,
-) -> ProblemResult<StreamConfig> {
+) -> ProblemResult<StreamOptions> {
     let ttl_seconds = match headers.get(names::STREAM_TTL).and_then(|v| v.to_str().ok()) {
         Some(value) => Some(headers::parse_ttl(value)?),
         None => None,
@@ -156,29 +155,27 @@ fn build_config(
         return Err(ProblemResponse::from(Error::ConflictingExpiration));
     }
 
-    let mut config = StreamConfig::new(content_type);
+    let mut config = crate::storage::StreamOptions::new(content_type);
     if let Some(ttl) = ttl_seconds {
-        let computed_expires =
-            Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
-        config = config.with_expires_at(computed_expires).with_ttl(ttl);
+        config = config.with_ttl(ttl);
     } else if let Some(expires) = expires_at {
         config = config.with_expires_at(expires);
     }
 
     if created_closed {
-        config = config.with_created_closed(true);
+        config = config.with_closed(true);
     }
 
     Ok(config)
 }
 
 /// Handle a fork-create request (Stream-Forked-From present).
-fn create_fork_stream<S: Storage>(
-    storage: &Arc<S>,
+fn create_fork_stream(
+    storage: &Arc<crate::streams::StreamService>,
     name: &str,
     (forked_from, fork_offset_raw): (&str, Option<&str>),
     stream_base_path: &str,
-    config: StreamConfig,
+    config: StreamOptions,
     location: &str,
     options: ForkOptions,
 ) -> ProblemResult<Response> {
@@ -205,13 +202,12 @@ fn create_fork_stream<S: Storage>(
 }
 
 /// Handle a standard (non-fork) create request.
-fn create_standard_stream<S: Storage>(
-    storage: &Arc<S>,
+fn create_standard_stream(
+    storage: &Arc<crate::streams::StreamService>,
     name: &str,
     body: bytes::Bytes,
     normalized_ct: &str,
-    config: StreamConfig,
-    created_closed: bool,
+    config: StreamOptions,
     location: &str,
 ) -> ProblemResult<Response> {
     // Parse body into messages BEFORE creating the stream so that failures
@@ -223,7 +219,7 @@ fn create_standard_stream<S: Storage>(
         next_offset,
         closed,
     } = storage
-        .create_stream_with_data(name, config, messages, created_closed)
+        .create(name, config, messages)
         .map_err(ProblemResponse::from)?;
 
     Ok(StreamResponse::new(created_status(create_status))

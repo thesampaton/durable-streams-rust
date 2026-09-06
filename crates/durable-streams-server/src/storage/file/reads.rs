@@ -10,6 +10,7 @@ use std::io::{Read, Seek, SeekFrom};
 impl FileStorage {
     /// Capture either a complete read or the local half of a fork while locked.
     pub(super) fn prepare_read(stream: &StreamEntry, from_offset: &Offset) -> Result<PendingRead> {
+        stream.ensure_available()?;
         let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
         if from_offset.is_now() {
             return Ok(PendingRead::Complete(super::ReadResult {
@@ -138,6 +139,7 @@ impl FileStorage {
                 continue;
             };
             let seg_stream = seg_arc.read().expect("stream lock poisoned");
+            seg_stream.ensure_available()?;
 
             let effective_up_to = Some(
                 segment

@@ -93,6 +93,7 @@ impl FileStorage {
                 continue;
             }
 
+            self.recover_append(&path)?;
             let meta_path = Self::meta_path(&path);
             if !meta_path.exists() {
                 continue;
@@ -141,6 +142,7 @@ impl FileStorage {
 
             let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
             let mut entry = StreamEntry {
+                unavailable: false,
                 config: meta.config,
                 index,
                 closed: meta.closed,

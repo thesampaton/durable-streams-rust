@@ -2,9 +2,35 @@
 
 Reviewed clean `trunk` at `3481acf`, including the breaking router-options change. The server is the publication target; the client is assessed separately because its manifest has `publish = false`. This is a review and implementation proposal; its findings and line references describe that commit.
 
-**Instruction-audit follow-up, 6 September 2026:** the working tree now contains root repository guidance, five shortened and distinctly named skills, corrected contributor and governance documentation, and enforced server workspace lints with public documentation and scoped test exceptions. The instruction findings below are retained as the audit record. The server and client behavior/API findings remain open.
+**Instruction-audit follow-up, 6 September 2026:** the working tree now contains root repository guidance, five shortened and distinctly named skills, corrected contributor and governance documentation, and enforced server workspace lints with public documentation and scoped test exceptions. The instruction findings below are retained as the audit record. The server remediation status is recorded below; the client behavior findings remain open.
 
-**Recommendation: resolve the correctness findings and settle the API ownership boundaries before freezing this release.** The recent router consolidation, exhaustive error mapping, and storage read refactoring are useful improvements. The remaining concerns include observable data loss, incomplete lifecycle contracts, and public interfaces that would force another breaking change to repair.
+**Server follow-up, 6 September 2026:** S1–S7 and the server API changes are
+implemented in the working tree. Atomic batch/close and replacement operations
+now have backend and recovery regressions; import validates payloads before
+writing and reports partial progress. Server ownership, startup, and shutdown
+are explicit, and route groups share one initialized subscription service.
+Creation uses validated options; HTTP body collection and TTL arithmetic are
+bounded. Append outcomes and backend errors are explicit, required capabilities
+are checked by trait implementation, and the API snapshot is part of PR CI.
+
+`StreamService` was deliberately introduced as the beginning of public API
+consolidation. The correction retains that direction: handlers now use the
+shared service for stream operations, while storage owns atomic persistence.
+Its documentation describes this current role. The original suggestion below
+to make the wrapper private is superseded by this clarification.
+
+See the [migration guide](../migrations/server-api.md) for the final surface and
+persistence limits. File journal commits add syncing in both file modes;
+replacement requires capacity for old and new payloads. Uncertain final-sync
+outcomes require recovery and do not prove a write was absent.
+
+Blocking execution is intentionally deferred for a separate proposal and
+review after the other server changes. Production callers still execute
+synchronous storage directly. Client findings C1–C3 remain outside this server
+implementation. The findings and line references below remain the historical
+review of `3481acf`, not a description of the updated working tree.
+
+**Original recommendation at `3481acf`: resolve the correctness findings and settle the API ownership boundaries before freezing this release.** The recent router consolidation, exhaustive error mapping, and storage read refactoring are useful improvements. The remaining concerns include observable data loss, incomplete lifecycle contracts, and public interfaces that would force another breaking change to repair.
 
 “Slop” here means redundant instructions, inaccurate explanations, unused public scaffolding, and abstractions whose claimed purpose exceeds their implementation. These findings concern the work itself; they make no assumptions about authorship.
 

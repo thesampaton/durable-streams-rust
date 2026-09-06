@@ -16,7 +16,6 @@ use durable_streams_server::{
     config::{
         AcidBackend, Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode,
     },
-    router,
     startup::{
         StartupError, StartupPhase, bind_tcp_listener, build_tls_server_config, log_phase,
         log_startup_failure, log_transport_summary, preflight_tls_files,
@@ -163,11 +162,9 @@ impl AppRuntime {
 async fn main() {
     let cli = Cli::parse();
 
-    let load_options = ConfigLoadOptions {
-        profile: DeploymentProfile::from(cli.profile),
-        config_override: cli.config,
-        ..ConfigLoadOptions::default()
-    };
+    let mut load_options = ConfigLoadOptions::default();
+    load_options.profile = DeploymentProfile::from(cli.profile);
+    load_options.config_override = cli.config;
 
     log_phase(StartupPhase::LoadConfig);
     let config = match Config::from_sources(&load_options) {
@@ -533,13 +530,17 @@ async fn serve<S: Storage + 'static>(
 ) -> Result<(), StartupError> {
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = CancellationToken::new();
-    let app = router::build_router(
-        storage,
+    let server = durable_streams_server::Server::new(
+        durable_streams_server::StreamService::new(storage),
         &runtime.config,
         durable_streams_server::RouterOptions::default()
             .with_readiness(Arc::clone(&ready))
             .with_shutdown(shutdown.clone()),
-    );
+    )
+    .map_err(|e| StartupError::runtime(e.to_string()))?
+    .start()
+    .map_err(|e| StartupError::runtime(e.to_string()))?;
+    let app = server.router();
     let handle = Handle::new();
 
     // Storage is already initialised (new() is synchronous); mark ready.
@@ -591,6 +592,10 @@ async fn serve<S: Storage + 'static>(
             .map_err(runtime_err)?,
     }
 
+    server
+        .shutdown()
+        .await
+        .map_err(|e| StartupError::runtime(e.to_string()))?;
     Ok(())
 }
 

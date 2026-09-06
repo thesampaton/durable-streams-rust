@@ -123,11 +123,15 @@ async fn stream_name_exceeding_segment_limit_rejected() {
         .await
         .expect("failed to bind");
     let addr = listener.local_addr().expect("failed to read local addr");
-    let app = durable_streams_server::build_router(
-        storage,
+    let app = durable_streams_server::Server::new(
+        durable_streams_server::StreamService::new(storage),
         &config,
         durable_streams_server::RouterOptions::default(),
-    );
+    )
+    .expect("server initialization")
+    .start()
+    .expect("server startup")
+    .router();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server failed");
@@ -177,11 +181,15 @@ async fn stream_name_exceeding_byte_limit_rejected() {
         .await
         .expect("failed to bind");
     let addr = listener.local_addr().expect("failed to read local addr");
-    let app = durable_streams_server::build_router(
-        storage,
+    let app = durable_streams_server::Server::new(
+        durable_streams_server::StreamService::new(storage),
         &config,
         durable_streams_server::RouterOptions::default(),
-    );
+    )
+    .expect("server initialization")
+    .start()
+    .expect("server startup")
+    .router();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server failed");
@@ -254,11 +262,15 @@ async fn error_response_includes_instance() {
         .await
         .expect("failed to bind");
     let addr = listener.local_addr().expect("failed to read local addr");
-    let app = durable_streams_server::build_router(
-        storage,
+    let app = durable_streams_server::Server::new(
+        durable_streams_server::StreamService::new(storage),
         &config,
         durable_streams_server::RouterOptions::default(),
-    );
+    )
+    .expect("server initialization")
+    .start()
+    .expect("server startup")
+    .router();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("server failed");

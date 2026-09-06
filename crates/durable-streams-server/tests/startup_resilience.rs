@@ -20,7 +20,7 @@ use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::acid::AcidStorage;
 use durable_streams_server::storage::file::FileStorage;
-use durable_streams_server::storage::{Storage, StreamConfig};
+use durable_streams_server::storage::{Storage, StreamOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,8 +42,8 @@ fn new_acid(root: &Path) -> AcidStorage {
         .expect("acid storage init should succeed")
 }
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 // ── Durable backend abstraction for shared startup tests ────────────
@@ -89,7 +89,7 @@ backend_tests! {
             for i in 0..100 {
                 let name = format!("stream-{i:03}");
                 s.create_stream(&name, plain_config()).unwrap();
-                s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
+                s.append(&name, Bytes::from(format!("data-{i}")), "text/plain").map(|result| result.start_offset)
                     .unwrap();
             }
             let meta = s.list_streams().unwrap();
@@ -130,7 +130,7 @@ backend_tests! {
         assert!(meta.is_empty());
 
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("hello"), "text/plain").unwrap();
+        s.append("s", Bytes::from("hello"), "text/plain").map(|result| result.start_offset).unwrap();
 
         let read = s.read("s", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
@@ -147,7 +147,9 @@ fn acid_truncated_redb_returns_clear_error() {
     {
         let s = new_acid(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let shard_path = root.join("acid").join("shard_00.redb");
@@ -174,7 +176,9 @@ fn file_storage_ignores_extra_files_in_root() {
     {
         let s = new_file_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Add various non-stream items
@@ -183,7 +187,10 @@ fn file_storage_ignores_extra_files_in_root() {
     fs::write(root.join("README.md"), "readme").unwrap();
 
     let restored = new_file_storage(&root);
-    assert!(restored.exists("s"), "real stream should be loaded");
+    assert!(
+        restored.exists("s").unwrap(),
+        "real stream should be loaded"
+    );
 
     let read = restored.read("s", &Offset::start()).unwrap();
     assert_eq!(read.messages.len(), 1);
@@ -196,14 +203,16 @@ fn file_storage_ignores_non_directory_entries() {
     {
         let s = new_file_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Create a regular file that looks like it could be a stream directory
     fs::write(root.join("fake-stream-dir"), "not a directory").unwrap();
 
     let restored = new_file_storage(&root);
-    assert!(restored.exists("s"));
+    assert!(restored.exists("s").unwrap());
     // No panic or error — the fake file is silently skipped
 }
 
@@ -340,7 +349,9 @@ fn file_storage_handles_stream_dir_without_data_log() {
     {
         let s = new_file_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Remove just the data.log but keep meta.json

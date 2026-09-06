@@ -39,10 +39,10 @@ use tokio::sync::broadcast;
 pub(crate) use shared::{
     NOTIFY_CHANNEL_CAPACITY, ProducerAppendPrecheck, ProducerState, apply_append_metadata,
     build_stream_metadata, cleanup_stale_producers, is_stream_expired, is_stream_visible,
-    precheck_append, precheck_batch_append, precheck_producer_append,
+    precheck_batch_append, precheck_producer_append,
 };
 
-/// Immutable stream configuration captured at create time.
+/// Resolved stream configuration and its current expiration deadline.
 ///
 /// This is the durable metadata returned by `HEAD` and used for idempotent
 /// create checks. The server treats it as part of the stream identity: recreating
@@ -54,6 +54,7 @@ pub(crate) use shared::{
 /// `ttl_seconds` is `None` and `expires_at` was set directly (via
 /// `Expires-At` header), the parsed timestamp is stable so we compare it.
 #[derive(Debug, Clone, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct StreamConfig {
     /// Content-Type header value (normalized, lowercase)
     pub content_type: String,
@@ -79,42 +80,121 @@ impl PartialEq for StreamConfig {
     }
 }
 
-impl StreamConfig {
-    /// Create a config with a normalized content type and default flags.
+/// Expiration policy requested when creating a stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Expiry {
+    /// Retain the stream until deletion.
+    #[default]
+    Never,
+    /// Renew the deadline on each read or write, measured in seconds.
+    Sliding(u64),
+    /// Expire at a fixed UTC deadline.
+    At(DateTime<Utc>),
+}
+
+/// Caller-supplied creation options, resolved by storage before mutation.
+#[derive(Debug, Clone)]
+pub struct StreamOptions {
+    content_type: String,
+    expiry: Expiry,
+    created_closed: bool,
+}
+
+impl StreamOptions {
+    /// Create options for a content type; storage validates and normalizes it.
     #[must_use]
-    pub fn new(content_type: String) -> Self {
+    pub fn new(content_type: impl Into<String>) -> Self {
         Self {
-            content_type,
-            ttl_seconds: None,
-            expires_at: None,
+            content_type: content_type.into(),
+            expiry: Expiry::Never,
             created_closed: false,
         }
     }
 
-    /// Set a relative time-to-live in seconds.
+    /// Replace the expiration policy.
     #[must_use]
-    pub fn with_ttl(mut self, ttl_seconds: u64) -> Self {
-        self.ttl_seconds = Some(ttl_seconds);
+    pub fn with_expiry(mut self, expiry: Expiry) -> Self {
+        self.expiry = expiry;
         self
     }
 
-    /// Set an absolute expiration timestamp.
+    /// Use a sliding TTL, replacing any absolute deadline.
     #[must_use]
-    pub fn with_expires_at(mut self, expires_at: DateTime<Utc>) -> Self {
-        self.expires_at = Some(expires_at);
+    pub fn with_ttl(self, seconds: u64) -> Self {
+        self.with_expiry(Expiry::Sliding(seconds))
+    }
+
+    /// Use an absolute deadline, replacing any sliding TTL.
+    #[must_use]
+    pub fn with_expires_at(self, deadline: DateTime<Utc>) -> Self {
+        self.with_expiry(Expiry::At(deadline))
+    }
+
+    /// Set the create-time closure identity.
+    #[must_use]
+    pub fn with_closed(mut self, closed: bool) -> Self {
+        self.created_closed = closed;
         self
     }
 
-    /// Record that the stream should be considered created in the closed state.
-    #[must_use]
-    pub fn with_created_closed(mut self, created_closed: bool) -> Self {
-        self.created_closed = created_closed;
-        self
+    pub(crate) fn closes_on_create(&self) -> bool {
+        self.created_closed
     }
+
+    /// Validate and resolve the initial expiration deadline at `now`.
+    ///
+    /// # Errors
+    /// Returns a typed error for empty/invalid content types or unrepresentable TTLs.
+    pub fn resolve(self, now: DateTime<Utc>) -> Result<StreamConfig> {
+        let content_type = crate::protocol::headers::normalize_content_type(&self.content_type);
+        if content_type.is_empty() || axum::http::HeaderValue::from_str(&content_type).is_err() {
+            return Err(crate::protocol::error::Error::InvalidHeader {
+                header: "Content-Type".into(),
+                reason: "expected a non-empty HTTP header value".into(),
+            });
+        }
+        let (ttl_seconds, expires_at) = match self.expiry {
+            Expiry::Never => (None, None),
+            Expiry::Sliding(seconds) => (Some(seconds), Some(ttl_deadline(seconds, now)?)),
+            Expiry::At(deadline) => (None, Some(deadline)),
+        };
+        Ok(StreamConfig {
+            content_type,
+            ttl_seconds,
+            expires_at,
+            created_closed: self.created_closed,
+        })
+    }
+}
+
+impl StreamConfig {
+    /// Convert stored metadata to new creation options. Sliding TTLs restart at creation.
+    #[must_use]
+    pub fn creation_options(&self) -> StreamOptions {
+        StreamOptions::new(self.content_type.clone())
+            .with_expiry(self.ttl_seconds.map_or_else(
+                || self.expires_at.map_or(Expiry::Never, Expiry::At),
+                Expiry::Sliding,
+            ))
+            .with_closed(self.created_closed)
+    }
+}
+
+pub(crate) fn ttl_deadline(seconds: u64, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(chrono::Duration::try_seconds)
+        .and_then(|duration| now.checked_add_signed(duration))
+        .ok_or_else(|| {
+            crate::protocol::error::Error::InvalidTtl(
+                "TTL exceeds the supported timestamp range".into(),
+            )
+        })
 }
 
 /// Fork lineage metadata for a stream created via `create_fork`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ForkInfo {
     /// Name of the source stream this fork was created from.
     pub source_name: String,
@@ -179,6 +259,7 @@ impl Message {
 ///
 /// Handlers map this directly into catch-up, long-poll, and SSE responses.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ReadResult {
     /// Messages read
     pub messages: Vec<Bytes>,
@@ -190,13 +271,7 @@ pub struct ReadResult {
     pub closed: bool,
 }
 
-/// Compatibility alias for stream metadata returned by [`Storage::head`].
-///
-/// The canonical type definition lives in [`crate::streams::StreamMetadata`],
-/// but storage keeps this public path stable for the current release line.
-/// Prefer the `streams` path in new code; this alias can be removed at the next
-/// breaking version boundary.
-pub type StreamMetadata = crate::streams::StreamMetadata;
+pub(crate) use crate::streams::StreamMetadata;
 
 /// Outcome of [`Storage::create_stream`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +297,7 @@ pub(crate) struct ForkCreateSpec {
 /// Bundles creation status with a metadata snapshot taken under the
 /// same lock hold so the handler never needs a separate `head()` call.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct CreateWithDataResult {
     /// Whether the stream was newly created or already existed.
     pub status: CreateStreamResult,
@@ -231,11 +307,36 @@ pub struct CreateWithDataResult {
     pub closed: bool,
 }
 
+/// State acknowledged by an atomic append or close operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AppendResult {
+    /// Position at which this batch began; for close-only, the unchanged tail.
+    pub start_offset: Offset,
+    /// Resume position immediately after the committed batch.
+    pub next_offset: Offset,
+    /// Whether the stream is closed in the same committed snapshot.
+    pub closed: bool,
+}
+
+impl AppendResult {
+    /// Construct an acknowledged append outcome in a storage implementation.
+    #[must_use]
+    pub fn new(start_offset: Offset, next_offset: Offset, closed: bool) -> Self {
+        Self {
+            start_offset,
+            next_offset,
+            closed,
+        }
+    }
+}
+
 /// Outcome of [`Storage::append_with_producer`].
 ///
 /// Includes a snapshot of stream state taken atomically with the operation
 /// so handlers never need a separate `head()` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProducerAppendResult {
     /// New data accepted (200 OK)
     Accepted {
@@ -263,9 +364,10 @@ pub enum ProducerAppendResult {
 
 /// Persistence contract for Durable Streams server state.
 ///
-/// Methods are intentionally synchronous. The server keeps async boundaries in
-/// the HTTP and notification layers so storage implementations can focus on
-/// atomicity, ordering, and recovery.
+/// Methods are synchronous and may block on filesystem I/O or lock acquisition.
+/// HTTP and subscription callers currently execute them directly; async callers
+/// need an appropriate execution context. Backends own atomicity, ordering, and
+/// recovery regardless of how the operation is scheduled.
 ///
 /// Implementations are expected to preserve these invariants:
 ///
@@ -278,8 +380,8 @@ pub enum ProducerAppendResult {
 /// Implementations must also be thread-safe (`Send + Sync`), because the axum
 /// server shares them across request handlers.
 ///
-/// Error conditions are documented inline rather than in separate sections
-/// to avoid repetitive documentation on internal trait methods.
+/// Errors are documented on each method. Custom backends implement the full
+/// protocol, fork, and subscription persistence contract.
 #[allow(clippy::missing_errors_doc)]
 pub trait Storage: Send + Sync {
     /// Create a stream entry with immutable configuration.
@@ -288,38 +390,34 @@ pub trait Storage: Send + Sync {
     /// matching configuration.
     ///
     /// Returns `Err(Error::ConfigMismatch)` if stream exists with different config.
-    fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult>;
+    fn create_stream(&self, name: &str, config: StreamOptions) -> Result<CreateStreamResult> {
+        let closed = config.created_closed;
+        self.create_stream_with_data(name, config, Vec::new(), closed)
+            .map(|result| result.status)
+    }
 
-    /// Append one message to an existing stream.
+    /// Append a single message and return its starting and resume offsets.
     ///
-    /// Generates and returns the offset assigned to the appended message.
-    /// Offsets must remain monotonically increasing within a stream.
-    ///
-    /// Returns `Err(Error::StreamClosed)` if stream is closed.
-    /// Returns `Err(Error::ContentTypeMismatch)` if content type doesn't match.
-    fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<Offset>;
+    /// Uses the same atomic operation and failure rules as [`Self::append_batch`].
+    fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<AppendResult> {
+        self.append_batch(name, vec![data], content_type, None, false)
+    }
 
-    /// Append a batch of messages as one atomic operation.
+    /// Validate writer ordering, append a batch, and optionally close atomically.
     ///
-    /// All messages are validated and committed as a single atomic operation.
-    /// Either all messages are appended successfully, or none are.
-    /// Returns the next offset (the offset that will be assigned to the
-    /// next message appended after this batch).
-    ///
-    /// If `seq` is `Some`, validates lexicographic ordering against the
-    /// stream's last seq and updates it on success.
-    ///
-    /// Returns `Err(Error::StreamClosed)` if stream is closed.
-    /// Returns `Err(Error::ContentTypeMismatch)` if content type doesn't match.
-    /// Returns `Err(Error::SeqOrderingViolation)` if seq <= last seq.
-    /// Returns `Err(Error::MemoryLimitExceeded)` if batch would exceed limits.
-    fn batch_append(
+    /// Empty batches are accepted only with `close = true`; content type is then
+    /// ignored. Close-only is idempotent. Returned state belongs to the commit.
+    /// Validation and pre-commit failures preserve the old state. If final durability
+    /// acknowledgement fails after commit, backends must prevent access to uncertain
+    /// state until recovery; an error alone does not guarantee the write was absent.
+    fn append_batch(
         &self,
         name: &str,
         messages: Vec<Bytes>,
         content_type: &str,
         seq: Option<&str>,
-    ) -> Result<Offset>;
+        close: bool,
+    ) -> Result<AppendResult>;
 
     /// Read from a stream starting at `from_offset`.
     ///
@@ -381,13 +479,37 @@ pub trait Storage: Send + Sync {
     fn create_stream_with_data(
         &self,
         name: &str,
-        config: StreamConfig,
+        config: StreamOptions,
         messages: Vec<Bytes>,
         should_close: bool,
     ) -> Result<CreateWithDataResult>;
 
+    /// Atomically replace an existing independent root stream with validated data.
+    ///
+    /// Forks and streams retained by forks must be rejected without mutation.
+    /// This operator operation resets offsets and writer/producer state. Pre-commit
+    /// failures preserve the original; it must not use delete-then-create. The same
+    /// uncertain-commit recovery rules as [`Self::append_batch`] apply.
+    fn replace_stream(
+        &self,
+        name: &str,
+        config: StreamOptions,
+        messages: Vec<Bytes>,
+        closed: bool,
+    ) -> Result<AppendResult>;
+
     /// Check if a stream exists
-    fn exists(&self, name: &str) -> bool;
+    fn exists(&self, name: &str) -> Result<bool> {
+        match self.head(name) {
+            Ok(_) => Ok(true),
+            Err(
+                crate::protocol::error::Error::NotFound(_)
+                | crate::protocol::error::Error::StreamExpired
+                | crate::protocol::error::Error::StreamGone(_),
+            ) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
 
     /// Subscribe to notifications for new data on a stream.
     ///
@@ -396,7 +518,7 @@ pub trait Storage: Send + Sync {
     /// exist or has expired.
     ///
     /// The method itself is sync; the handler awaits on the receiver.
-    fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>>;
+    fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>>;
 
     /// Proactively remove all expired streams, returning the count deleted.
     ///
@@ -427,42 +549,61 @@ pub trait Storage: Send + Sync {
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
-        config: StreamConfig,
+        config: StreamOptions,
     ) -> Result<CreateStreamResult>;
 
     /// Create a fork and its partial inherited data and initial body atomically.
     ///
     /// Implementations must validate the request before making the fork visible.
-    /// The default supports only the original, empty-body fork operation.
+    /// This is required by the server contract, including initial bodies and sub-offsets.
     fn create_fork_with_options(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
-        config: StreamConfig,
+        config: StreamOptions,
         options: ForkOptions,
-    ) -> Result<CreateStreamResult> {
-        if options.sub_offset != 0
-            || options.inherit_content_type
-            || !options.initial_body.is_empty()
-        {
-            return Err(crate::protocol::error::Error::InvalidHeader {
-                header: "Stream-Forked-From".to_string(),
-                reason: "storage backend does not support extended fork creation".to_string(),
-            });
-        }
-        self.create_fork(name, source_name, fork_offset, config)
-    }
+    ) -> Result<CreateStreamResult>;
+
     /// Load the private subscription control snapshot, separate from application streams.
-    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>>;
 
     /// Atomically replace the private subscription control snapshot.
     /// Durable backends must persist the replacement before returning success.
-    fn save_subscription_state(&self, _state: &[u8]) -> Result<()> {
-        Err(crate::protocol::error::Error::Storage(
-            "subscription persistence is unsupported by this backend".into(),
-        ))
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()>;
+}
+
+impl ForkInfo {
+    /// Construct lineage metadata with its byte/message sub-offset.
+    #[must_use]
+    pub fn new(source_name: String, fork_offset: Offset, sub_offset: u64) -> Self {
+        Self {
+            source_name,
+            fork_offset,
+            sub_offset,
+        }
+    }
+}
+impl ReadResult {
+    /// Construct one coherent read snapshot in a storage implementation.
+    #[must_use]
+    pub fn new(messages: Vec<Bytes>, next_offset: Offset, at_tail: bool, closed: bool) -> Self {
+        Self {
+            messages,
+            next_offset,
+            at_tail,
+            closed,
+        }
+    }
+}
+impl CreateWithDataResult {
+    /// Construct a creation outcome from the committed metadata snapshot.
+    #[must_use]
+    pub fn new(status: CreateStreamResult, next_offset: Offset, closed: bool) -> Self {
+        Self {
+            status,
+            next_offset,
+            closed,
+        }
     }
 }

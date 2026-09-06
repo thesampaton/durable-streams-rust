@@ -16,9 +16,15 @@
 
 ## Server boundaries
 
-`storage` owns persistence operations and backend mechanics. `streams` contains
-metadata and the projections used by CLI/admin listing. Protocol handlers call
-storage; the current `StreamService` wraps metadata and listing operations.
+`storage` owns synchronous atomic persistence operations and backend mechanics.
+`StreamService` consolidates creation, append, read, delete, fork, notification,
+and metadata/listing access. Protocol and admin handlers use that service;
+backend implementations retain their lock and transaction boundaries.
+
+`Server` validates HTTP settings and loads subscription control state before
+Tokio is required. `start` creates one worker; `RunningServer` exposes cloneable
+route groups and cancellation with awaited completion. A storage instance has
+one independent server owner. Route clones retain that owner and share state.
 
 `protocol/error.rs` defines the exhaustive domain-error response mapping.
 `protocol/problem.rs` owns the RFC 9457 payload and response helpers. Handlers
@@ -46,10 +52,10 @@ The memory/file renewal ordering is retained to preserve existing failure
 semantics. ACID fork lineages share a shard, so transaction snapshots cover
 all ancestors.
 
-`HEAD` and listing use the same backend-local metadata projection. `exists`,
-`subscribe`, and `list_streams` intentionally retain their thin backend loops:
-they already share the visibility rule, while locking, notifier ownership,
-fallible database access, and deterministic listing are storage concerns.
+`HEAD` and listing use the same backend-local metadata projection. `exists`
+derives its fallible presence check from `HEAD`. Subscription lookup and listing
+retain backend loops for locking, notifier ownership, database access, and
+deterministic ordering.
 
 The entry/meta structs also remain separate. Memory entries own message
 buffers and notifiers; file entries own open files and rebuildable indexes,

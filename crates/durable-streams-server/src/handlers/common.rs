@@ -18,8 +18,22 @@ use std::future::Future;
 ///
 /// Body I/O failures surface as a dedicated invalid-body problem response
 /// without widening the public [`crate::protocol::error::Error`] enum.
-pub async fn read_body(body: Body) -> ProblemResult<Bytes> {
-    axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+pub(crate) async fn read_body(body: Body, limit: usize) -> ProblemResult<Bytes> {
+    axum::body::to_bytes(body, limit).await.map_err(|e| {
+        use std::error::Error as _;
+        if e.source()
+            .is_some_and(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
+        {
+            return ProblemResponse::new(
+                ProblemDetails::new(
+                    "/errors/request-body-too-large",
+                    "Request Body Too Large",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "REQUEST_BODY_TOO_LARGE",
+                )
+                .with_detail(format!("request body exceeds the {limit}-byte limit")),
+            );
+        }
         ProblemResponse::new(
             ProblemDetails::new(
                 "/errors/invalid-body",

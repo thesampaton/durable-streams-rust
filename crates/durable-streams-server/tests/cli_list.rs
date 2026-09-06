@@ -7,7 +7,7 @@ use common::{spawn_test_server_with_config, test_client};
 use durable_streams_server::{
     Config, Storage,
     config::AcidBackend,
-    storage::{StreamConfig, acid::AcidStorage, file::FileStorage},
+    storage::{StreamOptions, acid::AcidStorage, file::FileStorage},
 };
 use serde_json::{Value, json};
 use std::process::{Command, Output};
@@ -41,7 +41,7 @@ fn test_cli_list_file_storage_local_by_default() {
     storage
         .create_stream(
             "local-file-stream",
-            StreamConfig::new("text/plain".to_string()),
+            StreamOptions::new("text/plain".to_string()),
         )
         .expect("create stream");
     storage
@@ -50,6 +50,7 @@ fn test_cli_list_file_storage_local_by_default() {
             Bytes::from_static(b"hello"),
             "text/plain",
         )
+        .map(|result| result.start_offset)
         .expect("append data");
     drop(storage);
     let storage =
@@ -106,7 +107,7 @@ fn test_cli_list_acid_storage_local_by_default() {
     storage
         .create_stream(
             "local-acid-stream",
-            StreamConfig::new("text/plain".to_string()),
+            StreamOptions::new("text/plain".to_string()),
         )
         .expect("create stream");
     storage
@@ -115,6 +116,7 @@ fn test_cli_list_acid_storage_local_by_default() {
             Bytes::from_static(b"hello"),
             "text/plain",
         )
+        .map(|result| result.start_offset)
         .expect("append data");
     storage
         .close_stream("local-acid-stream")

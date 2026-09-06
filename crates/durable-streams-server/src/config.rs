@@ -85,19 +85,16 @@ string_enum! {
         ///
         /// Best suited to tests, demos, and ephemeral development environments.
         Memory => "memory",
-        /// Filesystem-backed append-log storage without syncing each append.
+        /// File logs with journaled append commits and fewer lower-level syncs.
         ///
-        /// Uses one directory per stream with a `data.log` and `meta.json`, but
-        /// does not call `fsync`/`fdatasync` on every write. Choose this when you
-        /// want simple local persistence and favor throughput over the strongest
-        /// crash-durability guarantees for the most recent appends.
+        /// Append/replacement transactions sync their journal, data, and metadata
+        /// in both file modes. This mode omits extra syncs on lower-level writes,
+        /// including initial stream data. See [`crate::storage::file`].
         FileFast => "file-fast" | "fast",
-        /// Filesystem-backed append-log storage with syncing on each append.
+        /// File logs with journaled commits and additional write syncing.
         ///
-        /// Uses the same on-disk layout as [`Self::FileFast`], but performs
-        /// `fsync`/`fdatasync` after writes. Choose this when you want the simpler
-        /// file-log backend while reducing the risk of losing recently acknowledged
-        /// appends after a crash, and can afford the added write latency.
+        /// Uses the same layout and append journal as [`Self::FileFast`], with
+        /// extra `fsync`/`fdatasync` calls on lower-level writes.
         FileDurable => "file-durable" | "file" | "durable",
         /// Transactional redb-backed storage.
         ///
@@ -278,6 +275,7 @@ impl From<String> for DeploymentProfile {
 
 /// Server configuration resolved after all layering and defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Config {
     /// Listener settings.
     pub server: ServerConfig,
@@ -299,6 +297,7 @@ pub struct Config {
 
 /// Listener settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// Socket address to bind, e.g. `0.0.0.0:4437`.
     pub bind_address: String,
@@ -306,11 +305,14 @@ pub struct ServerConfig {
 
 /// Limits enforced by the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct LimitsConfig {
     /// Maximum total in-process payload bytes across all streams.
     pub max_memory_bytes: u64,
     /// Maximum payload bytes retained for any single stream.
     pub max_stream_bytes: u64,
+    /// Maximum bytes buffered from one HTTP request body, including JSON framing.
+    pub max_request_body_bytes: usize,
     /// Maximum byte length of a stream name.
     pub max_stream_name_bytes: usize,
     /// Maximum number of `/`-separated segments in a stream name.
@@ -319,6 +321,7 @@ pub struct LimitsConfig {
 
 /// HTTP surface configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct HttpConfig {
     /// CORS allowlist as `"*"` or a comma-separated origin list.
     pub cors_origins: String,
@@ -337,6 +340,7 @@ pub struct HttpConfig {
 /// reverse proxies, or external access-control layers. The server deliberately
 /// does not own authentication or authorization policy for this surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct AdminConfig {
     /// Whether to mount the admin router.
     pub enabled: bool,
@@ -346,6 +350,7 @@ pub struct AdminConfig {
 
 /// Persistence configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct StorageConfig {
     /// Selected persistence backend.
     pub mode: StorageMode,
@@ -359,6 +364,7 @@ pub struct StorageConfig {
 
 /// Transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportConfig {
     /// HTTP / TLS / mTLS transport mode.
     pub mode: TransportMode,
@@ -372,6 +378,7 @@ pub struct TransportConfig {
 
 /// HTTP version settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportHttpConfig {
     /// Enabled HTTP protocol versions.
     pub versions: Vec<HttpVersion>,
@@ -379,6 +386,7 @@ pub struct TransportHttpConfig {
 
 /// TLS-related settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportTlsConfig {
     /// Optional server certificate path in PEM format.
     pub cert_path: Option<String>,
@@ -404,6 +412,7 @@ impl TransportTlsConfig {
 
 /// Connection-level settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportConnectionConfig {
     /// Long-poll timeout used by `GET ?live=long-poll`.
     pub long_poll_timeout_secs: u64,
@@ -413,6 +422,7 @@ pub struct TransportConnectionConfig {
 
 /// Reverse-proxy trust model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ProxyConfig {
     /// Whether proxy header trust is enabled.
     pub enabled: bool,
@@ -426,6 +436,7 @@ pub struct ProxyConfig {
 
 /// Proxy-origin identity settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ProxyIdentityConfig {
     /// Identity handoff mode.
     pub mode: ProxyIdentityMode,
@@ -437,6 +448,7 @@ pub struct ProxyIdentityConfig {
 
 /// Logging and tracing defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ObservabilityConfig {
     /// Default tracing filter used when `RUST_LOG` is not explicitly set.
     pub rust_log: String,
@@ -444,6 +456,7 @@ pub struct ObservabilityConfig {
 
 /// Select configuration files and the profile used by [`Config::from_sources`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ConfigLoadOptions {
     /// Directory containing `default.toml`, `<profile>.toml`, and `local.toml`.
     pub config_dir: PathBuf,
@@ -465,6 +478,7 @@ impl Default for ConfigLoadOptions {
 
 /// Errors raised while loading config sources.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ConfigLoadError {
     #[error("config override file not found: '{path}'")]
     /// An explicitly requested override file does not exist.
@@ -494,6 +508,7 @@ pub enum ConfigLoadError {
 
 /// Typed validation errors raised before startup.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ConfigValidationError {
     #[error("server.bind_address is invalid: '{value}' ({reason})")]
     /// The listener address is not a valid socket address.
@@ -695,6 +710,7 @@ struct ServerConfigPatch {
 struct LimitsConfigPatch {
     max_memory_bytes: Option<u64>,
     max_stream_bytes: Option<u64>,
+    max_request_body_bytes: Option<usize>,
     max_stream_name_bytes: Option<usize>,
     max_stream_name_segments: Option<usize>,
 }
@@ -925,6 +941,9 @@ impl Config {
         if let Some(max_stream_bytes) = patch.max_stream_bytes {
             self.limits.max_stream_bytes = max_stream_bytes;
         }
+        if let Some(limit) = patch.max_request_body_bytes {
+            self.limits.max_request_body_bytes = limit;
+        }
         if let Some(max_stream_name_bytes) = patch.max_stream_name_bytes {
             self.limits.max_stream_name_bytes = max_stream_name_bytes;
         }
@@ -1115,6 +1134,7 @@ impl Config {
     ) -> Result<(), ConfigLoadError> {
         env_parse_into!(self, get, "DS_LIMITS__MAX_MEMORY_BYTES" => limits.max_memory_bytes : u64);
         env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_BYTES" => limits.max_stream_bytes : u64);
+        env_parse_into!(self, get, "DS_LIMITS__MAX_REQUEST_BODY_BYTES" => limits.max_request_body_bytes : usize);
         env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_BYTES" => limits.max_stream_name_bytes : usize);
         env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS" => limits.max_stream_name_segments : usize);
         Ok(())
@@ -1265,6 +1285,25 @@ impl Config {
         self.validate_transport()?;
         validate_proxy(self)?;
         Ok(())
+    }
+
+    pub(crate) fn validate_router(&self) -> Result<(), ConfigValidationError> {
+        validate_cors_origins(&self.http.cors_origins)?;
+        validate_stream_base_path(&self.http.stream_base_path)?;
+        if self.admin.enabled {
+            validate_admin_base_path(&self.admin.base_path)?;
+            validate_admin_path_separation(&self.http.stream_base_path, &self.admin.base_path)?;
+        }
+        if self.limits.max_stream_name_bytes == 0 {
+            return Err(ConfigValidationError::MaxStreamNameBytesTooSmall);
+        }
+        if self.limits.max_stream_name_segments == 0 {
+            return Err(ConfigValidationError::MaxStreamNameSegmentsTooSmall);
+        }
+        if self.transport.connection.long_poll_timeout_secs == 0 {
+            return Err(ConfigValidationError::LongPollTimeoutTooSmall);
+        }
+        validate_proxy(self)
     }
 
     fn validate_limits(&self) -> Result<(), ConfigValidationError> {
@@ -1514,6 +1553,7 @@ impl Default for Config {
             limits: LimitsConfig {
                 max_memory_bytes: 100 * 1024 * 1024,
                 max_stream_bytes: 10 * 1024 * 1024,
+                max_request_body_bytes: 10 * 1024 * 1024,
                 max_stream_name_bytes: 1024,
                 max_stream_name_segments: 8,
             },
@@ -1567,16 +1607,6 @@ impl Default for Config {
         }
     }
 }
-
-/// Typed wrapper for long-poll timeout, injected via axum `Extension`.
-#[derive(Debug, Clone, Copy)]
-pub struct LongPollTimeout(pub Duration);
-
-/// Typed wrapper for SSE reconnect interval in seconds (0 = disabled).
-///
-/// Matches Caddy's `sse_reconnect_interval`. Injected via axum `Extension`.
-#[derive(Debug, Clone, Copy)]
-pub struct SseReconnectInterval(pub u64);
 
 /// Shared defaults applied to every `prod*` profile: stricter limits and
 /// file-durable on-disk storage.
@@ -1776,6 +1806,13 @@ fn validate_cors_origins(origins: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
+    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*', '?', '#']) {
+        return Err(ConfigValidationError::InvalidStreamBasePath {
+            value: raw.into(),
+            reason: "must be a literal URL path without whitespace, parameters, query, or fragment"
+                .into(),
+        });
+    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(ConfigValidationError::InvalidStreamBasePath {
@@ -1801,10 +1838,11 @@ fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_admin_base_path(raw: &str) -> Result<(), ConfigValidationError> {
-    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*']) {
+    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*', '?', '#']) {
         return Err(ConfigValidationError::InvalidAdminBasePath {
             value: raw.to_string(),
-            reason: "must be a literal path without whitespace or route parameters".to_string(),
+            reason: "must be a literal path without whitespace, parameters, query, or fragment"
+                .to_string(),
         });
     }
     let trimmed = raw.trim();

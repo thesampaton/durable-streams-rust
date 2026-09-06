@@ -217,7 +217,7 @@ pub(crate) fn apply_append_metadata(
     updated_at: &mut Option<DateTime<Utc>>,
     pending_seq: Option<String>,
     now: DateTime<Utc>,
-) -> bool {
+) -> Result<bool> {
     *updated_at = Some(now);
     if let Some(new_seq) = pending_seq {
         *last_seq_field = Some(new_seq);

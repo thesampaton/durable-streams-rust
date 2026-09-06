@@ -76,6 +76,7 @@ impl StartupError {
 
 /// Typed cause attached to a [`StartupError`].
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StartupErrorKind {
     /// Configuration file could not be loaded or parsed.
     #[error("config load failed: {0}")]

@@ -16,6 +16,7 @@ pub mod import;
 
 /// Errors that can occur during export or import operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TransferError {
     /// Underlying I/O failure (file create, write, etc.).
     #[error("I/O error: {0}")]
@@ -32,6 +33,22 @@ pub enum TransferError {
     /// The export document declares a format version this build cannot handle.
     #[error("unsupported format version: {0}")]
     UnsupportedVersion(u32),
+
+    /// The document contains duplicate names or invalid stream metadata.
+    #[error("invalid import document: {0}")]
+    InvalidDocument(String),
+
+    /// Earlier streams committed before a later stream failed. Import is atomic per stream.
+    #[error("import stopped at '{stream}' after {completed:?}: {source}")]
+    PartialImport {
+        /// Name of the stream that failed.
+        stream: String,
+        /// Counts of streams and messages committed or skipped before this failure.
+        completed: import::ImportStats,
+        /// Failure for the current stream.
+        #[source]
+        source: Box<TransferError>,
+    },
 
     /// A storage operation failed during export or import.
     #[error("storage error: {0}")]

@@ -1,7 +1,6 @@
 use crate::handlers::common::with_instance;
 use crate::protocol::problem::ProblemResult;
 use crate::protocol::stream_name::StreamName;
-use crate::storage::Storage;
 use axum::{
     extract::{OriginalUri, State},
     http::StatusCode,
@@ -17,8 +16,8 @@ use std::sync::Arc;
 /// # Errors
 ///
 /// Returns `Error::NotFound` if the stream does not exist.
-pub async fn delete_stream<S: Storage>(
-    State(storage): State<Arc<S>>,
+pub async fn delete_stream(
+    State(storage): State<Arc<crate::streams::StreamService>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
 ) -> ProblemResult<Response> {

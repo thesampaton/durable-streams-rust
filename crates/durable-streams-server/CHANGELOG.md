@@ -9,10 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- Consolidate router construction into `build_router(storage, config, options)`.
-  Pass `RouterOptions::default()` for the former two-argument convenience API.
-  Replace `build_router_with_ready` with `RouterOptions::with_readiness` and
-  `RouterOptions::with_shutdown`. Readiness and shutdown remain independent.
+- Replace router builders with `Server::new(StreamService, config, options)` and
+  explicit `start()`. Construction is fallible, supports `Arc<dyn Storage>`, and
+  validates HTTP settings before mounting. Cloned running handles/route groups
+  share control state and one worker; shutdown can await completion.
+- Move HTTP stream operations through `StreamService`. Add composable protocol,
+  admin, and probe routers for middleware placement.
+- Separate creation inputs (`StreamOptions`, `Expiry`) from resolved
+  `StreamConfig` metadata. TTL/deadline resolution belongs to storage.
+- Replace `batch_append` with atomic `append_batch`, including optional closure.
+  Both `append` and `append_batch` return named starting/resume offsets and
+  closed state. `exists` and `subscribe` now propagate backend errors.
+- Require extended forks, replacement, and subscription persistence in the
+  storage contract. Make extensible configuration, error, and output types
+  non-exhaustive; add output constructors for backend implementations.
+- Remove unused `ShutdownToken`, `LongPollTimeout`, `SseReconnectInterval`, and
+  the compatibility `storage::StreamMetadata` path. See `streams::StreamMetadata`.
+- Import replacement commits atomically per independent root stream, requires
+  staging capacity, and rejects fork lineage. Later failures carry completed
+  counts in `TransferError::PartialImport`.
 
 ### Added
 
@@ -28,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ordinary final append and closure share one storage commit and resume snapshot.
+  File operations use an undo journal to recover interrupted log/metadata updates
+  and preserve ordinary append timestamps on reopen. Journal commits add syncing
+  in both file modes.
+- Validate all import payloads before mutation and preserve originals on pre-commit
+  replacement failure. Recovery resolves uncertain final-sync outcomes.
+- Initialize direct-Rust TTL streams and reject unrepresentable TTL/deadline arithmetic.
+- Limit collected request bodies with `limits.max_request_body_bytes` (default
+  10 MiB), including chunked bodies, and return 413 before storage mutation.
+- Reject empty JSON arrays in POST even when a close header is present.
 - SSE pairs every data event with a control event and a corresponding offset.
 - Chained fork reads respect all ancestor bounds and the requested read offset.
 - File recovery restores fork-relative offsets and preserves expired ancestors

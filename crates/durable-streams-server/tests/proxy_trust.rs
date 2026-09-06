@@ -3,7 +3,9 @@
 mod common;
 
 use common::{spawn_test_server, spawn_test_server_with_config, test_client, unique_stream_name};
-use durable_streams_server::config::{Config, ForwardedHeadersMode, ProxyIdentityMode};
+use durable_streams_server::config::{
+    Config, ForwardedHeadersMode, ProxyIdentityMode, TransportMode,
+};
 
 /// Extract the `Location` header from a PUT response.
 ///
@@ -220,6 +222,8 @@ async fn identity_header_stripped_from_untrusted_peer() {
     config.proxy.forwarded_headers = ForwardedHeadersMode::XForwarded;
     // Trust 10.0.0.1 only; test client connects from 127.0.0.1
     config.proxy.trusted_proxies = vec!["10.0.0.1".to_string()];
+    // The embedding declares its authenticated transport; the test listener exercises middleware.
+    config.transport.mode = TransportMode::Mtls;
     config.proxy.identity.mode = ProxyIdentityMode::Header;
     config.proxy.identity.header_name = Some("x-client-identity".to_string());
 

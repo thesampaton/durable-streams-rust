@@ -9,16 +9,16 @@ mod common;
 
 use bytes::Bytes;
 use common::{read_problem, spawn_test_server_with_storage, test_client, unique_stream_name};
-use durable_streams_server::InMemoryStorage;
 use durable_streams_server::config::Config;
 use durable_streams_server::protocol::error::{Error, Result};
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::offset::Offset as StorageOffset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
-    CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, Storage,
-    StreamConfig, StreamMetadata,
+    CreateStreamResult, CreateWithDataResult, ProducerAppendResult, ReadResult, StreamOptions,
 };
+use durable_streams_server::streams::StreamMetadata;
+use durable_streams_server::{InMemoryStorage, Storage};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -58,21 +58,27 @@ impl FailingAppendStorage {
 }
 
 impl Storage for FailingAppendStorage {
-    fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
+    fn create_stream(&self, name: &str, config: StreamOptions) -> Result<CreateStreamResult> {
         self.inner.create_stream(name, config)
     }
 
-    fn append(&self, _name: &str, _data: Bytes, _content_type: &str) -> Result<Offset> {
+    fn append(
+        &self,
+        _name: &str,
+        _data: Bytes,
+        _content_type: &str,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
         Err(self.append_error())
     }
 
-    fn batch_append(
+    fn append_batch(
         &self,
         _name: &str,
         _messages: Vec<Bytes>,
         _content_type: &str,
         _seq: Option<&str>,
-    ) -> Result<Offset> {
+        _close: bool,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
         Err(self.append_error())
     }
 
@@ -107,7 +113,7 @@ impl Storage for FailingAppendStorage {
     fn create_stream_with_data(
         &self,
         name: &str,
-        config: StreamConfig,
+        config: StreamOptions,
         messages: Vec<Bytes>,
         should_close: bool,
     ) -> Result<CreateWithDataResult> {
@@ -115,11 +121,39 @@ impl Storage for FailingAppendStorage {
             .create_stream_with_data(name, config, messages, should_close)
     }
 
-    fn exists(&self, name: &str) -> bool {
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        self.inner.load_subscription_state()
+    }
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        self.inner.save_subscription_state(state)
+    }
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source: &str,
+        offset: Option<&Offset>,
+        config: StreamOptions,
+        options: durable_streams_server::storage::ForkOptions,
+    ) -> Result<CreateStreamResult> {
+        self.inner
+            .create_fork_with_options(name, source, offset, config, options)
+    }
+
+    fn exists(&self, name: &str) -> Result<bool> {
         self.inner.exists(name)
     }
 
-    fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>> {
+    fn replace_stream(
+        &self,
+        name: &str,
+        config: StreamOptions,
+        messages: Vec<Bytes>,
+        closed: bool,
+    ) -> Result<durable_streams_server::storage::AppendResult> {
+        self.inner.replace_stream(name, config, messages, closed)
+    }
+
+    fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>> {
         self.inner.subscribe(name)
     }
 
@@ -136,7 +170,7 @@ impl Storage for FailingAppendStorage {
         name: &str,
         source_name: &str,
         fork_offset: Option<&StorageOffset>,
-        config: StreamConfig,
+        config: StreamOptions,
     ) -> Result<CreateStreamResult> {
         self.inner
             .create_fork(name, source_name, fork_offset, config)

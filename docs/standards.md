@@ -103,3 +103,28 @@ responses. This is an intentional distinction between the two protocol surfaces.
   file recovery offsets, subscription snapshot isolation, token tampering,
   invalid ack batches, lease renewal/expiry, deletion fencing, persisted claims
   and signing keys, and webhook retry deadlines across restart.
+
+### Server API and correctness follow-up — 6 September 2026
+
+The [release review](reviews/2026-09-06-release-readiness.md) server fixes retain
+this protocol revision and both conformance package pins. POST now also rejects
+an empty JSON array when a close header is present, as required by §9.1.3;
+an empty-body close-only request remains valid.
+
+Working-tree validation used Rust 1.94.1 and Node 20.16.0 (the CI Node major):
+
+- Workspace tests: 674 passed; the nightly API test was ignored there and passed
+  separately. Final focused checks passed 157 library tests, 12 import tests,
+  three body/TTL tests, and seven embedding/lifecycle tests, including the final
+  file metadata and recovery edits.
+- Formatting, workspace all-target check, strict server Clippy, advisory client
+  Clippy, and rustdoc with warnings denied passed. The updated public API
+  snapshot was inspected and then verified without snapshot-update mode.
+- Server conformance 0.3.6: all 338 tests passed independently on memory,
+  file-fast, file-durable, ACID memory, and ACID file, with separate ports/data
+  roots and no competing test load.
+- Client conformance 0.2.3: 255 passed, zero failed, and 14 upstream capability
+  skips. Client behavior fixes from the review remain separate.
+- Production storage calls have not been offloaded. No throughput or contention
+  benchmark was run. The release candidate still needs the repository's CI/MSRV
+  gates.

@@ -52,65 +52,50 @@ pub(crate) fn resolve_fork_ttl(
     source_config: &StreamConfig,
     fork_ttl: Option<u64>,
     fork_expires_at: Option<DateTime<Utc>>,
-) -> (Option<u64>, Option<DateTime<Utc>>) {
+) -> Result<(Option<u64>, Option<DateTime<Utc>>)> {
     if let Some(ttl) = fork_ttl {
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
-        return (Some(ttl), Some(expires_at));
+        return Ok((Some(ttl), Some(super::ttl_deadline(ttl, Utc::now())?)));
     }
-    if let Some(expires_at) = fork_expires_at {
-        return (None, Some(expires_at));
+    if let Some(deadline) = fork_expires_at {
+        return Ok((None, Some(deadline)));
     }
     if let Some(ttl) = source_config.ttl_seconds {
-        let expires_at =
-            Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
-        return (Some(ttl), Some(expires_at));
+        return Ok((Some(ttl), Some(super::ttl_deadline(ttl, Utc::now())?)));
     }
-    if let Some(expires_at) = source_config.expires_at {
-        return (None, Some(expires_at));
-    }
-    (None, None)
+    Ok((None, source_config.expires_at))
 }
 
 /// Build the effective fork configuration after inheriting source fields.
-#[must_use]
 pub(crate) fn build_fork_config(
     source_config: &StreamConfig,
     requested_config: &StreamConfig,
-) -> StreamConfig {
-    let (fork_ttl, fork_expires_at) = resolve_fork_ttl(
+) -> Result<StreamConfig> {
+    let (ttl_seconds, expires_at) = resolve_fork_ttl(
         source_config,
         requested_config.ttl_seconds,
         requested_config.expires_at,
-    );
-
-    let mut config = StreamConfig::new(source_config.content_type.clone());
-    if let Some(ttl) = fork_ttl {
-        config = config.with_ttl(ttl);
-    }
-    if let Some(expires_at) = fork_expires_at {
-        config = config.with_expires_at(expires_at);
-    }
-    if requested_config.created_closed {
-        config = config.with_created_closed(true);
-    }
-    config
+    )?;
+    Ok(StreamConfig {
+        content_type: source_config.content_type.clone(),
+        ttl_seconds,
+        expires_at,
+        created_closed: requested_config.created_closed,
+    })
 }
 
 /// Resolve a fork create spec once source-derived values are known.
-#[must_use]
 pub(crate) fn build_fork_create_spec(
     source_name: &str,
     source_config: &StreamConfig,
     requested_config: &StreamConfig,
     fork_offset: Offset,
-) -> ForkCreateSpec {
-    ForkCreateSpec {
+) -> Result<ForkCreateSpec> {
+    Ok(ForkCreateSpec {
         sub_offset: 0,
         source_name: source_name.to_string(),
         fork_offset,
-        config: build_fork_config(source_config, requested_config),
-    }
+        config: build_fork_config(source_config, requested_config)?,
+    })
 }
 
 /// Resolve fork offset, defaulting to source tail.
@@ -197,7 +182,7 @@ pub(crate) fn prepare_fork_spec(
         source_config,
         requested_config,
         resolved_offset.clone(),
-    );
+    )?;
     Ok((spec, resolved_offset))
 }
 
@@ -272,13 +257,12 @@ pub(crate) fn evaluate_expired_cleanup(ref_count: u32) -> DeleteDisposition {
 /// Renew a sliding TTL in-place.
 ///
 /// Returns `true` when the config was updated and should be persisted.
-pub(crate) fn renew_ttl(config: &mut StreamConfig) -> bool {
+pub(crate) fn renew_ttl(config: &mut StreamConfig) -> Result<bool> {
     if let Some(ttl) = config.ttl_seconds {
-        config.expires_at =
-            Some(Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX)));
-        true
+        config.expires_at = Some(super::ttl_deadline(ttl, Utc::now())?);
+        Ok(true)
     } else {
-        false
+        Ok(false)
     }
 }
 
@@ -380,4 +364,12 @@ pub(crate) fn initial_fork_messages(
         }
     }
     Ok(messages)
+}
+
+/// Replacing lineage in place would change bytes already inherited by descendants.
+pub(crate) fn check_replace(ref_count: u32, fork: Option<&ForkInfo>) -> Result<()> {
+    if ref_count != 0 || fork.is_some() {
+        return Err(Error::ReplacementHasForks);
+    }
+    Ok(())
 }

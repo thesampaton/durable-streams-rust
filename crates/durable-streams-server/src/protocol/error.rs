@@ -54,6 +54,7 @@ impl std::fmt::Display for StorageFailure {
 /// This module defines the HTTP status, problem details, and telemetry for each
 /// variant. Handlers attach request context and operation-specific headers.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Stream not found (404)
     #[error("Stream not found: {0}")]
@@ -66,6 +67,10 @@ pub enum Error {
     /// Invalid offset format (400)
     #[error("Invalid offset format: {0}")]
     InvalidOffset(String),
+
+    /// Replacement would change bytes belonging to fork lineage.
+    #[error("cannot replace a fork or a stream retained by forks")]
+    ReplacementHasForks,
 
     /// Content type mismatch (409)
     #[error("Content type mismatch: expected {expected}, got {actual}")]
@@ -240,6 +245,12 @@ impl Error {
                 "/errors/already-exists",
                 "Stream Already Exists",
                 "ALREADY_EXISTS",
+            ),
+            Self::ReplacementHasForks => ProblemDefinition::new(
+                StatusCode::CONFLICT,
+                "/errors/replacement-has-forks",
+                "Replacement Has Forks",
+                "REPLACEMENT_HAS_FORKS",
             ),
             Self::ContentTypeMismatch { .. } => ProblemDefinition::new(
                 StatusCode::CONFLICT,

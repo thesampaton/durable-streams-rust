@@ -85,6 +85,12 @@ impl From<crate::protocol::error::Error> for ApiError {
         Self::internal("subscription storage operation failed")
     }
 }
+impl From<crate::router::ServerError> for ApiError {
+    fn from(error: crate::router::ServerError) -> Self {
+        tracing::warn!(%error, "subscription initialization failed");
+        Self::internal("subscription initialization failed")
+    }
+}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut error = json!({"code":self.code, "message":self.message});
@@ -95,19 +101,18 @@ impl IntoResponse for ApiError {
     }
 }
 
-struct Service<S> {
+pub(crate) struct Service<S: ?Sized> {
     storage: Arc<S>,
     database: Mutex<Option<Database>>,
     base_path: String,
     allow_local: bool,
 }
 
-pub(crate) fn routes<S: Storage + 'static>(
-    storage: Arc<S>,
+pub(crate) fn initialize(
+    storage: Arc<dyn Storage>,
     config: &Config,
-    shutdown: CancellationToken,
-) -> Router {
-    let service = Arc::new(Service {
+) -> Result<Arc<Service<dyn Storage>>, crate::router::ServerError> {
+    let mut service = Service {
         storage,
         database: Mutex::new(None),
         base_path: config
@@ -116,39 +121,52 @@ pub(crate) fn routes<S: Storage + 'static>(
             .trim_end_matches('/')
             .to_string(),
         allow_local: config.http.allow_insecure_webhooks,
-    });
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::spawn(run(Arc::downgrade(&service), shutdown));
-    }
+    };
+    let mut database = None;
+    service.load(&mut database)?;
+    *service.database.get_mut() = database;
+    Ok(Arc::new(service))
+}
+
+pub(crate) fn routes(service: Arc<Service<dyn Storage>>) -> Router {
     Router::new()
-        .route("/__ds/{*control}", any(api::control::<S>))
+        .route("/__ds/{*control}", any(api::control::<dyn Storage>))
         .route("/__ds", any(|| async { ApiError::missing() }))
         .with_state(service)
 }
 
-impl<S: Storage> Service<S> {
-    fn load(&self, database: &mut Option<Database>) -> ApiResult<()> {
+impl<S: Storage + ?Sized> Service<S> {
+    fn load(&self, database: &mut Option<Database>) -> Result<(), crate::router::ServerError> {
         if database.is_some() {
             return Ok(());
         }
         let db = match self.storage.load_subscription_state()? {
             Some(bytes) => {
-                let db: Database = serde_json::from_slice(&bytes)
-                    .map_err(|_| ApiError::internal("invalid persisted subscription state"))?;
+                let db: Database = serde_json::from_slice(&bytes).map_err(|_| {
+                    crate::router::ServerError::Initialization(
+                        "invalid persisted subscription state".into(),
+                    )
+                })?;
                 if db.version != 1 {
-                    return Err(ApiError::internal("unsupported subscription state version"));
+                    return Err(crate::router::ServerError::Initialization(
+                        "unsupported subscription state version".into(),
+                    ));
                 }
-                crypto::jwk(&db.signing_key)?;
+                crypto::jwk(&db.signing_key)
+                    .map_err(|e| crate::router::ServerError::Initialization(e.message))?;
                 db
             }
             None => Database {
                 version: 1,
-                signing_key: crypto::new_key()?,
+                signing_key: crypto::new_key()
+                    .map_err(|e| crate::router::ServerError::Initialization(e.message))?,
                 subscriptions: BTreeMap::new(),
             },
         };
-        self.storage
-            .save_subscription_state(&serde_json::to_vec(&db).map_err(ApiError::json)?)?;
+        self.storage.save_subscription_state(
+            &serde_json::to_vec(&db)
+                .map_err(|e| crate::router::ServerError::Initialization(e.to_string()))?,
+        )?;
         *database = Some(db);
         Ok(())
     }
@@ -269,7 +287,10 @@ struct Job {
     signature: String,
 }
 
-async fn run<S: Storage + 'static>(weak: Weak<Service<S>>, shutdown: CancellationToken) {
+pub(crate) async fn run<S: Storage + ?Sized + 'static>(
+    weak: Weak<Service<S>>,
+    shutdown: CancellationToken,
+) {
     let mut interval = tokio::time::interval(Duration::from_millis(100));
     let mut jobs: tokio::task::JoinSet<(String, u64, ApiResult<bool>)> =
         tokio::task::JoinSet::new();
@@ -301,18 +322,14 @@ async fn run<S: Storage + 'static>(weak: Weak<Service<S>>, shutdown: Cancellatio
         }
     }
     jobs.abort_all();
+    while jobs.join_next().await.is_some() {}
 }
 
-async fn tick<S: Storage>(
+async fn tick<S: Storage + ?Sized>(
     service: &Service<S>,
     active: &BTreeSet<(String, u64)>,
 ) -> ApiResult<Vec<Job>> {
     let mut guard = service.database.lock().await;
-    // A backend that has never hosted subscriptions need not persist a signing
-    // key or implement control storage merely to serve ordinary stream traffic.
-    if guard.is_none() && service.storage.load_subscription_state()?.is_none() {
-        return Ok(Vec::new());
-    }
     service.load(&mut guard)?;
     let mut db = guard.as_ref().expect("database loaded").clone();
     // Avoid scanning application streams when no subscriptions need reconciliation.
@@ -380,7 +397,10 @@ async fn tick<S: Storage>(
     // may repeat a generation; subscription-level claims still fence workers.
     for (id, generation, stream, event) in pull {
         let bytes = Bytes::from(serde_json::to_vec(&event).map_err(ApiError::json)?);
-        let result = service.storage.append(&stream, bytes, "application/json");
+        let result = service
+            .storage
+            .append(&stream, bytes, "application/json")
+            .map(|result| result.start_offset);
         if let Some(sub) = db.subscriptions.get_mut(&id) {
             if result.is_ok() {
                 if let Some(wake) = &mut sub.wake
@@ -399,7 +419,7 @@ async fn tick<S: Storage>(
     Ok(jobs)
 }
 
-async fn finish<S: Storage>(
+async fn finish<S: Storage + ?Sized>(
     service: &Service<S>,
     id: &str,
     generation: u64,
