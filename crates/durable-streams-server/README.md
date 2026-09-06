@@ -555,3 +555,12 @@ cargo test -p durable-streams-server
 cargo clippy -p durable-streams-server --all-targets
 cargo fmt --all
 ```
+
+### Subscriptions and partial forks
+
+The server supports `Stream-Fork-Sub-Offset` (bytes for non-JSON streams, message
+count for JSON streams), including initial-body creation and independent writer
+state. Subscriptions are mounted under the stream root's reserved `__ds` prefix.
+They support signed webhooks, pull-wake delivery, durable cursors, worker leases,
+and generation fencing. See [the subscription guide](../../docs/subscriptions.md)
+for request examples, persistence, and deployment configuration.

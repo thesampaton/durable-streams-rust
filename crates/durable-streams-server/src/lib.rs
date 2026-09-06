@@ -8,6 +8,7 @@ pub mod router;
 pub mod startup;
 pub mod storage;
 pub mod streams;
+mod subscriptions;
 pub mod transfer;
 
 pub use config::{Config, ConfigLoadOptions, DeploymentProfile, StorageMode};

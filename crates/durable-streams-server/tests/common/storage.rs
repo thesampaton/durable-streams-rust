@@ -196,6 +196,40 @@ impl Storage for TestStorage {
         }
     }
 
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source_name: &str,
+        offset: Option<&Offset>,
+        config: StreamConfig,
+        options: durable_streams_server::storage::ForkOptions,
+    ) -> Result<CreateStreamResult> {
+        match self {
+            Self::Memory(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+            Self::File(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+            Self::Acid(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+        }
+    }
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Memory(inner) => inner.load_subscription_state(),
+            Self::File(inner) => inner.load_subscription_state(),
+            Self::Acid(inner) => inner.load_subscription_state(),
+        }
+    }
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        match self {
+            Self::Memory(inner) => inner.save_subscription_state(state),
+            Self::File(inner) => inner.save_subscription_state(state),
+            Self::Acid(inner) => inner.save_subscription_state(state),
+        }
+    }
     fn create_fork(
         &self,
         name: &str,
