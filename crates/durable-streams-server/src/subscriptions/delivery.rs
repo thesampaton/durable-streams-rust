@@ -118,8 +118,7 @@ pub(super) async fn deliver(
         bytes.extend_from_slice(&chunk);
     }
     Ok(serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .is_some_and(|body| body.get("done") == Some(&Value::Bool(true))))
+        .is_ok_and(|body| body.get("done") == Some(&Value::Bool(true))))
 }
 
 #[cfg(test)]
