@@ -13,7 +13,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -804,21 +804,147 @@ struct LegacyLogPatch {
     rust_log: Option<String>,
 }
 
+impl ConfigPatch {
+    fn from_env(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigLoadError> {
+        let bind_address = get("DS_SERVER__BIND_ADDRESS");
+        let port = if bind_address.is_none() {
+            parse_env(get, "DS_SERVER__PORT")?
+        } else {
+            None
+        };
+        let long_poll_timeout_secs =
+            parse_env(get, "DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS")?;
+        let legacy_long_poll = parse_env(get, "DS_SERVER__LONG_POLL_TIMEOUT_SECS")?;
+        let sse_reconnect_interval_secs =
+            parse_env(get, "DS_TRANSPORT__CONNECTION__SSE_RECONNECT_INTERVAL_SECS")?;
+        let legacy_sse = parse_env(get, "DS_SERVER__SSE_RECONNECT_INTERVAL_SECS")?;
+        let server = ServerConfigPatch {
+            bind_address,
+            port,
+            long_poll_timeout_secs: legacy_long_poll,
+            sse_reconnect_interval_secs: legacy_sse,
+        };
+        let limits = LimitsConfigPatch {
+            max_memory_bytes: parse_env(get, "DS_LIMITS__MAX_MEMORY_BYTES")?,
+            max_stream_bytes: parse_env(get, "DS_LIMITS__MAX_STREAM_BYTES")?,
+            max_request_body_bytes: parse_env(get, "DS_LIMITS__MAX_REQUEST_BODY_BYTES")?,
+            max_stream_name_bytes: parse_env(get, "DS_LIMITS__MAX_STREAM_NAME_BYTES")?,
+            max_stream_name_segments: parse_env(get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS")?,
+            max_storage_jobs: parse_env(get, "DS_LIMITS__MAX_STORAGE_JOBS")?,
+        };
+        let http = HttpConfigPatch {
+            cors_origins: get("DS_HTTP__CORS_ORIGINS"),
+            stream_base_path: get("DS_HTTP__STREAM_BASE_PATH"),
+            allow_insecure_webhooks: parse_env(get, "DS_HTTP__ALLOW_INSECURE_WEBHOOKS")?,
+            allow_wildcard_cors: parse_env(get, "DS_HTTP__ALLOW_WILDCARD_CORS")?,
+        };
+        let admin = AdminConfigPatch {
+            enabled: parse_env(get, "DS_ADMIN__ENABLED")?,
+            base_path: get("DS_ADMIN__BASE_PATH"),
+        };
+        let storage = StorageConfigPatch {
+            mode: parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?,
+            data_dir: get("DS_STORAGE__DATA_DIR"),
+            acid_shard_count: parse_env(get, "DS_STORAGE__ACID_SHARD_COUNT")?,
+            acid_backend: parse_env_with(get, "DS_STORAGE__ACID_BACKEND", parse_acid_backend_env)?,
+        };
+        let transport = TransportConfigPatch::from_env(
+            get,
+            TransportConnectionConfigPatch {
+                long_poll_timeout_secs,
+                sse_reconnect_interval_secs,
+            },
+        )?;
+        let tls = LegacyTlsPatch {
+            cert_path: get("DS_TLS__CERT_PATH"),
+            key_path: get("DS_TLS__KEY_PATH"),
+        };
+        let proxy = ProxyConfigPatch::from_env(get)?;
+        Ok(Self {
+            server,
+            limits,
+            http,
+            admin,
+            storage,
+            transport,
+            proxy,
+            tls,
+            observability: ObservabilityConfigPatch {
+                rust_log: get("DS_OBSERVABILITY__RUST_LOG"),
+            },
+            log: LegacyLogPatch {
+                rust_log: get("DS_LOG__RUST_LOG"),
+            },
+        })
+    }
+}
+
+impl TransportConfigPatch {
+    fn from_env(
+        get: &impl Fn(&str) -> Option<String>,
+        connection: TransportConnectionConfigPatch,
+    ) -> Result<Self, ConfigLoadError> {
+        Ok(Self {
+            mode: parse_env_with(get, "DS_TRANSPORT__MODE", parse_transport_mode_env)?,
+            http: TransportHttpConfigPatch {
+                versions: parse_env_list_with(
+                    get,
+                    "DS_TRANSPORT__HTTP__VERSIONS",
+                    parse_http_version_env,
+                )?,
+            },
+            tls: TransportTlsConfigPatch {
+                cert_path: get("DS_TRANSPORT__TLS__CERT_PATH"),
+                key_path: get("DS_TRANSPORT__TLS__KEY_PATH"),
+                client_ca_path: get("DS_TRANSPORT__TLS__CLIENT_CA_PATH"),
+                min_version: parse_env_with(
+                    get,
+                    "DS_TRANSPORT__TLS__MIN_VERSION",
+                    parse_tls_version_env,
+                )?,
+                max_version: parse_env_with(
+                    get,
+                    "DS_TRANSPORT__TLS__MAX_VERSION",
+                    parse_tls_version_env,
+                )?,
+                alpn_protocols: parse_env_list_with(
+                    get,
+                    "DS_TRANSPORT__TLS__ALPN_PROTOCOLS",
+                    parse_alpn_protocol_env,
+                )?,
+            },
+            connection,
+        })
+    }
+}
+
+impl ProxyConfigPatch {
+    fn from_env(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigLoadError> {
+        Ok(Self {
+            enabled: parse_env(get, "DS_PROXY__ENABLED")?,
+            forwarded_headers: parse_env_with(
+                get,
+                "DS_PROXY__FORWARDED_HEADERS",
+                parse_forwarded_headers_mode_env,
+            )?,
+            trusted_proxies: parse_env_csv_strings(get, "DS_PROXY__TRUSTED_PROXIES")?,
+            identity: ProxyIdentityConfigPatch {
+                mode: parse_env_with(
+                    get,
+                    "DS_PROXY__IDENTITY__MODE",
+                    parse_proxy_identity_mode_env,
+                )?,
+                header_name: get("DS_PROXY__IDENTITY__HEADER_NAME"),
+                require_tls: parse_env(get, "DS_PROXY__IDENTITY__REQUIRE_TLS")?,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeContext {
     explicit_transport_mode: bool,
     legacy_tls_seen: bool,
-}
-
-/// Apply one `parse_env::<T>`-style env override: if the key is set, parse it
-/// and assign the target field. Returns from the enclosing function via `?` if
-/// parsing fails.
-macro_rules! env_parse_into {
-    ($self:expr, $get:expr, $key:literal => $($field:ident).+ : $ty:ty) => {
-        if let Some(__value) = parse_env::<$ty>($get, $key)? {
-            $self . $($field).+ = __value;
-        }
-    };
 }
 
 impl Config {
@@ -1081,188 +1207,7 @@ impl Config {
         get: &impl Fn(&str) -> Option<String>,
         ctx: &mut MergeContext,
     ) -> Result<(), ConfigLoadError> {
-        self.apply_server_env(get)?;
-        self.apply_limits_env(get)?;
-        self.apply_http_env(get)?;
-        self.apply_admin_env(get)?;
-        self.apply_storage_env(get)?;
-        self.apply_transport_env(get, ctx)?;
-        self.apply_proxy_env(get)?;
-
-        if let Some(rust_log) =
-            get("DS_OBSERVABILITY__RUST_LOG").or_else(|| get("DS_LOG__RUST_LOG"))
-        {
-            self.observability.rust_log = rust_log;
-        }
-
-        Ok(())
-    }
-
-    fn apply_server_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(bind_address) = get("DS_SERVER__BIND_ADDRESS") {
-            self.server.bind_address = bind_address;
-        } else if let Some(port) = parse_env::<u16>(get, "DS_SERVER__PORT")? {
-            self.server.bind_address = format!("0.0.0.0:{port}");
-        }
-
-        if let Some(long_poll_timeout_secs) =
-            parse_env::<u64>(get, "DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS")?
-                .or(parse_env::<u64>(get, "DS_SERVER__LONG_POLL_TIMEOUT_SECS")?)
-        {
-            self.transport.connection.long_poll_timeout_secs = long_poll_timeout_secs;
-        }
-
-        if let Some(sse_reconnect_interval_secs) =
-            parse_env::<u64>(get, "DS_TRANSPORT__CONNECTION__SSE_RECONNECT_INTERVAL_SECS")?.or(
-                parse_env::<u64>(get, "DS_SERVER__SSE_RECONNECT_INTERVAL_SECS")?,
-            )
-        {
-            self.transport.connection.sse_reconnect_interval_secs = sse_reconnect_interval_secs;
-        }
-
-        Ok(())
-    }
-
-    fn apply_limits_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_LIMITS__MAX_MEMORY_BYTES" => limits.max_memory_bytes : u64);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_BYTES" => limits.max_stream_bytes : u64);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_REQUEST_BODY_BYTES" => limits.max_request_body_bytes : usize);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_BYTES" => limits.max_stream_name_bytes : usize);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS" => limits.max_stream_name_segments : usize);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STORAGE_JOBS" => limits.max_storage_jobs : usize);
-        Ok(())
-    }
-
-    fn apply_http_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(cors_origins) = get("DS_HTTP__CORS_ORIGINS") {
-            self.http.cors_origins = cors_origins;
-        }
-        if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
-            self.http.stream_base_path = stream_base_path;
-        }
-        env_parse_into!(self, get, "DS_HTTP__ALLOW_INSECURE_WEBHOOKS" => http.allow_insecure_webhooks : bool);
-        env_parse_into!(self, get, "DS_HTTP__ALLOW_WILDCARD_CORS" => http.allow_wildcard_cors : bool);
-        Ok(())
-    }
-
-    fn apply_admin_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_ADMIN__ENABLED" => admin.enabled : bool);
-        if let Some(base_path) = get("DS_ADMIN__BASE_PATH") {
-            self.admin.base_path = base_path;
-        }
-        Ok(())
-    }
-
-    fn apply_storage_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(storage_mode) = parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?
-        {
-            self.storage.mode = storage_mode;
-        }
-        if let Some(data_dir) = get("DS_STORAGE__DATA_DIR") {
-            self.storage.data_dir = data_dir;
-        }
-        env_parse_into!(self, get, "DS_STORAGE__ACID_SHARD_COUNT" => storage.acid_shard_count : usize);
-        if let Some(acid_backend) =
-            parse_env_with(get, "DS_STORAGE__ACID_BACKEND", parse_acid_backend_env)?
-        {
-            self.storage.acid_backend = acid_backend;
-        }
-        Ok(())
-    }
-
-    fn apply_transport_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-        ctx: &mut MergeContext,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(mode) = parse_env_with(get, "DS_TRANSPORT__MODE", parse_transport_mode_env)? {
-            self.transport.mode = mode;
-            ctx.explicit_transport_mode = true;
-        }
-        if let Some(versions) =
-            parse_env_list_with(get, "DS_TRANSPORT__HTTP__VERSIONS", parse_http_version_env)?
-        {
-            self.transport.http.versions = versions;
-            self.transport.tls.alpn_protocols =
-                default_alpn_protocols(&self.transport.http.versions);
-        }
-
-        let tls_cert_path =
-            get("DS_TRANSPORT__TLS__CERT_PATH").or_else(|| get("DS_TLS__CERT_PATH"));
-        let tls_key_path = get("DS_TRANSPORT__TLS__KEY_PATH").or_else(|| get("DS_TLS__KEY_PATH"));
-        if get("DS_TLS__CERT_PATH").is_some() || get("DS_TLS__KEY_PATH").is_some() {
-            ctx.legacy_tls_seen = true;
-        }
-        if let Some(cert_path) = tls_cert_path {
-            self.transport.tls.cert_path = Some(cert_path);
-        }
-        if let Some(key_path) = tls_key_path {
-            self.transport.tls.key_path = Some(key_path);
-        }
-        if let Some(client_ca_path) = get("DS_TRANSPORT__TLS__CLIENT_CA_PATH") {
-            self.transport.tls.client_ca_path = Some(client_ca_path);
-        }
-        if let Some(min_version) =
-            parse_env_with(get, "DS_TRANSPORT__TLS__MIN_VERSION", parse_tls_version_env)?
-        {
-            self.transport.tls.min_version = min_version;
-        }
-        if let Some(max_version) =
-            parse_env_with(get, "DS_TRANSPORT__TLS__MAX_VERSION", parse_tls_version_env)?
-        {
-            self.transport.tls.max_version = max_version;
-        }
-        if let Some(alpn_protocols) = parse_env_list_with(
-            get,
-            "DS_TRANSPORT__TLS__ALPN_PROTOCOLS",
-            parse_alpn_protocol_env,
-        )? {
-            self.transport.tls.alpn_protocols = alpn_protocols;
-        }
-        Ok(())
-    }
-
-    fn apply_proxy_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_PROXY__ENABLED" => proxy.enabled : bool);
-        if let Some(forwarded_headers) = parse_env_with(
-            get,
-            "DS_PROXY__FORWARDED_HEADERS",
-            parse_forwarded_headers_mode_env,
-        )? {
-            self.proxy.forwarded_headers = forwarded_headers;
-        }
-        if let Some(trusted_proxies) = parse_env_csv_strings(get, "DS_PROXY__TRUSTED_PROXIES")? {
-            self.proxy.trusted_proxies = trusted_proxies;
-        }
-        if let Some(mode) = parse_env_with(
-            get,
-            "DS_PROXY__IDENTITY__MODE",
-            parse_proxy_identity_mode_env,
-        )? {
-            self.proxy.identity.mode = mode;
-        }
-        if let Some(header_name) = get("DS_PROXY__IDENTITY__HEADER_NAME") {
-            self.proxy.identity.header_name = Some(header_name);
-        }
-        env_parse_into!(self, get, "DS_PROXY__IDENTITY__REQUIRE_TLS" => proxy.identity.require_tls : bool);
+        self.apply_patch(ConfigPatch::from_env(get)?, ctx);
         Ok(())
     }
 
@@ -1815,68 +1760,45 @@ fn validate_cors_origins(origins: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
-    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*', '?', '#']) {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.into(),
-            reason: "must be a literal URL path without whitespace, parameters, query, or fragment"
-                .into(),
-        });
-    }
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must be a non-empty absolute path".to_string(),
-        });
-    }
-    if !trimmed.starts_with('/') {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must start with '/'".to_string(),
-        });
-    }
-
-    if trimmed != "/" && trimmed.ends_with('/') {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must not end with '/' unless the path is '/'".to_string(),
-        });
-    }
-
-    Ok(())
+    validate_mount_path(raw, true).map_err(|reason| ConfigValidationError::InvalidStreamBasePath {
+        value: raw.to_string(),
+        reason: reason.to_string(),
+    })
 }
 
 fn validate_admin_base_path(raw: &str) -> Result<(), ConfigValidationError> {
+    validate_mount_path(raw, false).map_err(|reason| ConfigValidationError::InvalidAdminBasePath {
+        value: raw.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+fn validate_mount_path(raw: &str, allow_root: bool) -> Result<(), &'static str> {
     if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*', '?', '#']) {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must be a literal path without whitespace, parameters, query, or fragment"
-                .to_string(),
+        return Err(if allow_root {
+            "must be a literal URL path without whitespace, parameters, query, or fragment"
+        } else {
+            "must be a literal path without whitespace, parameters, query, or fragment"
         });
     }
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must be a non-empty absolute path".to_string(),
-        });
+    if raw.is_empty() {
+        return Err("must be a non-empty absolute path");
     }
-    if !trimmed.starts_with('/') {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must start with '/'".to_string(),
-        });
+    if !raw.starts_with('/') {
+        return Err("must start with '/'");
     }
-    if trimmed == "/" {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must not be '/'".to_string(),
-        });
+    if raw == "/" {
+        return if allow_root {
+            Ok(())
+        } else {
+            Err("must not be '/'")
+        };
     }
-    if trimmed.ends_with('/') {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must not end with '/'".to_string(),
+    if raw.ends_with('/') {
+        return Err(if allow_root {
+            "must not end with '/' unless the path is '/'"
+        } else {
+            "must not end with '/'"
         });
     }
     Ok(())
@@ -1971,24 +1893,7 @@ fn validate_proxy(config: &Config) -> Result<(), ConfigValidationError> {
 }
 
 fn valid_ip_or_cidr(raw: &str) -> bool {
-    if raw.parse::<IpAddr>().is_ok() {
-        return true;
-    }
-
-    let Some((address, prefix)) = raw.split_once('/') else {
-        return false;
-    };
-    let Ok(address) = address.parse::<IpAddr>() else {
-        return false;
-    };
-    let Ok(prefix) = prefix.parse::<u8>() else {
-        return false;
-    };
-
-    match address {
-        IpAddr::V4(_) => prefix <= 32,
-        IpAddr::V6(_) => prefix <= 128,
-    }
+    crate::middleware::proxy_trust::PeerEntry::parse(raw).is_some()
 }
 
 #[cfg(test)]
@@ -2009,7 +1914,10 @@ mod tests {
         config.apply_limits_patch(&patch.limits);
         assert_eq!(config.limits.max_storage_jobs, 3);
         config
-            .apply_limits_env(&lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "2")]))
+            .apply_env_overrides(
+                &lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "2")]),
+                &mut MergeContext::default(),
+            )
             .unwrap();
         assert_eq!(config.limits.max_storage_jobs, 2);
         assert_eq!(
@@ -2030,9 +1938,50 @@ mod tests {
         }
         assert!(
             config
-                .apply_limits_env(&lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "invalid")]))
+                .apply_env_overrides(
+                    &lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "invalid")]),
+                    &mut MergeContext::default(),
+                )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn environment_patch_preserves_legacy_precedence_and_errors() {
+        let get = lookup(&[
+            ("DS_SERVER__BIND_ADDRESS", "127.0.0.1:1234"),
+            ("DS_SERVER__PORT", "invalid"),
+            ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "7"),
+            ("DS_SERVER__LONG_POLL_TIMEOUT_SECS", "3"),
+            ("DS_TRANSPORT__TLS__CERT_PATH", "modern.pem"),
+            ("DS_TLS__CERT_PATH", "legacy.pem"),
+            ("DS_TLS__KEY_PATH", "key.pem"),
+            ("DS_TRANSPORT__HTTP__VERSIONS", "h2"),
+        ]);
+        let mut config = Config::default();
+        let mut context = MergeContext::default();
+        config.apply_env_overrides(&get, &mut context).unwrap();
+        context.finalize(&mut config);
+        assert_eq!(config.server.bind_address, "127.0.0.1:1234");
+        assert_eq!(config.transport.connection.long_poll_timeout_secs, 7);
+        assert_eq!(
+            config.transport.tls.cert_path.as_deref(),
+            Some("modern.pem")
+        );
+        assert_eq!(config.transport.mode, TransportMode::Tls);
+        assert_eq!(config.transport.tls.alpn_protocols, vec![AlpnProtocol::H2]);
+        let error = ConfigPatch::from_env(&lookup(&[
+            ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "7"),
+            ("DS_SERVER__LONG_POLL_TIMEOUT_SECS", "invalid"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigLoadError::InvalidValue {
+                key: "DS_SERVER__LONG_POLL_TIMEOUT_SECS",
+                ..
+            }
+        ));
     }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {

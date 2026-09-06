@@ -38,9 +38,26 @@ pub(crate) struct TrustedPeers {
 }
 
 #[derive(Debug, Clone)]
-enum PeerEntry {
+pub(crate) enum PeerEntry {
     Exact(IpAddr),
     Cidr { network: IpAddr, prefix_len: u8 },
+}
+
+impl PeerEntry {
+    /// Use the same syntax and prefix bounds for configuration and matching.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        if let Ok(ip) = raw.parse::<IpAddr>() {
+            return Some(Self::Exact(ip));
+        }
+        let (address, prefix) = raw.split_once('/')?;
+        let network = address.parse::<IpAddr>().ok()?;
+        let prefix_len = prefix.parse::<u8>().ok()?;
+        let max_prefix = if network.is_ipv4() { 32 } else { 128 };
+        (prefix_len <= max_prefix).then_some(Self::Cidr {
+            network,
+            prefix_len,
+        })
+    }
 }
 
 impl TrustedPeers {
@@ -53,17 +70,8 @@ impl TrustedPeers {
         let entries = trusted_proxies
             .iter()
             .filter_map(|raw| {
-                if let Ok(ip) = raw.parse::<IpAddr>() {
-                    return Some(PeerEntry::Exact(ip));
-                }
-                if let Some((addr_part, prefix_part)) = raw.split_once('/')
-                    && let (Ok(ip), Ok(prefix)) =
-                        (addr_part.parse::<IpAddr>(), prefix_part.parse::<u8>())
-                {
-                    return Some(PeerEntry::Cidr {
-                        network: ip,
-                        prefix_len: prefix,
-                    });
+                if let Some(entry) = PeerEntry::parse(raw) {
+                    return Some(entry);
                 }
                 tracing::warn!(entry = raw, "skipping unparseable trusted_proxies entry");
                 None

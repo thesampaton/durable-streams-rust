@@ -95,7 +95,7 @@ enum ConflictArg {
     Skip,
     /// Fail if any stream already exists
     Fail,
-    /// Delete and recreate existing streams
+    /// Atomically replace independent root streams
     Replace,
 }
 
@@ -262,15 +262,19 @@ fn build_acid_storage(config: &Config) -> Result<AcidStorage, String> {
     Ok(storage)
 }
 
+fn build_storage(config: &Config) -> Result<Arc<dyn Storage>, String> {
+    match config.storage.mode {
+        StorageMode::Memory => Ok(Arc::new(build_in_memory_storage(config))),
+        StorageMode::File => Ok(Arc::new(build_file_storage(config)?)),
+        StorageMode::Acid => Ok(Arc::new(build_acid_storage(config)?)),
+    }
+}
+
 fn run_with_storage<F>(config: &Config, f: F) -> Result<(), String>
 where
     F: FnOnce(&dyn Storage) -> Result<(), String>,
 {
-    match config.storage.mode {
-        StorageMode::Memory => f(&build_in_memory_storage(config)),
-        StorageMode::File => f(&build_file_storage(config)?),
-        StorageMode::Acid => f(&build_acid_storage(config)?),
-    }
+    f(build_storage(config)?.as_ref())
 }
 
 // ── List command ────────────────────────────────────────────────────
@@ -284,28 +288,15 @@ fn run_list_local(config: &Config, json: bool) -> Result<(), String> {
                 .to_string(),
         );
     }
-    match config.storage.mode {
-        StorageMode::Memory => Err(
-            "cannot list local streams for storage.mode='memory': in-memory storage is process-local and has no durable state to inspect; use file or acid storage, or pass --url to query an explicitly enabled admin endpoint"
-                .to_string(),
-        ),
-        StorageMode::File => {
-            let service = StreamService::new(Arc::new(build_file_storage(config)?));
-            let entries = service
-                .list_entries()
-                .map_err(|e| format!("failed to list streams: {e}"))?;
-            print_stream_entries(&entries, json);
-            Ok(())
-        }
-        StorageMode::Acid => {
-            let service = StreamService::new(Arc::new(build_acid_storage(config)?));
-            let entries = service
-                .list_entries()
-                .map_err(|e| format!("failed to list streams: {e}"))?;
-            print_stream_entries(&entries, json);
-            Ok(())
-        }
+    if config.storage.mode == StorageMode::Memory {
+        return Err("cannot list local streams for storage.mode='memory': in-memory storage is process-local and has no durable state to inspect; use file or acid storage, or pass --url to query an explicitly enabled admin endpoint".to_string());
     }
+    let service = StreamService::new(build_storage(config)?);
+    let entries = service
+        .list_entries()
+        .map_err(|e| format!("failed to list streams: {e}"))?;
+    print_stream_entries(&entries, json);
+    Ok(())
 }
 
 async fn run_list_http(list_url: &str, json: bool) -> Result<(), String> {
@@ -503,28 +494,14 @@ fn run_import(
 async fn run_serve(config: Config, profile: &DeploymentProfile) -> Result<(), StartupError> {
     let runtime = AppRuntime::new(config, profile)?;
 
-    let serve_result = match runtime.config.storage.mode {
-        StorageMode::Memory => {
-            serve(Arc::new(build_in_memory_storage(&runtime.config)), &runtime).await
-        }
-        StorageMode::File => {
-            let storage = build_file_storage(&runtime.config).map_err(StartupError::runtime)?;
-            serve(Arc::new(storage), &runtime).await
-        }
-        StorageMode::Acid => {
-            let storage = build_acid_storage(&runtime.config).map_err(StartupError::runtime)?;
-            serve(Arc::new(storage), &runtime).await
-        }
-    };
+    let storage = build_storage(&runtime.config).map_err(StartupError::runtime)?;
+    let serve_result = serve(storage, &runtime).await;
 
     AppRuntime::cleanup();
     serve_result
 }
 
-async fn serve<S: Storage + 'static>(
-    storage: Arc<S>,
-    runtime: &AppRuntime,
-) -> Result<(), StartupError> {
+async fn serve(storage: Arc<dyn Storage>, runtime: &AppRuntime) -> Result<(), StartupError> {
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = CancellationToken::new();
     let server = durable_streams_server::Server::new(

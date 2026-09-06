@@ -270,7 +270,7 @@ pub fn build_tls_server_config(config: &Config) -> Result<rustls::ServerConfig, 
     );
 
     // ── Certificate chain and private key ──────────────────────────
-    let certs = load_pem_certs(cert_path)?;
+    let certs = load_pem_certs(cert_path, "server")?;
     let key = load_pem_private_key(key_path)?;
 
     // ── Build ServerConfig with or without client verification ─────
@@ -331,18 +331,23 @@ fn tls_protocol_versions(
 /// Load PEM certificate chain from a file path.
 fn load_pem_certs(
     path: &str,
+    role: &str,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, StartupError> {
     let data = std::fs::read(path).map_err(|e| {
-        StartupError::tls_context(format!("failed to read cert file '{path}': {e}"))
+        StartupError::tls_context(format!(
+            "failed to read {role} certificate file '{path}': {e}"
+        ))
     })?;
     let certs: Vec<_> = rustls_pemfile::certs(&mut data.as_slice())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
-            StartupError::tls_context(format!("failed to parse PEM certs from '{path}': {e}"))
+            StartupError::tls_context(format!(
+                "failed to parse PEM {role} certificates from '{path}': {e}"
+            ))
         })?;
     if certs.is_empty() {
         return Err(StartupError::tls_context(format!(
-            "no certificates found in '{path}'"
+            "no {role} certificates found in '{path}'"
         )));
     }
     Ok(certs)
@@ -363,18 +368,7 @@ fn load_pem_private_key(
 
 /// Load a root certificate store from a PEM CA bundle.
 fn load_root_store(path: &str) -> Result<RootCertStore, StartupError> {
-    let data = std::fs::read(path)
-        .map_err(|e| StartupError::tls_context(format!("failed to read CA file '{path}': {e}")))?;
-    let certs: Vec<_> = rustls_pemfile::certs(&mut data.as_slice())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            StartupError::tls_context(format!("failed to parse PEM CA certs from '{path}': {e}"))
-        })?;
-    if certs.is_empty() {
-        return Err(StartupError::tls_context(format!(
-            "no CA certificates found in '{path}'"
-        )));
-    }
+    let certs = load_pem_certs(path, "CA")?;
     let mut store = RootCertStore::empty();
     for cert in certs {
         store.add(cert).map_err(|e| {

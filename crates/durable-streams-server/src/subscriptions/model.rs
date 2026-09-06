@@ -102,10 +102,8 @@ pub(super) fn validate_path(path: &str) -> ApiResult<()> {
     if path.is_empty()
         || path.len() > 1024
         || path.split('/').count() > 64
-        || path
-            .split('/')
-            .any(|s| s.is_empty() || s == "." || s == "..")
-        || path.split('/').next() == Some("__ds")
+        || crate::protocol::stream_name::invalid_segment(path).is_some()
+        || crate::protocol::stream_name::is_reserved(path)
         || path.chars().any(char::is_control)
     {
         return Err(ApiError::bad(
