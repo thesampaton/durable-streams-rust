@@ -262,8 +262,8 @@ pub durable_streams_server::protocol::error::Error::StreamPathBlocked(alloc::str
 pub durable_streams_server::protocol::error::Error::StreamSizeLimitExceeded
 pub durable_streams_server::protocol::error::Error::Unavailable(durable_streams_server::protocol::error::StorageFailure)
 impl durable_streams_server::protocol::error::Error
-pub fn durable_streams_server::protocol::error::Error::classify_io_failure(backend: &'static str, operation: impl core::convert::Into<alloc::string::String>, detail: impl core::convert::Into<alloc::string::String>, error: &std::io::error::Error) -> Self
-pub fn durable_streams_server::protocol::error::Error::is_retryable_io_error(error: &std::io::error::Error) -> bool
+pub fn durable_streams_server::protocol::error::Error::classify_io_failure(backend: &'static str, operation: impl core::convert::Into<alloc::string::String>, detail: impl core::convert::Into<alloc::string::String>, error: &core::io::error::Error) -> Self
+pub fn durable_streams_server::protocol::error::Error::is_retryable_io_error(error: &core::io::error::Error) -> bool
 pub fn durable_streams_server::protocol::error::Error::status_code(&self) -> http::status::StatusCode
 pub fn durable_streams_server::protocol::error::Error::storage_insufficient(backend: &'static str, operation: impl core::convert::Into<alloc::string::String>, detail: impl core::convert::Into<alloc::string::String>) -> Self
 pub fn durable_streams_server::protocol::error::Error::storage_unavailable(backend: &'static str, operation: impl core::convert::Into<alloc::string::String>, detail: impl core::convert::Into<alloc::string::String>) -> Self
@@ -397,7 +397,7 @@ pub mod durable_streams_server::startup
 #[non_exhaustive] pub enum durable_streams_server::startup::StartupErrorKind
 pub durable_streams_server::startup::StartupErrorKind::Bind
 pub durable_streams_server::startup::StartupErrorKind::Bind::addr: core::net::socket_addr::SocketAddr
-pub durable_streams_server::startup::StartupErrorKind::Bind::source: std::io::error::Error
+pub durable_streams_server::startup::StartupErrorKind::Bind::source: core::io::error::Error
 pub durable_streams_server::startup::StartupErrorKind::ConfigLoad(durable_streams_server::config::ConfigLoadError)
 pub durable_streams_server::startup::StartupErrorKind::ConfigValidation(durable_streams_server::config::ConfigValidationError)
 pub durable_streams_server::startup::StartupErrorKind::Runtime(alloc::string::String)
@@ -428,7 +428,7 @@ pub struct durable_streams_server::startup::StartupError
 pub durable_streams_server::startup::StartupError::kind: durable_streams_server::startup::StartupErrorKind
 pub durable_streams_server::startup::StartupError::phase: durable_streams_server::startup::StartupPhase
 impl durable_streams_server::startup::StartupError
-pub fn durable_streams_server::startup::StartupError::bind(addr: core::net::socket_addr::SocketAddr, source: std::io::error::Error) -> Self
+pub fn durable_streams_server::startup::StartupError::bind(addr: core::net::socket_addr::SocketAddr, source: core::io::error::Error) -> Self
 pub fn durable_streams_server::startup::StartupError::config_load(source: durable_streams_server::config::ConfigLoadError) -> Self
 pub fn durable_streams_server::startup::StartupError::config_validation(source: durable_streams_server::config::ConfigValidationError) -> Self
 pub fn durable_streams_server::startup::StartupError::runtime(message: impl core::convert::Into<alloc::string::String>) -> Self
@@ -708,7 +708,7 @@ pub durable_streams_server::transfer::export::ExportOptions::stream_names: alloc
 pub struct durable_streams_server::transfer::export::ExportStats
 pub durable_streams_server::transfer::export::ExportStats::messages_exported: usize
 pub durable_streams_server::transfer::export::ExportStats::streams_exported: usize
-pub fn durable_streams_server::transfer::export::export_streams<W: std::io::Write>(storage: &dyn durable_streams_server::storage::Storage, options: &durable_streams_server::transfer::export::ExportOptions, writer: W) -> core::result::Result<durable_streams_server::transfer::export::ExportStats, durable_streams_server::transfer::TransferError>
+pub fn durable_streams_server::transfer::export::export_streams<W: core::io::write::Write>(storage: &dyn durable_streams_server::storage::Storage, options: &durable_streams_server::transfer::export::ExportOptions, writer: W) -> core::result::Result<durable_streams_server::transfer::export::ExportStats, durable_streams_server::transfer::TransferError>
 pub mod durable_streams_server::transfer::format
 pub struct durable_streams_server::transfer::format::ExportDocument
 pub durable_streams_server::transfer::format::ExportDocument::exported_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
@@ -740,12 +740,12 @@ pub struct durable_streams_server::transfer::import::ImportStats
 pub durable_streams_server::transfer::import::ImportStats::messages_imported: usize
 pub durable_streams_server::transfer::import::ImportStats::streams_imported: usize
 pub durable_streams_server::transfer::import::ImportStats::streams_skipped: usize
-pub fn durable_streams_server::transfer::import::import_streams<R: std::io::Read>(storage: &dyn durable_streams_server::storage::Storage, reader: R, options: &durable_streams_server::transfer::import::ImportOptions) -> core::result::Result<durable_streams_server::transfer::import::ImportStats, durable_streams_server::transfer::TransferError>
+pub fn durable_streams_server::transfer::import::import_streams<R: alloc::io::read::Read>(storage: &dyn durable_streams_server::storage::Storage, reader: R, options: &durable_streams_server::transfer::import::ImportOptions) -> core::result::Result<durable_streams_server::transfer::import::ImportStats, durable_streams_server::transfer::TransferError>
 #[non_exhaustive] pub enum durable_streams_server::transfer::TransferError
 pub durable_streams_server::transfer::TransferError::Base64(base64::decode::DecodeError)
 pub durable_streams_server::transfer::TransferError::Conflict(alloc::string::String)
 pub durable_streams_server::transfer::TransferError::InvalidDocument(alloc::string::String)
-pub durable_streams_server::transfer::TransferError::Io(std::io::error::Error)
+pub durable_streams_server::transfer::TransferError::Io(core::io::error::Error)
 pub durable_streams_server::transfer::TransferError::Json(serde_json::error::Error)
 pub durable_streams_server::transfer::TransferError::PartialImport
 pub durable_streams_server::transfer::TransferError::PartialImport::completed: durable_streams_server::transfer::import::ImportStats

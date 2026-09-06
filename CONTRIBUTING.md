@@ -63,7 +63,15 @@ and dead-code allowances. Server tests allow `unwrap` locally because a failed
 setup or assertion should fail the test; production code retains the lint.
 
 For public API changes, inspect the rustdoc and run
-`./scripts/check-server-public-api.sh` with the installed nightly toolchain.
+`./scripts/check-server-public-api.sh`. Install its pinned compiler first:
+
+```bash
+rustup toolchain install "$(cat crates/durable-streams-server/tests/public-api-toolchain.txt)" --profile minimal
+```
+
+The script, extraction test, PR workflow, and release workflow use that same pin.
+Compiler updates can change rustdoc's standard-library paths without changing
+our API, so update the pin and reviewed snapshot together.
 The snapshot also runs in the required PR checks. Review snapshot changes as
 compatibility changes, rather than accepting a new snapshot solely to make the
 test pass. For protocol changes, also run the

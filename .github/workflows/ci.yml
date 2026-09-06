@@ -101,7 +101,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Read API snapshot toolchain
+        id: api-toolchain
+        run: echo "toolchain=$(cat crates/durable-streams-server/tests/public-api-toolchain.txt)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.api-toolchain.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-server-public-api.sh
 
