@@ -60,6 +60,12 @@ Verified on **2026-09-06**:
   with RFC 9457 problem code `UNAVAILABLE` plus `Retry-After`, even when the
   upstream protocol text only standardises the problem shape rather than a full
   storage-failure taxonomy.
+- The same local `503`/`UNAVAILABLE` extension covers a full or closed server
+  storage-execution boundary, with `Retry-After: 1`. Shutdown rejects new
+  catch-up reads as well as writes, while admitted jobs drain. Existing idle
+  long-polls retain their last empty snapshot's concrete resume offset on
+  shutdown; normal timeout rereads deliver data that arrived before responding.
+  Subscription admission failures retain the separate control error envelope.
 - Request telemetry field names intentionally mirror OpenTelemetry semantic
   conventions and Elastic-style dotted keys through `tracing`, so they can be
   mapped cleanly into a future OpenTelemetry exporter without renaming the
@@ -149,3 +155,29 @@ Validation used Rust 1.94.1 and Node 20.16.0:
 - New regressions cover rejected retired configuration names, initial stream
   and fork data after reopen, and capacity release after an initial sync error.
   These checks do not establish power-loss guarantees for creation/deletion.
+
+### 2026-09-06 bounded storage execution integration
+
+The production server now uses the [bounded execution contract](design/blocking-execution-boundary.md)
+for HTTP storage operations and subscription persistence. Protocol and
+conformance pins, storage formats, and the synchronous storage/service APIs are
+unchanged. The public API adds only the job limit and its typed validation error.
+
+Validation used Rust 1.94.1 and Node 20.20.2:
+
+- Workspace tests: 683 passed, zero failed. The nightly API snapshot was ignored
+  there and passed separately with `nightly-2026-09-06`, after reviewing its two
+  added lines.
+- Formatting, workspace all-target check, strict server Clippy, advisory client
+  Clippy, and rustdoc with warnings denied passed. Generated API documentation
+  was inspected for the job limit, runtime ownership and shutdown contract.
+- Server conformance 0.3.6: all 338 tests passed independently on memory, file,
+  ACID memory and ACID file, using fresh data directories and separate ports,
+  without competing test load.
+- New regressions cover queued and detached job ownership, admission/close races,
+  storage lease retention, retried/concurrent shutdown and worker failure,
+  responsive probes under blocked file I/O, rejected routes without mutation,
+  durable final append/close, subscription save/cache continuity and bounded
+  pending webhook results, plus resumable SSE and long-poll timeout behavior.
+- Local links in the changed Markdown documents resolved. No throughput
+  benchmark or object-storage implementation is part of this integration.

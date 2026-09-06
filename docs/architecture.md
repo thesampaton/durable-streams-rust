@@ -26,6 +26,15 @@ Tokio is required. `start` creates one worker; `RunningServer` exposes cloneable
 route groups and cancellation with awaited completion. A storage instance has
 one independent server owner. Route clones retain that owner and share state.
 
+The private `execution` module owns admission, the captured Tokio runtime,
+completion tracking and detached error reporting. Its async stream adapter serves
+all HTTP storage paths; subscription control and the private `subscriptions/worker`
+scheduler share the same job budget. Subscription transactions acquire their
+synchronous database lock inside admitted jobs, keeping persistence and cached
+state together. Network delivery and live waits remain async. Server shutdown
+closes admission and drains jobs even after caller disconnect or worker failure.
+See the [execution contract](design/blocking-execution-boundary.md).
+
 `protocol/error.rs` defines the exhaustive domain-error response mapping.
 `protocol/problem.rs` owns the RFC 9457 payload and response helpers. Handlers
 attach request context and operation-specific headers. Subscription control

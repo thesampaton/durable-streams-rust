@@ -22,14 +22,16 @@ initialization. `start` returns an error outside Tokio.
 
 Clone `running` or `app` for additional listeners. Do not independently construct
 a second server around the same storage `Arc`: construction rejects that owner.
-The ownership guard remains alive until both routers/handles and the worker are
-gone. Distinct wrappers over the same physical database remain subject to the
+The ownership guard remains alive while routers/handles, the worker, or admitted
+storage jobs retain it. Distinct wrappers over the same physical database remain subject to the
 backend's ownership rules; pointer identity cannot detect those aliases.
 
 For shutdown, stop accepting requests, cancel the external token to release live
 reads, drain the listener, and call `running.shutdown().await`. The method cancels
-and joins the subscription worker and its delivery tasks. Dropping the last
-handle/router initiates cancellation but cannot await it. The server uses a
+and joins the subscription worker and its delivery tasks, then drains admitted
+storage jobs even after worker failure. Keep Tokio alive until the drain completes.
+Dropping the last handle/router closes admission and initiates cancellation but
+cannot await it. The server uses a
 child of a supplied cancellation token, so its own shutdown does not cancel
 unrelated users of that token.
 
@@ -149,10 +151,22 @@ full backup of the old log; normal append records only its original length.
 These commits sync their journal, log, metadata, and directory before returning;
 no throughput improvement is claimed.
 
-Storage and `StreamService` remain synchronous. The proposed execution boundary
-for HTTP/background callers is a [separate design review with a runnable
-example](../design/blocking-execution-boundary.md), following the correctness
-and API work above.
+Storage and `StreamService` remain synchronous for direct Rust callers. HTTP
+handlers and subscription persistence now use [bounded execution](../design/blocking-execution-boundary.md),
+with `limits.max_storage_jobs` / `DS_LIMITS__MAX_STORAGE_JOBS` defaulting to 64.
+This counts queued plus running jobs across all listeners and background work.
+Saturation returns 503 with `Retry-After: 1`; no storage mutation has been admitted
+for that rejection. An already accepted write keeps its slot after disconnect
+and may commit without a response. Producer deduplication remains necessary for
+identified retries. Direct synchronous calls are outside admission/drain accounting.
+
+Unexpected storage-job panics are logged and close admission for that server owner.
+Already admitted work is drained; recovery uses the backend's normal reopen path.
+A successful shutdown means jobs ended, not that every operation succeeded.
+The existing constructors and synchronous trait remain source-compatible; the
+limit and its typed validation error are additive configuration API changes.
+The [optional object-storage direction](../design/object-storage-direction.md)
+records future compatibility constraints without changing the current API.
 
 ## Legacy transport configuration
 

@@ -24,10 +24,12 @@ persistence limits. The file backend now has one synced mode (`file`);
 replacement requires capacity for old and new payloads. Uncertain final-sync
 outcomes require recovery and do not prove a write was absent.
 
-Blocking execution is intentionally left as a
-[proposal and runnable demonstration](../design/blocking-execution-boundary.md)
-for review after the other server changes. Production callers still execute
-synchronous storage directly. Client findings C1–C3 remain outside this server
+Blocking execution now has a
+[production contract and regression tests](../design/blocking-execution-boundary.md).
+HTTP and subscription storage work use the shared boundary; direct synchronous
+Rust calls retain their caller-owned execution. The [upstream comparison](2026-09-06-upstream-rust-comparison.md)
+places this first, with optional object storage recorded as a future direction.
+Client findings C1–C3 remain outside this server
 implementation. The findings and line references below remain the historical
 review of `3481acf`, not a description of the updated working tree.
 
