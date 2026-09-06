@@ -174,6 +174,7 @@ pub durable_streams_server::config::ConfigLoadOptions::profile: durable_streams_
 impl core::default::Default for durable_streams_server::config::ConfigLoadOptions
 pub fn durable_streams_server::config::ConfigLoadOptions::default() -> Self
 pub struct durable_streams_server::config::HttpConfig
+pub durable_streams_server::config::HttpConfig::allow_insecure_webhooks: bool
 pub durable_streams_server::config::HttpConfig::allow_wildcard_cors: bool
 pub durable_streams_server::config::HttpConfig::cors_origins: alloc::string::String
 pub durable_streams_server::config::HttpConfig::stream_base_path: alloc::string::String
@@ -368,10 +369,13 @@ pub durable_streams_server::protocol::producer::ProducerHeaders::id: alloc::stri
 pub durable_streams_server::protocol::producer::ProducerHeaders::seq: u64
 pub fn durable_streams_server::protocol::producer::parse_producer_headers(headers: &http::header::map::HeaderMap) -> durable_streams_server::protocol::error::Result<core::option::Option<durable_streams_server::protocol::producer::ProducerHeaders>>
 pub mod durable_streams_server::router
+pub struct durable_streams_server::router::RouterOptions
+impl durable_streams_server::router::RouterOptions
+pub fn durable_streams_server::router::RouterOptions::with_readiness(self, ready: alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> Self
+pub fn durable_streams_server::router::RouterOptions::with_shutdown(self, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> Self
 pub struct durable_streams_server::router::ShutdownToken(pub tokio_util::sync::cancellation_token::CancellationToken)
 pub const durable_streams_server::router::DEFAULT_STREAM_BASE_PATH: &str
-pub fn durable_streams_server::router::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config) -> axum::routing::Router
-pub fn durable_streams_server::router::build_router_with_ready<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, ready: core::option::Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> axum::routing::Router
+pub fn durable_streams_server::router::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, options: durable_streams_server::router::RouterOptions) -> axum::routing::Router
 pub mod durable_streams_server::startup
 pub enum durable_streams_server::startup::StartupErrorKind
 pub durable_streams_server::startup::StartupErrorKind::Bind
@@ -434,13 +438,16 @@ pub fn durable_streams_server::storage::acid::AcidStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::acid::AcidStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::acid::AcidStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::acid::AcidStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::acid::AcidStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub mod durable_streams_server::storage::file
 pub struct durable_streams_server::storage::file::FileStorage
@@ -454,13 +461,16 @@ pub fn durable_streams_server::storage::file::FileStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::file::FileStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::file::FileStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::file::FileStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::file::FileStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::file::FileStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::file::FileStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::file::FileStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::file::FileStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::file::FileStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub mod durable_streams_server::storage::memory
 pub struct durable_streams_server::storage::memory::InMemoryStorage
@@ -474,13 +484,16 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::batch_append(&s
 pub fn durable_streams_server::storage::memory::InMemoryStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::memory::InMemoryStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::memory::InMemoryStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub enum durable_streams_server::storage::CreateStreamResult
 pub durable_streams_server::storage::CreateStreamResult::AlreadyExists
@@ -506,6 +519,11 @@ pub durable_streams_server::storage::CreateWithDataResult::status: durable_strea
 pub struct durable_streams_server::storage::ForkInfo
 pub durable_streams_server::storage::ForkInfo::fork_offset: durable_streams_server::protocol::offset::Offset
 pub durable_streams_server::storage::ForkInfo::source_name: alloc::string::String
+pub durable_streams_server::storage::ForkInfo::sub_offset: u64
+pub struct durable_streams_server::storage::ForkOptions
+pub durable_streams_server::storage::ForkOptions::inherit_content_type: bool
+pub durable_streams_server::storage::ForkOptions::initial_body: bytes::bytes::Bytes
+pub durable_streams_server::storage::ForkOptions::sub_offset: u64
 pub struct durable_streams_server::storage::Message
 pub durable_streams_server::storage::Message::byte_len: u64
 pub durable_streams_server::storage::Message::data: bytes::bytes::Bytes
@@ -536,13 +554,16 @@ pub fn durable_streams_server::storage::Storage::batch_append(&self, name: &str,
 pub fn durable_streams_server::storage::Storage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::Storage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::Storage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::Storage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::Storage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::Storage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::Storage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::Storage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::Storage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::Storage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::Storage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::Storage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::Storage::save_subscription_state(&self, _state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::Storage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::acid::AcidStorage
 pub fn durable_streams_server::storage::acid::AcidStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -551,13 +572,16 @@ pub fn durable_streams_server::storage::acid::AcidStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::acid::AcidStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::acid::AcidStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::acid::AcidStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::acid::AcidStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::file::FileStorage
 pub fn durable_streams_server::storage::file::FileStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -566,13 +590,16 @@ pub fn durable_streams_server::storage::file::FileStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::file::FileStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::file::FileStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::file::FileStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::file::FileStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::file::FileStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::file::FileStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::file::FileStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::file::FileStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::file::FileStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::memory::InMemoryStorage
 pub fn durable_streams_server::storage::memory::InMemoryStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -581,13 +608,16 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::batch_append(&s
 pub fn durable_streams_server::storage::memory::InMemoryStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::memory::InMemoryStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::memory::InMemoryStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub type durable_streams_server::storage::StreamMetadata = durable_streams_server::streams::StreamMetadata
 pub mod durable_streams_server::streams
@@ -702,13 +732,16 @@ pub fn durable_streams_server::storage::acid::AcidStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::acid::AcidStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::acid::AcidStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::acid::AcidStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::acid::AcidStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub struct durable_streams_server::Config
 pub durable_streams_server::Config::admin: durable_streams_server::config::AdminConfig
@@ -748,13 +781,16 @@ pub fn durable_streams_server::storage::file::FileStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::file::FileStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::file::FileStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::file::FileStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::file::FileStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::file::FileStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::file::FileStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::file::FileStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::file::FileStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::file::FileStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub struct durable_streams_server::InMemoryStorage
 impl durable_streams_server::storage::memory::InMemoryStorage
@@ -767,14 +803,21 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::batch_append(&s
 pub fn durable_streams_server::storage::memory::InMemoryStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::memory::InMemoryStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::memory::InMemoryStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
+pub struct durable_streams_server::RouterOptions
+impl durable_streams_server::router::RouterOptions
+pub fn durable_streams_server::router::RouterOptions::with_readiness(self, ready: alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> Self
+pub fn durable_streams_server::router::RouterOptions::with_shutdown(self, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> Self
 pub struct durable_streams_server::ShutdownToken(pub tokio_util::sync::cancellation_token::CancellationToken)
 pub const durable_streams_server::DEFAULT_STREAM_BASE_PATH: &str
 pub trait durable_streams_server::Storage: core::marker::Send + core::marker::Sync
@@ -784,13 +827,16 @@ pub fn durable_streams_server::Storage::batch_append(&self, name: &str, messages
 pub fn durable_streams_server::Storage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::Storage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::Storage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::Storage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::Storage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::Storage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::Storage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::Storage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::Storage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::Storage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::Storage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::Storage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::Storage::save_subscription_state(&self, _state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::Storage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::acid::AcidStorage
 pub fn durable_streams_server::storage::acid::AcidStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -799,13 +845,16 @@ pub fn durable_streams_server::storage::acid::AcidStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::acid::AcidStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::acid::AcidStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::acid::AcidStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::acid::AcidStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::acid::AcidStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::file::FileStorage
 pub fn durable_streams_server::storage::file::FileStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -814,13 +863,16 @@ pub fn durable_streams_server::storage::file::FileStorage::batch_append(&self, n
 pub fn durable_streams_server::storage::file::FileStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::file::FileStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::file::FileStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::file::FileStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::file::FileStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::file::FileStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::file::FileStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::file::FileStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::file::FileStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::file::FileStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::file::FileStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 impl durable_streams_server::storage::Storage for durable_streams_server::storage::memory::InMemoryStorage
 pub fn durable_streams_server::storage::memory::InMemoryStorage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
@@ -829,13 +881,15 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::batch_append(&s
 pub fn durable_streams_server::storage::memory::InMemoryStorage::cleanup_expired_streams(&self) -> usize
 pub fn durable_streams_server::storage::memory::InMemoryStorage::close_stream(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::create_fork_with_options(&self, name: &str, source_name: &str, fork_offset: core::option::Option<&durable_streams_server::protocol::offset::Offset>, config: durable_streams_server::storage::StreamConfig, options: durable_streams_server::storage::ForkOptions) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream(&self, name: &str, config: durable_streams_server::storage::StreamConfig) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateStreamResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::create_stream_with_data(&self, name: &str, config: durable_streams_server::storage::StreamConfig, messages: alloc::vec::Vec<bytes::bytes::Bytes>, should_close: bool) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::CreateWithDataResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::delete(&self, name: &str) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::exists(&self, name: &str) -> bool
 pub fn durable_streams_server::storage::memory::InMemoryStorage::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::StreamMetadata>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscription_state(&self) -> durable_streams_server::protocol::error::Result<core::option::Option<alloc::vec::Vec<u8>>>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
+pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
-pub fn durable_streams_server::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config) -> axum::routing::Router
-pub fn durable_streams_server::build_router_with_ready<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, ready: core::option::Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> axum::routing::Router
+pub fn durable_streams_server::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, options: durable_streams_server::router::RouterOptions) -> axum::routing::Router

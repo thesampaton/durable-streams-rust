@@ -106,6 +106,7 @@ pub(crate) fn build_fork_create_spec(
     fork_offset: Offset,
 ) -> ForkCreateSpec {
     ForkCreateSpec {
+        sub_offset: 0,
         source_name: source_name.to_string(),
         fork_offset,
         config: build_fork_config(source_config, requested_config),
@@ -224,6 +225,7 @@ pub(crate) fn evaluate_fork_create(
     let expected_fork_info = ForkInfo {
         source_name: requested_spec.source_name.clone(),
         fork_offset: requested_spec.fork_offset.clone(),
+        sub_offset: requested_spec.sub_offset,
     };
 
     if existing_config == &requested_spec.config && existing_fork_info == Some(&expected_fork_info)
@@ -330,5 +332,52 @@ pub(crate) fn build_read_plan(
         });
     }
 
+    let mut bound: Option<Offset> = None;
+    for segment in segments.iter_mut().rev() {
+        if let Some(local) = &segment.read_up_to {
+            bound = Some(bound.map_or_else(|| local.clone(), |b| b.min(local.clone())));
+        }
+        segment.read_up_to.clone_from(&bound);
+    }
     segments
+}
+
+/// Validate and materialize the partial inherited prefix and initial body.
+pub(crate) fn initial_fork_messages(
+    config: &StreamConfig,
+    options: &super::ForkOptions,
+    source_messages: Vec<bytes::Bytes>,
+) -> Result<Vec<bytes::Bytes>> {
+    let invalid = || Error::InvalidHeader {
+        header: "Stream-Fork-Sub-Offset".to_string(),
+        reason: "sub-offset exceeds the available data after the anchor".to_string(),
+    };
+    let count = usize::try_from(options.sub_offset).map_err(|_| invalid())?;
+    let json = crate::protocol::json_mode::is_json_content_type(&config.content_type);
+    let mut messages = Vec::new();
+    if count > 0 {
+        if json {
+            if count > source_messages.len() {
+                return Err(invalid());
+            }
+            messages.extend(source_messages.into_iter().take(count));
+        } else {
+            let first = source_messages.first().ok_or_else(invalid)?;
+            if count > first.len() {
+                return Err(invalid());
+            }
+            // Own the prefix so a small fork does not retain a large source allocation.
+            messages.push(bytes::Bytes::copy_from_slice(&first[..count]));
+        }
+    }
+    if !options.initial_body.is_empty() {
+        if json {
+            messages.extend(crate::protocol::json_mode::process_append(
+                &options.initial_body,
+            )?);
+        } else {
+            messages.push(options.initial_body.clone());
+        }
+    }
+    Ok(messages)
 }

@@ -99,7 +99,11 @@ where
 
     // Build and spawn server — ConnectInfo<SocketAddr> is required by proxy
     // trust middleware to identify the peer IP.
-    let app = durable_streams_server::router::build_router(storage, &config);
+    let app = durable_streams_server::router::build_router(
+        storage,
+        &config,
+        durable_streams_server::RouterOptions::default(),
+    );
 
     tokio::spawn(async move {
         axum::serve(
@@ -134,11 +138,10 @@ pub async fn spawn_test_server_with_readyz() -> (String, u16, Arc<std::sync::ato
     let addr = listener.local_addr().expect("Failed to get local addr");
     let port = addr.port();
 
-    let app = durable_streams_server::router::build_router_with_ready(
+    let app = durable_streams_server::router::build_router(
         storage,
         &config,
-        Some(Arc::clone(&ready)),
-        tokio_util::sync::CancellationToken::new(),
+        durable_streams_server::RouterOptions::default().with_readiness(Arc::clone(&ready)),
     );
 
     tokio::spawn(async move {
@@ -174,11 +177,10 @@ pub async fn spawn_test_server_with_shutdown() -> (String, u16, tokio_util::sync
     let addr = listener.local_addr().expect("Failed to get local addr");
     let port = addr.port();
 
-    let app = durable_streams_server::router::build_router_with_ready(
+    let app = durable_streams_server::router::build_router(
         storage,
         &config,
-        None,
-        shutdown.clone(),
+        durable_streams_server::RouterOptions::default().with_shutdown(shutdown.clone()),
     );
 
     tokio::spawn(async move {

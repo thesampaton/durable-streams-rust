@@ -150,121 +150,124 @@ pub enum Error {
     Storage(String),
 }
 
-impl Error {
-    /// Map error to HTTP status code
-    ///
-    /// This is the single place where errors are mapped to status codes.
-    /// Handlers should use this method to determine the response code.
-    ///
-    /// # Panics
-    ///
-    /// Panics if HTTP status code 507 cannot be constructed, which should
-    /// never happen since 507 is a valid IANA-registered status code.
-    #[must_use]
-    pub fn status_code(&self) -> StatusCode {
-        match self {
-            Self::NotFound(_) | Self::StreamExpired => StatusCode::NOT_FOUND,
-            Self::StreamGone(_) => StatusCode::GONE,
-            Self::StreamPathBlocked(_)
-            | Self::ForkFromTombstone(_)
-            | Self::ConfigMismatch
-            | Self::ContentTypeMismatch { .. }
-            | Self::StreamClosed
-            | Self::SequenceGap { .. }
-            | Self::SeqOrderingViolation { .. } => StatusCode::CONFLICT,
-            Self::EpochFenced { .. } => StatusCode::FORBIDDEN,
-            Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => {
-                StatusCode::PAYLOAD_TOO_LARGE
-            }
-            Self::ForkOffsetBeyondTail
-            | Self::InvalidOffset(_)
-            | Self::InvalidProducerState(_)
-            | Self::InvalidTtl(_)
-            | Self::ConflictingExpiration
-            | Self::InvalidJson(_)
-            | Self::InvalidHeader { .. }
-            | Self::InvalidStreamName(_)
-            | Self::EmptyBody
-            | Self::EmptyArray => StatusCode::BAD_REQUEST,
-            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::InsufficientStorage(_) => {
-                StatusCode::from_u16(507).expect("507 is a valid status code")
-            }
-            Self::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
+/// Static response metadata; public detail overrides keep storage internals out
+/// of the wire response without losing them from telemetry.
+struct ProblemDefinition {
+    status: StatusCode,
+    type_uri: &'static str,
+    title: &'static str,
+    code: &'static str,
+    detail: Option<&'static str>,
+}
 
-    /// Build a [`ProblemDetails`] using `self.to_string()` as the detail message.
-    ///
-    /// This covers the common case where the `Display` impl already provides a
-    /// sufficiently descriptive detail string.
-    fn simple_problem(
-        &self,
+impl ProblemDefinition {
+    fn new(
+        status: StatusCode,
         type_uri: &'static str,
         title: &'static str,
         code: &'static str,
-    ) -> ProblemDetails {
-        ProblemDetails::new(type_uri, title, self.status_code(), code).with_detail(self.to_string())
+    ) -> Self {
+        Self {
+            status,
+            type_uri,
+            title,
+            code,
+            detail: None,
+        }
     }
 
-    fn conflict_problem(&self) -> ProblemDetails {
+    fn with_detail(mut self, detail: &'static str) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+}
+
+impl Error {
+    /// Map an error to its HTTP status using the same definition as its body.
+    #[must_use]
+    pub fn status_code(&self) -> StatusCode {
+        self.problem_definition().status
+    }
+
+    /// One exhaustive mapping defines status, type, title, code and safe detail.
+    /// Adding an error variant requires defining its response here.
+    #[allow(clippy::too_many_lines)] // Keep the complete wire mapping exhaustive and together.
+    fn problem_definition(&self) -> ProblemDefinition {
         match self {
-            Self::ConfigMismatch => self.simple_problem(
+            Self::NotFound(_) | Self::StreamExpired => ProblemDefinition::new(
+                StatusCode::NOT_FOUND,
+                "/errors/not-found",
+                "Stream Not Found",
+                "NOT_FOUND",
+            ),
+            Self::ConfigMismatch => ProblemDefinition::new(
+                StatusCode::CONFLICT,
                 "/errors/already-exists",
                 "Stream Already Exists",
                 "ALREADY_EXISTS",
             ),
-            Self::ContentTypeMismatch { .. } => self.simple_problem(
+            Self::ContentTypeMismatch { .. } => ProblemDefinition::new(
+                StatusCode::CONFLICT,
                 "/errors/content-type-mismatch",
                 "Content Type Mismatch",
                 "CONTENT_TYPE_MISMATCH",
             ),
-            Self::StreamClosed => {
-                self.simple_problem("/errors/stream-closed", "Stream Closed", "STREAM_CLOSED")
-            }
-            Self::SequenceGap { .. } | Self::SeqOrderingViolation { .. } => self.simple_problem(
+            Self::StreamClosed => ProblemDefinition::new(
+                StatusCode::CONFLICT,
+                "/errors/stream-closed",
+                "Stream Closed",
+                "STREAM_CLOSED",
+            ),
+            Self::SequenceGap { .. } | Self::SeqOrderingViolation { .. } => ProblemDefinition::new(
+                StatusCode::CONFLICT,
                 "/errors/sequence-conflict",
                 "Sequence Conflict",
                 "SEQUENCE_CONFLICT",
             ),
-            Self::ForkFromTombstone(_) => self.simple_problem(
+            Self::ForkFromTombstone(_) => ProblemDefinition::new(
+                StatusCode::CONFLICT,
                 "/errors/fork-from-tombstone",
                 "Fork From Deleted Stream",
                 "FORK_FROM_TOMBSTONE",
             ),
-            Self::StreamPathBlocked(name) => ProblemDetails::new(
+            Self::StreamPathBlocked(_) => ProblemDefinition::new(
+                StatusCode::CONFLICT,
                 "/errors/path-blocked",
                 "Stream Path Blocked",
-                self.status_code(),
                 "PATH_BLOCKED",
-            )
-            .with_detail(format!(
-                "Stream path is reserved by a soft-deleted lineage: {name}"
-            )),
-            _ => unreachable!("conflict_problem called with non-conflict error"),
-        }
-    }
-
-    fn client_problem(&self) -> ProblemDetails {
-        match self {
-            Self::InvalidOffset(_) => {
-                self.simple_problem("/errors/invalid-offset", "Invalid Offset", "INVALID_OFFSET")
-            }
-            Self::InvalidStreamName(_) => self.simple_problem(
+            ),
+            Self::InvalidOffset(_) => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
+                "/errors/invalid-offset",
+                "Invalid Offset",
+                "INVALID_OFFSET",
+            ),
+            Self::InvalidStreamName(_) => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
                 "/errors/invalid-stream-name",
                 "Invalid Stream Name",
                 "INVALID_STREAM_NAME",
             ),
-            Self::InvalidJson(_) => {
-                self.simple_problem("/errors/invalid-json", "Invalid JSON", "INVALID_JSON")
-            }
-            Self::EmptyBody => {
-                self.simple_problem("/errors/empty-body", "Empty Body", "EMPTY_BODY")
-            }
-            Self::EmptyArray => {
-                self.simple_problem("/errors/empty-array", "Empty Array", "EMPTY_ARRAY")
-            }
-            Self::EpochFenced { .. } => self.simple_problem(
+            Self::InvalidJson(_) => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
+                "/errors/invalid-json",
+                "Invalid JSON",
+                "INVALID_JSON",
+            ),
+            Self::EmptyBody => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
+                "/errors/empty-body",
+                "Empty Body",
+                "EMPTY_BODY",
+            ),
+            Self::EmptyArray => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
+                "/errors/empty-array",
+                "Empty Array",
+                "EMPTY_ARRAY",
+            ),
+            Self::EpochFenced { .. } => ProblemDefinition::new(
+                StatusCode::FORBIDDEN,
                 "/errors/producer-epoch-fenced",
                 "Producer Epoch Fenced",
                 "PRODUCER_EPOCH_FENCED",
@@ -273,86 +276,61 @@ impl Error {
             | Self::InvalidProducerState(_)
             | Self::InvalidTtl(_)
             | Self::ConflictingExpiration
-            | Self::InvalidHeader { .. } => {
-                self.simple_problem("/errors/bad-request", "Bad Request", "BAD_REQUEST")
-            }
-            _ => unreachable!("client_problem called with unsupported error"),
-        }
-    }
-
-    fn storage_problem(&self) -> ProblemDetails {
-        match self {
-            Self::Unavailable(_) => ProblemDetails::new(
+            | Self::InvalidHeader { .. } => ProblemDefinition::new(
+                StatusCode::BAD_REQUEST,
+                "/errors/bad-request",
+                "Bad Request",
+                "BAD_REQUEST",
+            ),
+            Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => ProblemDefinition::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "/errors/payload-too-large",
+                "Payload Too Large",
+                "PAYLOAD_TOO_LARGE",
+            ),
+            Self::Unavailable(_) => ProblemDefinition::new(
+                StatusCode::SERVICE_UNAVAILABLE,
                 "/errors/unavailable",
                 "Service Unavailable",
-                self.status_code(),
                 "UNAVAILABLE",
             )
             .with_detail("The server is temporarily unable to complete the request."),
-            Self::InsufficientStorage(_) => ProblemDetails::new(
+            Self::InsufficientStorage(_) => ProblemDefinition::new(
+                StatusCode::INSUFFICIENT_STORAGE,
                 "/errors/insufficient-storage",
                 "Insufficient Storage",
-                self.status_code(),
                 "INSUFFICIENT_STORAGE",
             )
             .with_detail(
                 "The server does not have enough storage capacity to complete the request.",
             ),
-            Self::Storage(_) => ProblemDetails::new(
+            Self::Storage(_) => ProblemDefinition::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
                 "/errors/internal",
                 "Internal Server Error",
-                self.status_code(),
                 "INTERNAL_ERROR",
             )
             .with_detail("The server encountered an internal error."),
-            _ => unreachable!("storage_problem called with non-storage error"),
+            Self::StreamGone(_) => {
+                ProblemDefinition::new(StatusCode::GONE, "/errors/gone", "Stream Gone", "GONE")
+            }
         }
     }
 
     #[must_use]
     fn problem_details(&self) -> ProblemDetails {
-        match self {
-            Self::NotFound(name) => ProblemDetails::new(
-                "/errors/not-found",
-                "Stream Not Found",
-                self.status_code(),
-                "NOT_FOUND",
-            )
-            .with_detail(format!("Stream not found: {name}")),
-            Self::ConfigMismatch
-            | Self::ContentTypeMismatch { .. }
-            | Self::StreamClosed
-            | Self::SequenceGap { .. }
-            | Self::SeqOrderingViolation { .. }
-            | Self::ForkFromTombstone(_)
-            | Self::StreamPathBlocked(_) => self.conflict_problem(),
-            Self::InvalidOffset(_)
-            | Self::EpochFenced { .. }
-            | Self::InvalidProducerState(_)
-            | Self::InvalidTtl(_)
-            | Self::ConflictingExpiration
-            | Self::InvalidJson(_)
-            | Self::EmptyBody
-            | Self::EmptyArray
-            | Self::InvalidHeader { .. }
-            | Self::InvalidStreamName(_)
-            | Self::ForkOffsetBeyondTail => self.client_problem(),
-            Self::MemoryLimitExceeded | Self::StreamSizeLimitExceeded => self.simple_problem(
-                "/errors/payload-too-large",
-                "Payload Too Large",
-                "PAYLOAD_TOO_LARGE",
-            ),
-            Self::Unavailable(_) | Self::InsufficientStorage(_) | Self::Storage(_) => {
-                self.storage_problem()
-            }
-            Self::StreamExpired => {
-                self.simple_problem("/errors/not-found", "Stream Not Found", "NOT_FOUND")
-            }
-            Self::StreamGone(name) => {
-                ProblemDetails::new("/errors/gone", "Stream Gone", self.status_code(), "GONE")
-                    .with_detail(format!("Stream is gone: {name}"))
-            }
-        }
+        let definition = self.problem_definition();
+        ProblemDetails::new(
+            definition.type_uri,
+            definition.title,
+            definition.status,
+            definition.code,
+        )
+        .with_detail(
+            definition
+                .detail
+                .map_or_else(|| self.to_string(), str::to_owned),
+        )
     }
 
     #[must_use]
@@ -417,10 +395,10 @@ impl Error {
     /// type URI, code, title, and detail stay in sync automatically, then
     /// overlays storage-specific context that is only emitted to logs.
     #[must_use]
-    fn telemetry(&self) -> Option<ProblemTelemetry> {
+    fn telemetry(&self, problem: &ProblemDetails) -> Option<ProblemTelemetry> {
         match self {
             Self::Unavailable(failure) | Self::InsufficientStorage(failure) => {
-                let mut t = ProblemTelemetry::from(&self.problem_details());
+                let mut t = ProblemTelemetry::from(problem);
                 t.error_class = Some(failure.class.as_str().to_string());
                 t.storage_backend = Some(failure.backend.to_string());
                 t.storage_operation = Some(failure.operation.clone());
@@ -431,7 +409,7 @@ impl Error {
                 Some(t)
             }
             Self::Storage(detail) => {
-                let mut t = ProblemTelemetry::from(&self.problem_details());
+                let mut t = ProblemTelemetry::from(problem);
                 t.error_class = Some("internal".to_string());
                 t.internal_detail = Some(detail.clone());
                 Some(t)
@@ -447,7 +425,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for ProblemResponse {
     fn from(error: Error) -> Self {
         let problem = error.problem_details();
-        let telemetry = error.telemetry();
+        let telemetry = error.telemetry(&problem);
         let mut response = ProblemResponse::new(problem);
 
         if let Some(retry_after_secs) = match &error {
@@ -520,5 +498,85 @@ mod tests {
             axum::http::StatusCode::from_u16(507).unwrap()
         );
         assert!(response.headers().get("retry-after").is_none());
+    }
+    /// Issue #13: preserve the wire contract and private telemetry for every
+    /// error variant while replacing the response dispatch machinery.
+    #[tokio::test]
+    async fn test_error_response_wire_contract() {
+        use crate::protocol::problem::ProblemTelemetry;
+        use serde_json::{Value, json};
+        let errors = [
+            Error::NotFound("missing".into()),
+            Error::ConfigMismatch,
+            Error::InvalidOffset("bad".into()),
+            Error::ContentTypeMismatch {
+                expected: "text/plain".into(),
+                actual: "application/json".into(),
+            },
+            Error::StreamClosed,
+            Error::SequenceGap {
+                expected: 3,
+                actual: 5,
+            },
+            Error::EpochFenced {
+                current: 3,
+                received: 1,
+            },
+            Error::InvalidProducerState("incomplete headers".into()),
+            Error::MemoryLimitExceeded,
+            Error::StreamSizeLimitExceeded,
+            Error::InvalidTtl("bad".into()),
+            Error::ConflictingExpiration,
+            Error::StreamExpired,
+            Error::InvalidJson("bad".into()),
+            Error::EmptyBody,
+            Error::EmptyArray,
+            Error::InvalidHeader {
+                header: "Stream-Seq".into(),
+                reason: "bad".into(),
+            },
+            Error::InvalidStreamName("bad".into()),
+            Error::SeqOrderingViolation {
+                last: "b".into(),
+                received: "a".into(),
+            },
+            Error::storage_unavailable("file", "append", "private timeout"),
+            Error::storage_insufficient("acid", "commit", "private disk path"),
+            Error::StreamGone("deleted".into()),
+            Error::StreamPathBlocked("reserved".into()),
+            Error::ForkOffsetBeyondTail,
+            Error::ForkFromTombstone("deleted".into()),
+            Error::Storage("private internal failure".into()),
+        ];
+        let mut actual = Vec::new();
+        for error in errors {
+            let expected_status = error.status_code();
+            let response = error.into_response();
+            assert_eq!(response.status(), expected_status);
+            let telemetry = response.extensions().get::<ProblemTelemetry>().unwrap();
+            let record = json!({
+                "status": response.status().as_u16(),
+                "content_type": response.headers()["content-type"].to_str().unwrap(),
+                "retry_after": response.headers().get("retry-after").map(|v| v.to_str().unwrap()),
+                "telemetry": {
+                    "type": telemetry.problem_type, "code": telemetry.code,
+                    "title": telemetry.title, "detail": telemetry.detail,
+                    "class": telemetry.error_class, "backend": telemetry.storage_backend,
+                    "operation": telemetry.storage_operation, "internal": telemetry.internal_detail,
+                    "retry_after": telemetry.retry_after_secs,
+                },
+            });
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let mut record = record;
+            record["body"] = serde_json::from_slice::<Value>(&body).unwrap();
+            actual.push(record);
+        }
+        let actual = Value::Array(actual);
+        let expected: Value =
+            serde_json::from_str(include_str!("../../tests/snapshots/error-responses.json"))
+                .unwrap();
+        assert_eq!(actual, expected);
     }
 }

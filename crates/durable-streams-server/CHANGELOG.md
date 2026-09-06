@@ -7,7 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No notable changes yet._
+### Breaking Changes
+
+- Consolidate router construction into `build_router(storage, config, options)`.
+  Pass `RouterOptions::default()` for the former two-argument convenience API.
+  Replace `build_router_with_ready` with `RouterOptions::with_readiness` and
+  `RouterOptions::with_shutdown`. Readiness and shutdown remain independent.
+
+### Added
+
+- Durable subscription APIs with normalized configuration identity, glob and
+  explicit membership, signed Ed25519 webhooks and JWKS discovery, pull-wake
+  claims, cursor acknowledgements, heartbeats, release, and generation fencing.
+- Private subscription persistence in each built-in backend, including signing
+  keys, active leases, tombstones, and retry schedules. Failed webhooks retry
+  with exponential backoff and jitter; URL validation checks and pins DNS
+  results and disables redirects and environment proxies.
+- Atomic fork sub-offset creation, inherited content types, and initial bodies
+  across the memory, file, and ACID backends.
+
+### Fixed
+
+- SSE pairs every data event with a control event and a corresponding offset.
+- Chained fork reads respect all ancestor bounds and the requested read offset.
+- File recovery restores fork-relative offsets and preserves expired ancestors
+  still referenced by forks.
+
+### Changed
+
+- Track protocol revision `a172acc389351cb3db6deb5cd60e3dec11e7ff39` and server
+  conformance `0.3.6`, with subscription coverage enabled.
+- The reserved `__ds` namespace is unavailable for application streams.
+- `ForkInfo` gains a serde-defaulted `sub_offset` field; Rust struct literals
+  must supply it. `Storage` gains extended fork and subscription persistence
+  methods; custom backends need implementations to support these features.
+- `HttpConfig` gains `allow_insecure_webhooks` (default false), with equivalent
+  TOML and `DS_HTTP__ALLOW_INSECURE_WEBHOOKS` settings. Enable only for local
+  development callbacks.
 
 ## [0.3.0] - 2026-04-15
 

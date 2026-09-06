@@ -543,3 +543,98 @@ storage_backend_tests! {
         }
     }
 }
+
+mod extended_contract {
+    use super::*;
+    storage_backend_tests! {
+        mod extended_forks {
+            use super::*;
+            use durable_streams_server::storage::ForkOptions;
+
+            /// PROTOCOL.md §4.2: partial fork creation is atomic and keeps writer state fresh.
+            #[test]
+            fn test_partial_fork_failure_has_no_visible_stream_or_reserved_bytes() {
+                let handle = create_test_storage_with_limits(BACKEND, 1024, 5);
+                let storage = &handle.storage;
+                storage.create_stream_with_data("source", plain_text_config(), vec![Bytes::from("hello")], false).unwrap();
+                let before = storage.total_bytes();
+                let result = storage.create_fork_with_options("fork", "source", Some(&Offset::new(0,0)), plain_text_config(), ForkOptions {
+                    sub_offset: 3, initial_body: Bytes::from("XYZ"), ..ForkOptions::default()
+                });
+                assert!(matches!(result, Err(Error::StreamSizeLimitExceeded)));
+                assert!(!storage.exists("fork"));
+                assert_eq!(storage.total_bytes(), before);
+                storage.delete("source").unwrap();
+                assert_eq!(storage.total_bytes(), 0);
+            }
+
+            /// PROTOCOL.md §4.2, §8: nested fork reads respect all ancestor bounds.
+            #[test]
+            fn test_nested_fork_before_parent_boundary_and_resume() {
+                let handle = create_test_storage(BACKEND);
+                let storage = &handle.storage;
+                storage.create_stream("source", plain_text_config()).unwrap();
+                storage.append("source", Bytes::from("a"), "text/plain").unwrap();
+                let anchor = storage.head("source").unwrap().next_offset;
+                storage.append("source", Bytes::from("b"), "text/plain").unwrap();
+                storage.create_fork("parent", "source", None, plain_text_config()).unwrap();
+                storage.append("parent", Bytes::from("c"), "text/plain").unwrap();
+                storage.create_fork("child", "parent", Some(&anchor), plain_text_config()).unwrap();
+                assert_eq!(storage.read("child", &Offset::start()).unwrap().messages, vec![Bytes::from("a")]);
+                storage.append("child", Bytes::from("d"), "text/plain").unwrap();
+                assert_eq!(storage.read("child", &anchor).unwrap().messages, vec![Bytes::from("d")]);
+            }
+
+            /// Issue #32 / PROTOCOL.md reads: TTL and non-TTL forks use the
+            /// same offset, closure, visibility and metadata rules.
+            #[test]
+            fn test_read_modes_and_metadata_agree_for_ttl_forks() {
+                for ttl in [false, true] {
+                    let handle = create_test_storage(BACKEND);
+                    let storage = &handle.storage;
+                    let config = if ttl { plain_text_config().with_ttl(60) } else { plain_text_config() };
+                    storage.create_stream("source", config.clone()).unwrap();
+                    storage.append("source", Bytes::from("a"), "text/plain").unwrap();
+                    let anchor = storage.head("source").unwrap().next_offset;
+                    storage.create_fork("fork", "source", None, config).unwrap();
+                    storage.append("fork", Bytes::from("b"), "text/plain").unwrap();
+                    let tail = storage.head("fork").unwrap().next_offset;
+                    storage.delete("source").unwrap();
+                    storage.close_stream("fork").unwrap();
+                    let all = storage.read("fork", &Offset::start()).unwrap();
+                    assert_eq!(all.messages, vec![Bytes::from("a"), Bytes::from("b")]);
+                    let resumed = storage.read("fork", &anchor).unwrap();
+                    assert_eq!(resumed.messages, vec![Bytes::from("b")]);
+                    for offset in [tail.clone(), Offset::now()] {
+                        let read = storage.read("fork", &offset).unwrap();
+                        assert!(read.messages.is_empty());
+                        assert!(read.at_tail && read.closed);
+                        assert_eq!(read.next_offset, tail);
+                    }
+                    assert!(!storage.exists("source"));
+                    assert!(storage.subscribe("source").is_none());
+                    let listed = storage.list_streams().unwrap();
+                    assert_eq!(listed.len(), 1);
+                    assert_eq!(listed[0].0, "fork");
+                    let head = storage.head("fork").unwrap();
+                    assert_eq!(listed[0].1.next_offset, head.next_offset);
+                    assert_eq!(listed[0].1.message_count, head.message_count);
+                    assert_eq!(listed[0].1.config, head.config);
+                    assert_eq!(listed[0].1.closed, head.closed);
+                }
+            }
+
+            /// Subscription control data is private and independent of stream quotas/listing.
+            #[test]
+            fn test_subscription_snapshot_replaces_state_without_creating_streams() {
+                let handle = create_test_storage(BACKEND);
+                let storage = &handle.storage;
+                assert!(storage.load_subscription_state().unwrap().is_none());
+                storage.save_subscription_state(b"one").unwrap();
+                storage.save_subscription_state(b"two").unwrap();
+                assert_eq!(storage.load_subscription_state().unwrap(), Some(b"two".to_vec()));
+                assert!(storage.list_streams().unwrap().is_empty());
+            }
+        }
+    }
+}

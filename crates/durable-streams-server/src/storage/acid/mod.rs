@@ -46,6 +46,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+const SUBSCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("subscriptions");
 const STREAMS: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new("messages");
 
@@ -393,53 +394,6 @@ impl AcidStorage {
             .sum()
     }
 
-    /// Read messages from a stream's shard within a given offset range.
-    ///
-    /// Returns messages with offsets `>= from_offset` and `< up_to` (if
-    /// `up_to` is `Some`). Used by fork read stitching to pull ancestor
-    /// messages without fork/tombstone validation.
-    fn read_messages_from_shard(
-        &self,
-        name: &str,
-        from_offset: &Offset,
-        up_to: Option<&Offset>,
-    ) -> Result<Vec<Bytes>> {
-        let shard = &self.shards[self.existing_shard_index(name)?];
-        let txn = shard
-            .db
-            .begin_read()
-            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
-        let message_table = txn
-            .open_table(MESSAGES)
-            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-
-        let (start_read_seq, start_byte_offset) = if from_offset.is_start() {
-            (0_u64, 0_u64)
-        } else {
-            from_offset.parse_components().unwrap_or((0, 0))
-        };
-
-        let iter = message_table
-            .range((name, start_read_seq, start_byte_offset)..=(name, u64::MAX, u64::MAX))
-            .map_err(|e| Self::storage_err("failed to read shard message range", e))?;
-
-        let mut messages = Vec::new();
-        for item in iter {
-            let (key, value) =
-                item.map_err(|e| Self::storage_err("failed to read shard message", e))?;
-            if let Some(bound) = up_to {
-                let (_, read_seq, byte_offset) = key.value();
-                let msg_offset = Offset::new(read_seq, byte_offset);
-                if msg_offset >= *bound {
-                    break;
-                }
-            }
-            messages.push(Bytes::copy_from_slice(value.value()));
-        }
-
-        Ok(messages)
-    }
-
     fn cascade_delete_acid(&self, parent_name: &str) -> Result<()> {
         let mut current_parent = parent_name.to_string();
         while let Some(shard_idx) = self.find_stream_shard_index(&current_parent)? {
@@ -490,88 +444,71 @@ impl AcidStorage {
         Ok(())
     }
 
-    /// Read messages from the MESSAGES table for a non-forked stream, starting
-    /// from the given offset. Opens its own read transaction.
-    fn read_non_forked_table_messages(
-        &self,
+    /// Read a complete lineage from the caller's transaction snapshot.
+    /// Fork creation colocates all ancestors in one shard; startup rejects
+    /// legacy cross-shard lineages. Never open another transaction here: its
+    /// messages could be newer than the metadata used for the response offset.
+    fn read_snapshot(
+        streams: &impl ReadableTable<&'static str, &'static [u8]>,
+        messages: &impl ReadableTable<(&'static str, u64, u64), &'static [u8]>,
         name: &str,
         from_offset: &Offset,
-        shard_idx: usize,
-    ) -> Result<Vec<Bytes>> {
-        let (start_read_seq, start_byte_offset) = if from_offset.is_start() {
-            (0_u64, 0_u64)
+        meta: &StoredStreamMeta,
+    ) -> Result<super::ReadResult> {
+        super::fork::check_stream_access(&meta.config, meta.state, name)?;
+        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
+        let mut result = super::ReadResult {
+            messages: Vec::new(),
+            next_offset,
+            at_tail: true,
+            closed: meta.closed,
+        };
+        if from_offset.is_now() {
+            return Ok(result);
+        }
+        let start = if from_offset.is_start() {
+            (0, 0)
         } else {
-            from_offset.parse_components().ok_or_else(|| {
-                Error::InvalidOffset("non-concrete offset in read range".to_string())
-            })?
+            from_offset
+                .parse_components()
+                .ok_or_else(|| Error::InvalidOffset("non-concrete offset in read range".into()))?
         };
 
-        let shard = &self.shards[shard_idx];
-        let txn = shard
-            .db
-            .begin_read()
-            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
-        let message_table = txn
-            .open_table(MESSAGES)
-            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-
-        let iter = message_table
-            .range((name, start_read_seq, start_byte_offset)..=(name, u64::MAX, u64::MAX))
-            .map_err(|e| Self::storage_err("failed to read stream range", e))?;
-
-        let mut messages = Vec::new();
-        for item in iter {
-            let (_, value) =
-                item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
-            messages.push(Bytes::copy_from_slice(value.value()));
+        let mut lineage = vec![(name.to_string(), meta.fork_info.clone())];
+        while let Some(parent) = lineage.last().and_then(|(_, fi)| fi.as_ref()) {
+            let source = parent.source_name.clone();
+            let ancestor = Self::read_stream_meta(streams, &source)?
+                .ok_or_else(|| Error::NotFound(source.clone()))?;
+            lineage.push((source, ancestor.fork_info));
         }
-
-        Ok(messages)
-    }
-
-    /// Traverse the fork chain and collect all messages for a forked stream read.
-    fn collect_fork_chain_messages(
-        &self,
-        name: &str,
-        from_offset: &Offset,
-        fi: &ForkInfo,
-    ) -> Result<Vec<Bytes>> {
-        let mut all_messages: Vec<Bytes> = Vec::new();
-        if from_offset.is_start() || *from_offset < fi.fork_offset {
-            let plan = super::fork::build_read_plan(&fi.source_name, |segment_name| {
-                let shard_idx = self.find_stream_shard_index(segment_name).ok().flatten()?;
-                let shard = &self.shards[shard_idx];
-                let txn = shard.db.begin_read().ok()?;
-                let streams = txn.open_table(STREAMS).ok()?;
-                let meta = Self::read_stream_meta(&streams, segment_name).ok()??;
-                Some(meta.fork_info)
-            });
-
-            for (i, segment) in plan.iter().enumerate() {
-                let effective_up_to = if i == plan.len() - 1 {
-                    Some(&fi.fork_offset)
-                } else {
-                    segment.read_up_to.as_ref()
-                };
-                let effective_from = if i == 0 {
-                    from_offset
-                } else {
-                    &Offset::start()
-                };
-                let segment_msgs =
-                    self.read_messages_from_shard(&segment.name, effective_from, effective_up_to)?;
-                all_messages.extend(segment_msgs);
+        let plan = super::fork::build_read_plan(name, |segment_name| {
+            lineage
+                .iter()
+                .find(|(n, _)| n == segment_name)
+                .map(|(_, fi)| fi.clone())
+        });
+        for segment in plan {
+            let iter = messages
+                .range(
+                    (segment.name.as_str(), start.0, start.1)
+                        ..=(segment.name.as_str(), u64::MAX, u64::MAX),
+                )
+                .map_err(|e| Self::storage_err("failed to read stream range", e))?;
+            for item in iter {
+                let (key, value) =
+                    item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
+                let (_, seq, byte) = key.value();
+                if segment
+                    .read_up_to
+                    .as_ref()
+                    .is_some_and(|bound| Offset::new(seq, byte) >= *bound)
+                {
+                    break;
+                }
+                result.messages.push(Bytes::copy_from_slice(value.value()));
             }
         }
-
-        let fork_msgs = if from_offset.is_start() || *from_offset <= fi.fork_offset {
-            self.read_messages_from_shard(name, &fi.fork_offset, None)?
-        } else {
-            self.read_messages_from_shard(name, from_offset, None)?
-        };
-        all_messages.extend(fork_msgs);
-
-        Ok(all_messages)
+        Ok(result)
     }
 
     fn begin_write_txn(db: &Database) -> Result<redb::WriteTransaction> {
@@ -682,5 +619,20 @@ impl ClassifyError for SetDurabilityError {
 impl ClassifyError for serde_json::Error {
     fn into_storage_error(self, _context: String, detail: String) -> Error {
         Error::Storage(detail)
+    }
+}
+
+impl StoredStreamMeta {
+    fn metadata(&self) -> super::StreamMetadata {
+        super::build_stream_metadata(
+            self.config.clone(),
+            self.next_read_seq,
+            self.next_byte_offset,
+            self.closed,
+            self.total_bytes,
+            self.next_read_seq,
+            self.created_at,
+            self.updated_at,
+        )
     }
 }

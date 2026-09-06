@@ -5,7 +5,7 @@
 built with `axum` and `tokio`.
 
 It can run as a standalone server or be embedded into an existing `axum`
-application with `build_router` or `build_router_with_ready`.
+application with `build_router` and `RouterOptions`.
 
 ## Features
 
@@ -531,7 +531,7 @@ Check:
 For embedding, the main entry points are:
 
 - `Config` and `ConfigLoadOptions` for configuration loading
-- `build_router` and `build_router_with_ready` for mounting the HTTP API
+- `build_router` and `RouterOptions` for mounting the HTTP API and configuring runtime hooks
 - `InMemoryStorage`, `FileStorage`, and `AcidStorage` for backend selection
 
 ## Example Config Files
@@ -555,3 +555,32 @@ cargo test -p durable-streams-server
 cargo clippy -p durable-streams-server --all-targets
 cargo fmt --all
 ```
+
+### Subscriptions and partial forks
+
+The server supports `Stream-Fork-Sub-Offset` (bytes for non-JSON streams, message
+count for JSON streams), including initial-body creation and independent writer
+state. Subscriptions are mounted under the stream root's reserved `__ds` prefix.
+They support signed webhooks, pull-wake delivery, durable cursors, worker leases,
+and generation fencing. See [the subscription guide](../../docs/subscriptions.md)
+for request examples, persistence, and deployment configuration.
+
+### Migrating router construction
+
+The next release replaces `build_router_with_ready` with a single
+`build_router(storage, &config, options)` entry point. Pass
+`RouterOptions::default()` for the old two-argument `build_router` behavior.
+For readiness and graceful shutdown:
+
+```rust
+use durable_streams_server::{build_router, RouterOptions};
+
+let options = RouterOptions::default()
+    .with_readiness(ready)
+    .with_shutdown(shutdown);
+let app = build_router(storage, &config, options);
+```
+
+The readiness flag and cancellation token are optional and independent. The
+shutdown token reaches long-poll, SSE, and subscription workers; the embedding
+application also needs to stop accepting HTTP connections when it cancels it.

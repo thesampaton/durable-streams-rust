@@ -198,6 +198,7 @@ fn test_reopen_rejects_legacy_cross_shard_fork_lineage() {
         last_seq: None,
         producers: HashMap::new(),
         fork_info: Some(ForkInfo {
+            sub_offset: 0,
             source_name: source.clone(),
             fork_offset: Offset::start(),
         }),
@@ -341,4 +342,79 @@ fn test_in_memory_backend_global_cap() {
     let result = storage.append("s", Bytes::from(vec![0_u8; 20]), "text/plain");
     assert!(result.is_err());
     assert_eq!(storage.total_bytes(), 40);
+}
+
+/// Issue #8: messages, tail offsets, and closure must come from one snapshot,
+/// including fork reads that renew TTL while another writer is appending.
+#[test]
+fn test_concurrent_reads_keep_messages_and_tail_in_one_snapshot() {
+    use std::sync::Barrier;
+
+    for forked in [false, true] {
+        for ttl in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Arc::new(
+                AcidStorage::new(
+                    dir.path(),
+                    4,
+                    1024 * 1024,
+                    100 * 1024,
+                    AcidBackend::InMemory,
+                )
+                .unwrap(),
+            );
+            let config = if ttl {
+                StreamConfig::new("text/plain".into()).with_ttl(60)
+            } else {
+                StreamConfig::new("text/plain".into())
+            };
+            if forked {
+                storage.create_stream("source", config.clone()).unwrap();
+                storage
+                    .append("source", Bytes::from_static(b"s"), "text/plain")
+                    .unwrap();
+                storage
+                    .create_fork("stream", "source", None, config)
+                    .unwrap();
+                // The source can keep growing, but its later data is not inherited.
+                storage
+                    .append("source", Bytes::from_static(b"hidden"), "text/plain")
+                    .unwrap();
+                storage.delete("source").unwrap();
+            } else {
+                storage.create_stream("stream", config).unwrap();
+            }
+            let barrier = Arc::new(Barrier::new(2));
+            let writer_storage = Arc::clone(&storage);
+            let writer_barrier = Arc::clone(&barrier);
+            let writer = thread::spawn(move || {
+                writer_barrier.wait();
+                for _ in 0..400 {
+                    writer_storage
+                        .append("stream", Bytes::from_static(b"x"), "text/plain")
+                        .unwrap();
+                }
+                writer_storage.close_stream("stream").unwrap();
+            });
+            let mut mismatches = Vec::new();
+            barrier.wait();
+            for _ in 0..400 {
+                let result = storage.read("stream", &Offset::start()).unwrap();
+                let (seq, bytes) = result.next_offset.parse_components().unwrap();
+                if seq != result.messages.len() as u64
+                    || bytes != result.messages.iter().map(|m| m.len() as u64).sum::<u64>()
+                {
+                    mismatches.push((seq, bytes, result.messages.len()));
+                }
+            }
+            writer.join().unwrap();
+            assert!(
+                mismatches.is_empty(),
+                "forked={forked}, ttl={ttl}: {mismatches:?}"
+            );
+            let result = storage.read("stream", &Offset::start()).unwrap();
+            assert!(result.closed);
+            assert_eq!(result.messages.len(), 400 + usize::from(forked));
+        }
+    }
 }

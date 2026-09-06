@@ -119,7 +119,7 @@ crate [README](https://docs.rs/crate/durable-streams-server/latest/source/README
 Most embedders only need:
 
 - [`build_router`] to mount the Durable Streams HTTP API into an `axum` app
-- [`build_router_with_ready`] when you want readiness and shutdown plumbing
+- [`RouterOptions`] to configure optional readiness and shutdown hooks
 - [`Storage`] plus one of [`InMemoryStorage`], [`FileStorage`], or [`AcidStorage`]
 
 The default mount path constant is [`DEFAULT_STREAM_BASE_PATH`].
@@ -142,3 +142,24 @@ cargo build -p durable-streams-server
 cargo test -p durable-streams-server
 cargo clippy -p durable-streams-server --all-targets
 ```
+
+## Router runtime hooks
+
+```rust
+use durable_streams_server::{build_router, Config, InMemoryStorage, RouterOptions};
+use std::sync::{Arc, atomic::AtomicBool};
+use tokio_util::sync::CancellationToken;
+
+# async fn example() {
+let storage = Arc::new(InMemoryStorage::new(1024 * 1024, 1024 * 1024));
+let ready = Arc::new(AtomicBool::new(true));
+let shutdown = CancellationToken::new();
+let options = RouterOptions::default()
+    .with_readiness(ready)
+    .with_shutdown(shutdown.clone());
+let app = build_router(storage, &Config::default(), options);
+# }
+```
+
+Pass `RouterOptions::default()` when no runtime hooks are needed. This replaces
+both the old two-argument `build_router` and `build_router_with_ready` APIs.

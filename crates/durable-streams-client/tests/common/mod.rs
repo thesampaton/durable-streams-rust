@@ -11,7 +11,11 @@ pub async fn spawn_test_server() -> String {
         .await
         .expect("bind test server");
     let addr = listener.local_addr().expect("local addr");
-    let app = build_router(storage, &Config::default());
+    let app = build_router(
+        storage,
+        &Config::default(),
+        durable_streams_server::RouterOptions::default(),
+    );
 
     tokio::spawn(async move {
         axum::serve(listener, app)

@@ -8,8 +8,9 @@ pub mod router;
 pub mod startup;
 pub mod storage;
 pub mod streams;
+mod subscriptions;
 pub mod transfer;
 
 pub use config::{Config, ConfigLoadOptions, DeploymentProfile, StorageMode};
-pub use router::{DEFAULT_STREAM_BASE_PATH, ShutdownToken, build_router, build_router_with_ready};
+pub use router::{DEFAULT_STREAM_BASE_PATH, RouterOptions, ShutdownToken, build_router};
 pub use storage::{Storage, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage};

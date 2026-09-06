@@ -28,7 +28,7 @@ baseline, not an unspecified "recent" protocol.
 Current baseline for this repo:
 
 - protocol document: Durable Streams Protocol `1.0-draft`
-- protocol revision: `f091f315e4c3ca6769b45135ab8b5f53d70b1751`
+- protocol revision: `a172acc389351cb3db6deb5cd60e3dec11e7ff39`
 - source of truth in-repo: `docs/standards.md`
 - machine-readable metadata: `Cargo.toml` under `[workspace.metadata.durable-streams]`
 
@@ -286,3 +286,21 @@ traced directly to `PROTOCOL.md`, it belongs here.
 
 If a behaviour describes how a specific Rust crate chooses to expose or
 implement the protocol, it belongs in a future crate-specific skill instead.
+
+## Forks and subscriptions (September 2026 baseline)
+
+- Fork creation supports `Stream-Fork-Sub-Offset`: bytes for non-JSON streams,
+  flattened message count for JSON. The header requires `Stream-Forked-From`,
+  including for zero; omitted and zero have identical semantics. Overshoots and
+  malformed values return 400. Prefix materialization and initial bodies are
+  atomic; producer and writer sequence state are fresh on the fork.
+- Direct DELETE on a soft-deleted source returns 410, as do GET/HEAD/POST.
+- Sections 6–7 define subscription management under reserved `__ds`, normalized
+  configuration hashes, glob/explicit membership, Ed25519 webhooks and JWKS,
+  pull-wake claims, cursor acknowledgements, lease renewal/release, and generation
+  fencing. Private keys and retry schedules must survive durable-backend restart.
+- Route `__ds` before application streams; do not permit forks or ordinary stream
+  operations to expose subscription control state.
+- Webhook targets must be validated against SSRF, including DNS resolution;
+  require HTTPS except for an explicit development-only localhost exception.
+- See `docs/subscriptions.md` for local implementation and deployment details.
