@@ -524,11 +524,12 @@ async fn serve<S: Storage + 'static>(
 ) -> Result<(), StartupError> {
     let ready = Arc::new(AtomicBool::new(false));
     let shutdown = CancellationToken::new();
-    let app = router::build_router_with_ready(
+    let app = router::build_router(
         storage,
         &runtime.config,
-        Some(Arc::clone(&ready)),
-        shutdown.clone(),
+        durable_streams_server::RouterOptions::default()
+            .with_readiness(Arc::clone(&ready))
+            .with_shutdown(shutdown.clone()),
     );
     let handle = Handle::new();
 

@@ -86,7 +86,11 @@ async fn spawn_mtls_server() -> u16 {
 /// Common server spawner that uses `build_tls_server_config` from startup module.
 async fn spawn_server_with_tls_config(config: Config) -> u16 {
     let storage = Arc::new(InMemoryStorage::new(100 * 1024 * 1024, 10 * 1024 * 1024));
-    let app = router::build_router(storage, &config);
+    let app = router::build_router(
+        storage,
+        &config,
+        durable_streams_server::RouterOptions::default(),
+    );
 
     let server_config =
         build_tls_server_config(&config).expect("failed to build TLS server config");

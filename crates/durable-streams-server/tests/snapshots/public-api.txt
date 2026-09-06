@@ -369,10 +369,13 @@ pub durable_streams_server::protocol::producer::ProducerHeaders::id: alloc::stri
 pub durable_streams_server::protocol::producer::ProducerHeaders::seq: u64
 pub fn durable_streams_server::protocol::producer::parse_producer_headers(headers: &http::header::map::HeaderMap) -> durable_streams_server::protocol::error::Result<core::option::Option<durable_streams_server::protocol::producer::ProducerHeaders>>
 pub mod durable_streams_server::router
+pub struct durable_streams_server::router::RouterOptions
+impl durable_streams_server::router::RouterOptions
+pub fn durable_streams_server::router::RouterOptions::with_readiness(self, ready: alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> Self
+pub fn durable_streams_server::router::RouterOptions::with_shutdown(self, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> Self
 pub struct durable_streams_server::router::ShutdownToken(pub tokio_util::sync::cancellation_token::CancellationToken)
 pub const durable_streams_server::router::DEFAULT_STREAM_BASE_PATH: &str
-pub fn durable_streams_server::router::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config) -> axum::routing::Router
-pub fn durable_streams_server::router::build_router_with_ready<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, ready: core::option::Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> axum::routing::Router
+pub fn durable_streams_server::router::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, options: durable_streams_server::router::RouterOptions) -> axum::routing::Router
 pub mod durable_streams_server::startup
 pub enum durable_streams_server::startup::StartupErrorKind
 pub durable_streams_server::startup::StartupErrorKind::Bind
@@ -811,6 +814,10 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscripti
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
+pub struct durable_streams_server::RouterOptions
+impl durable_streams_server::router::RouterOptions
+pub fn durable_streams_server::router::RouterOptions::with_readiness(self, ready: alloc::sync::Arc<core::sync::atomic::AtomicBool>) -> Self
+pub fn durable_streams_server::router::RouterOptions::with_shutdown(self, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> Self
 pub struct durable_streams_server::ShutdownToken(pub tokio_util::sync::cancellation_token::CancellationToken)
 pub const durable_streams_server::DEFAULT_STREAM_BASE_PATH: &str
 pub trait durable_streams_server::Storage: core::marker::Send + core::marker::Sync
@@ -885,5 +892,4 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::load_subscripti
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::save_subscription_state(&self, state: &[u8]) -> durable_streams_server::protocol::error::Result<()>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
-pub fn durable_streams_server::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config) -> axum::routing::Router
-pub fn durable_streams_server::build_router_with_ready<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, ready: core::option::Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>, shutdown: tokio_util::sync::cancellation_token::CancellationToken) -> axum::routing::Router
+pub fn durable_streams_server::build_router<S: durable_streams_server::storage::Storage + 'static>(storage: alloc::sync::Arc<S>, config: &durable_streams_server::config::Config, options: durable_streams_server::router::RouterOptions) -> axum::routing::Router

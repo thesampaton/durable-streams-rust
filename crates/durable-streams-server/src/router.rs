@@ -41,26 +41,43 @@ pub const DEFAULT_STREAM_BASE_PATH: &str = "/v1/stream";
 #[derive(Clone)]
 pub(crate) struct StreamBasePath(pub Arc<str>);
 
-/// Build the application router with storage state.
+/// Optional runtime hooks for [`build_router`].
 ///
-/// Routes:
-/// - `GET /healthz`         – Liveness probe (always 200)
-/// - `GET/PUT/... <path>`   – Protocol routes mounted at the configured
-///   `config.http.stream_base_path` (default [`DEFAULT_STREAM_BASE_PATH`])
-/// - `GET <admin>/streams`  – Optional operator list route, mounted only when
-///   `config.admin.enabled` is true
-///
-/// Uses a no-op cancellation token (never cancelled). For production
-/// use with graceful shutdown, prefer [`build_router_with_ready`].
-pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> Router {
-    build_router_with_ready(storage, config, None, CancellationToken::new())
+/// By default `/readyz` is omitted and the shutdown token is never cancelled.
+/// Production embedders should supply a token with [`Self::with_shutdown`] so
+/// long-poll, SSE, and subscription workers can drain during shutdown.
+#[derive(Debug, Clone, Default)]
+pub struct RouterOptions {
+    ready: Option<Arc<AtomicBool>>,
+    shutdown: CancellationToken,
 }
 
-/// Build the router with readiness flag and shutdown token.
+impl RouterOptions {
+    /// Register `/readyz`, returning 200 when the shared flag is true and 503
+    /// while it is false. The caller owns changes to the readiness flag.
+    #[must_use]
+    pub fn with_readiness(mut self, ready: Arc<AtomicBool>) -> Self {
+        self.ready = Some(ready);
+        self
+    }
+
+    /// Propagate cancellation to long-poll, SSE, and subscription workers.
+    /// The caller must also stop its HTTP listener during shutdown.
+    #[must_use]
+    pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+}
+
+/// Build the application router with optional runtime hooks.
 ///
-/// When `ready` is `Some`, the `/readyz` endpoint is registered and returns
-/// 200 only after the flag is set to `true`. When `None`, the endpoint is
-/// not registered (backwards-compatible).
+/// Use [`RouterOptions::default()`] for a basic embedded router, or configure
+/// readiness and shutdown with [`RouterOptions::with_readiness`] and
+/// [`RouterOptions::with_shutdown`].
+///
+/// `/healthz` is always available. `/readyz` is registered only when a
+/// readiness flag is supplied, returning 200 after the flag is set to true.
 ///
 /// The `shutdown` token is propagated to long-poll and SSE handlers so they
 /// can observe server shutdown and drain in-flight connections cleanly.
@@ -71,12 +88,12 @@ pub fn build_router<S: Storage + 'static>(storage: Arc<S>, config: &Config) -> R
 /// not implement authentication or authorization for admin routes; enable them
 /// only behind a trusted network, reverse proxy, or external access-control
 /// layer.
-pub fn build_router_with_ready<S: Storage + 'static>(
+pub fn build_router<S: Storage + 'static>(
     storage: Arc<S>,
     config: &Config,
-    ready: Option<Arc<AtomicBool>>,
-    shutdown: CancellationToken,
+    options: RouterOptions,
 ) -> Router {
+    let RouterOptions { ready, shutdown } = options;
     let stream_base_path = Arc::<str>::from(config.http.stream_base_path.as_str());
     let mut app = Router::new()
         .route("/healthz", get(handlers::health::health_check))

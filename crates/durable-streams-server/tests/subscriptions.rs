@@ -5,7 +5,7 @@ use axum::{Json, Router, routing::post};
 use bytes::Bytes;
 use common::{StorageTestBackend, TestStorage, create_test_storage};
 use durable_streams_server::{
-    Config, Storage, build_router_with_ready,
+    Config, Storage, build_router,
     config::AcidBackend,
     storage::{acid::AcidStorage, file::FileStorage},
 };
@@ -34,7 +34,11 @@ impl Server {
         let shutdown = CancellationToken::new();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/v1/stream", listener.local_addr().unwrap());
-        let app = build_router_with_ready(storage.clone(), &config, None, shutdown.clone());
+        let app = build_router(
+            storage.clone(),
+            &config,
+            durable_streams_server::RouterOptions::default().with_shutdown(shutdown.clone()),
+        );
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });

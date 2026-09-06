@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Consolidate router construction into `build_router(storage, config, options)`.
+  Pass `RouterOptions::default()` for the former two-argument convenience API.
+  Replace `build_router_with_ready` with `RouterOptions::with_readiness` and
+  `RouterOptions::with_shutdown`. Readiness and shutdown remain independent.
+
 ### Added
 
 - Durable subscription APIs with normalized configuration identity, glob and
