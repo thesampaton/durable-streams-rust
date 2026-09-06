@@ -544,56 +544,67 @@ async fn serve<S: Storage + 'static>(
     ready.store(true, Ordering::Release);
 
     let shutdown_handle = handle.clone();
-    tokio::spawn(async move {
+    let shutdown_ready = ready.clone();
+    let signal_task = tokio::spawn(async move {
         wait_for_shutdown_signal().await;
         tracing::info!("Shutdown signal received, beginning graceful drain");
+        shutdown_ready.store(false, Ordering::Release);
         shutdown.cancel();
         shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
     });
 
-    let tls = match runtime.config.transport.mode {
-        TransportMode::Http => None,
-        TransportMode::Tls | TransportMode::Mtls => {
-            log_phase(StartupPhase::BuildTlsContext);
-            let server_config = build_tls_server_config(&runtime.config)?;
-            tracing::info!(
-                transport.mode = runtime.config.transport.mode.as_str(),
-                "TLS context built successfully"
-            );
-            Some(RustlsConfig::from_config(Arc::new(server_config)))
+    let serving = async {
+        let tls = match runtime.config.transport.mode {
+            TransportMode::Http => None,
+            TransportMode::Tls | TransportMode::Mtls => {
+                log_phase(StartupPhase::BuildTlsContext);
+                let server_config = build_tls_server_config(&runtime.config)?;
+                tracing::info!(
+                    transport.mode = runtime.config.transport.mode.as_str(),
+                    "TLS context built successfully"
+                );
+                Some(RustlsConfig::from_config(Arc::new(server_config)))
+            }
+        };
+
+        log_phase(StartupPhase::BindListener);
+        let listener = bind_tcp_listener(runtime.addr)?;
+        log_bound_endpoints(runtime);
+        log_phase(StartupPhase::StartServer);
+
+        let service = app.into_make_service_with_connect_info::<SocketAddr>();
+        let addr = runtime.addr;
+        let bind_err = |error| StartupError::bind(addr, error);
+        let runtime_err = |e: std::io::Error| StartupError::runtime(e.to_string());
+
+        match tls {
+            Some(tls) => from_tcp_rustls(listener, tls)
+                .map_err(bind_err)?
+                .handle(handle)
+                .serve(service)
+                .await
+                .map_err(runtime_err)?,
+            None => from_tcp(listener)
+                .map_err(bind_err)?
+                .handle(handle)
+                .serve(service)
+                .await
+                .map_err(runtime_err)?,
         }
-    };
 
-    log_phase(StartupPhase::BindListener);
-    let listener = bind_tcp_listener(runtime.addr)?;
-    log_bound_endpoints(runtime);
-    log_phase(StartupPhase::StartServer);
-
-    let service = app.into_make_service_with_connect_info::<SocketAddr>();
-    let addr = runtime.addr;
-    let bind_err = |error| StartupError::bind(addr, error);
-    let runtime_err = |e: std::io::Error| StartupError::runtime(e.to_string());
-
-    match tls {
-        Some(tls) => from_tcp_rustls(listener, tls)
-            .map_err(bind_err)?
-            .handle(handle)
-            .serve(service)
-            .await
-            .map_err(runtime_err)?,
-        None => from_tcp(listener)
-            .map_err(bind_err)?
-            .handle(handle)
-            .serve(service)
-            .await
-            .map_err(runtime_err)?,
+        Ok::<(), StartupError>(())
     }
+    .await;
+    ready.store(false, Ordering::Release);
+    signal_task.abort();
+    let _ = signal_task.await;
 
-    server
-        .shutdown()
-        .await
-        .map_err(|e| StartupError::runtime(e.to_string()))?;
-    Ok(())
+    let drained = server.shutdown().await;
+    if let Err(error) = &drained {
+        tracing::error!(%error, "server shutdown failed after storage drain");
+    }
+    serving?;
+    drained.map_err(|e| StartupError::runtime(e.to_string()))
 }
 
 fn log_bound_endpoints(runtime: &AppRuntime) {

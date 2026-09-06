@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bound server-owned synchronous storage work with `limits.max_storage_jobs`
+  (default 64), shared across HTTP routes and subscription persistence. Accepted
+  jobs retain capacity and storage ownership after disconnect; shutdown drains
+  them while the serving runtime remains alive. Saturation returns 503 with
+  `Retry-After: 1`; idle live reads and webhook HTTP remain async.
+
 - Durable subscription APIs with normalized configuration identity, glob and
   explicit membership, signed Ed25519 webhooks and JWKS discovery, pull-wake
   claims, cursor acknowledgements, heartbeats, release, and generation fencing.
@@ -46,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across the memory, file, and ACID backends.
 
 ### Fixed
+
+- Long-poll timeout rereads return newly available data instead of advancing an
+  empty response past it. Shutdown preserves the last empty snapshot's offset.
+- Keep completed webhook results bounded and pending through storage saturation.
+  Drain storage even after subscription-worker or listener failure.
 
 - Ordinary final append and closure share one storage commit and resume snapshot.
   File operations use an undo journal to recover interrupted log/metadata updates

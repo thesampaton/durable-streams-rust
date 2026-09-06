@@ -115,6 +115,15 @@ pub struct ProblemResponse {
     telemetry: Option<Box<ProblemTelemetry>>,
 }
 
+impl crate::execution::JobError for ProblemResponse {
+    fn from_execution(error: crate::execution::ExecutionError) -> Self {
+        error.into_domain().into()
+    }
+    fn is_server_error(&self) -> bool {
+        self.problem.status >= 500
+    }
+}
+
 /// Response result alias for handlers that emit structured problem details.
 pub type Result<T> = std::result::Result<T, ProblemResponse>;
 

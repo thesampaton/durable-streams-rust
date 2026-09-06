@@ -16,12 +16,12 @@ use std::sync::Arc;
 ///
 /// Returns 404 if stream doesn't exist or has expired.
 pub async fn stream_metadata(
-    State(storage): State<Arc<crate::streams::StreamService>>,
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
 ) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
-        let metadata = storage.head(&name)?;
+        let metadata = storage.head(&name).await?;
         let mut response = StreamResponse::new(StatusCode::OK)
             .content_type(&metadata.config.content_type)
             .next_offset(&metadata.next_offset)

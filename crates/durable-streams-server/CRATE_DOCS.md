@@ -39,7 +39,9 @@ result?;
 Clone the running server or its routers for additional listeners. They share
 one owner and worker; a second independent server using the same storage `Arc`
 is rejected. Dropping the last handle/router cancels the worker. Explicit
-`shutdown` also waits for delivery tasks to finish cancellation. HTTP listeners
+`shutdown` also waits for delivery cancellation and all admitted storage jobs.
+Accepted writes retain capacity and storage ownership after a request disconnects.
+Keep the serving runtime alive until this drain completes. HTTP listeners
 remain caller-owned. Server shutdown cancels a child token, leaving unrelated
 users of the supplied parent token unaffected.
 
@@ -79,8 +81,16 @@ with normalized content type and an initialized expiration deadline. Choose one
 Invalid TTL bounds fail before mutation. `with_closed(true)` creates a closed
 stream, including its initial body.
 
-The storage trait remains synchronous. File I/O and lock waits currently run
-on the calling thread; embedders should account for that execution cost.
+The storage trait and direct `StreamService` calls remain synchronous and run
+on the caller's thread. HTTP handlers and subscription persistence use a private
+bounded blocking executor owned by the server. Direct Rust calls are outside
+that executor's capacity and shutdown accounting.
+
+[`config::LimitsConfig::max_storage_jobs`] defaults to 64 and bounds queued plus
+running storage operations across router clones, listeners and subscriptions.
+Saturation returns 503 with `Retry-After: 1`; background work defers. Idle live
+reads, uploads and webhook network I/O do not hold storage slots. The setting
+does not bound all request/response memory or other users of Tokio's blocking pool.
 
 # API map
 

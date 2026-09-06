@@ -306,6 +306,8 @@ pub struct LimitsConfig {
     pub max_stream_name_bytes: usize,
     /// Maximum number of `/`-separated segments in a stream name.
     pub max_stream_name_segments: usize,
+    /// Maximum queued plus running server-owned storage jobs, shared by all routes and workers.
+    pub max_storage_jobs: usize,
 }
 
 /// HTTP surface configuration.
@@ -547,6 +549,9 @@ pub enum ConfigValidationError {
     #[error("limits.max_stream_name_segments must be at least 1")]
     /// The stream-name segment limit is zero.
     MaxStreamNameSegmentsTooSmall,
+    /// Storage execution capacity is zero or exceeds the semaphore limit.
+    #[error("limits.max_storage_jobs must be between 1 and the Tokio semaphore limit")]
+    InvalidMaxStorageJobs,
     #[error("storage.data_dir must be a non-empty path when storage.mode is '{mode}'")]
     /// A persistence mode requires a non-empty data directory.
     EmptyStorageDataDir {
@@ -702,6 +707,7 @@ struct LimitsConfigPatch {
     max_request_body_bytes: Option<usize>,
     max_stream_name_bytes: Option<usize>,
     max_stream_name_segments: Option<usize>,
+    max_storage_jobs: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -924,6 +930,9 @@ impl Config {
     }
 
     fn apply_limits_patch(&mut self, patch: &LimitsConfigPatch) {
+        if let Some(value) = patch.max_storage_jobs {
+            self.limits.max_storage_jobs = value;
+        }
         if let Some(max_memory_bytes) = patch.max_memory_bytes {
             self.limits.max_memory_bytes = max_memory_bytes;
         }
@@ -1126,6 +1135,7 @@ impl Config {
         env_parse_into!(self, get, "DS_LIMITS__MAX_REQUEST_BODY_BYTES" => limits.max_request_body_bytes : usize);
         env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_BYTES" => limits.max_stream_name_bytes : usize);
         env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS" => limits.max_stream_name_segments : usize);
+        env_parse_into!(self, get, "DS_LIMITS__MAX_STORAGE_JOBS" => limits.max_storage_jobs : usize);
         Ok(())
     }
 
@@ -1277,6 +1287,7 @@ impl Config {
     }
 
     pub(crate) fn validate_router(&self) -> Result<(), ConfigValidationError> {
+        self.validate_storage_execution()?;
         validate_cors_origins(&self.http.cors_origins)?;
         validate_stream_base_path(&self.http.stream_base_path)?;
         if self.admin.enabled {
@@ -1295,7 +1306,15 @@ impl Config {
         validate_proxy(self)
     }
 
+    fn validate_storage_execution(&self) -> Result<(), ConfigValidationError> {
+        if !(1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.limits.max_storage_jobs) {
+            return Err(ConfigValidationError::InvalidMaxStorageJobs);
+        }
+        Ok(())
+    }
+
     fn validate_limits(&self) -> Result<(), ConfigValidationError> {
+        self.validate_storage_execution()?;
         if self.limits.max_memory_bytes == 0 {
             return Err(ConfigValidationError::MaxMemoryBytesTooSmall);
         }
@@ -1545,6 +1564,7 @@ impl Default for Config {
                 max_request_body_bytes: 10 * 1024 * 1024,
                 max_stream_name_bytes: 1024,
                 max_stream_name_segments: 8,
+                max_storage_jobs: 64,
             },
             http: HttpConfig {
                 cors_origins: "*".to_string(),
@@ -1977,6 +1997,43 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn storage_job_limit_layers_and_validates_for_embedding() {
+        let mut config = Config::default();
+        assert_eq!(config.limits.max_storage_jobs, 64);
+        let patch = Figment::new()
+            .merge(Toml::string("[limits]\nmax_storage_jobs = 3"))
+            .extract::<ConfigPatch>()
+            .unwrap();
+        config.apply_limits_patch(&patch.limits);
+        assert_eq!(config.limits.max_storage_jobs, 3);
+        config
+            .apply_limits_env(&lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "2")]))
+            .unwrap();
+        assert_eq!(config.limits.max_storage_jobs, 2);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["limits"]["max_storage_jobs"],
+            2
+        );
+        config.validate_router().unwrap();
+        for value in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            config.limits.max_storage_jobs = value;
+            assert!(matches!(
+                config.validate_router(),
+                Err(ConfigValidationError::InvalidMaxStorageJobs)
+            ));
+            assert!(matches!(
+                config.validate_limits(),
+                Err(ConfigValidationError::InvalidMaxStorageJobs)
+            ));
+        }
+        assert!(
+            config
+                .apply_limits_env(&lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "invalid")]))
+                .is_err()
+        );
+    }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs

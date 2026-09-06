@@ -50,6 +50,7 @@ pub durable_streams_server::config::ConfigValidationError::InvalidCorsOrigin
 pub durable_streams_server::config::ConfigValidationError::InvalidCorsOrigin::value: alloc::string::String
 pub durable_streams_server::config::ConfigValidationError::InvalidIdentityHeaderName
 pub durable_streams_server::config::ConfigValidationError::InvalidIdentityHeaderName::value: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidMaxStorageJobs
 pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath
 pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath::reason: alloc::string::String
 pub durable_streams_server::config::ConfigValidationError::InvalidStreamBasePath::value: alloc::string::String
@@ -179,6 +180,7 @@ pub durable_streams_server::config::HttpConfig::stream_base_path: alloc::string:
 #[non_exhaustive] pub struct durable_streams_server::config::LimitsConfig
 pub durable_streams_server::config::LimitsConfig::max_memory_bytes: u64
 pub durable_streams_server::config::LimitsConfig::max_request_body_bytes: usize
+pub durable_streams_server::config::LimitsConfig::max_storage_jobs: usize
 pub durable_streams_server::config::LimitsConfig::max_stream_bytes: u64
 pub durable_streams_server::config::LimitsConfig::max_stream_name_bytes: usize
 pub durable_streams_server::config::LimitsConfig::max_stream_name_segments: usize

@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// Returns error if stream doesn't exist, content-type mismatches,
 /// stream is closed, or body is empty without Stream-Closed header.
 pub async fn append_data(
-    State(storage): State<Arc<crate::streams::StreamService>>,
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     axum::Extension(crate::router::RequestBodyLimit(body_limit)): axum::Extension<
@@ -38,73 +38,77 @@ pub async fn append_data(
 ) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
         let body_bytes = read_body(body, body_limit).await?;
-        let should_close = parse_stream_closed(&headers);
-        let is_close_only = body_bytes.is_empty() && should_close;
+        storage
+            .run("append", move |storage| {
+                let should_close = parse_stream_closed(&headers);
+                let is_close_only = body_bytes.is_empty() && should_close;
 
-        // Content-Type: required when body is present, optional for close-only
-        let content_type_raw = headers.get("content-type").and_then(|v| v.to_str().ok());
+                // Content-Type: required when body is present, optional for close-only
+                let content_type_raw = headers.get("content-type").and_then(|v| v.to_str().ok());
 
-        let normalized_ct = if is_close_only {
-            content_type_raw
-                .map(headers::normalize_content_type)
-                .unwrap_or_default()
-        } else {
-            let ct = content_type_raw.ok_or_else(|| Error::InvalidHeader {
-                header: "Content-Type".to_string(),
-                reason: "missing required header".to_string(),
-            })?;
-            headers::normalize_content_type(ct)
-        };
+                let normalized_ct = if is_close_only {
+                    content_type_raw
+                        .map(headers::normalize_content_type)
+                        .unwrap_or_default()
+                } else {
+                    let ct = content_type_raw.ok_or_else(|| Error::InvalidHeader {
+                        header: "Content-Type".to_string(),
+                        reason: "missing required header".to_string(),
+                    })?;
+                    headers::normalize_content_type(ct)
+                };
 
-        let producer_headers = producer::parse_producer_headers(&headers)?;
+                let producer_headers = producer::parse_producer_headers(&headers)?;
 
-        let stream_seq = headers
-            .get(names::STREAM_SEQ)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
+                let stream_seq = headers
+                    .get(names::STREAM_SEQ)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
 
-        if body_bytes.is_empty() && !should_close {
-            return Err(ProblemResponse::from(Error::EmptyBody));
-        }
+                if body_bytes.is_empty() && !should_close {
+                    return Err(ProblemResponse::from(Error::EmptyBody));
+                }
 
-        let messages = extract_messages(body_bytes, &normalized_ct)?;
+                let messages = extract_messages(body_bytes, &normalized_ct)?;
 
-        // PROTOCOL.md §9.1.3 rejects [] even when closure is requested.
-        // A genuinely empty close-only body remains valid.
-        if messages.is_empty() && !is_close_only {
-            return Err(ProblemResponse::from(Error::EmptyArray));
-        }
+                // PROTOCOL.md §9.1.3 rejects [] even when closure is requested.
+                // A genuinely empty close-only body remains valid.
+                if messages.is_empty() && !is_close_only {
+                    return Err(ProblemResponse::from(Error::EmptyArray));
+                }
 
-        let seq_ref = stream_seq.as_deref();
+                let seq_ref = stream_seq.as_deref();
 
-        if let Some(ref prod) = producer_headers {
-            handle_producer_append(ProducerAppendArgs {
-                storage: &storage,
-                name: &name,
-                messages,
-                content_type: &normalized_ct,
-                producer: prod,
-                should_close,
-                is_close_only,
-                seq: seq_ref,
+                if let Some(ref prod) = producer_headers {
+                    handle_producer_append(ProducerAppendArgs {
+                        storage,
+                        name: &name,
+                        messages,
+                        content_type: &normalized_ct,
+                        producer: prod,
+                        should_close,
+                        is_close_only,
+                        seq: seq_ref,
+                    })
+                } else {
+                    handle_non_producer_append(
+                        storage,
+                        &name,
+                        messages,
+                        &normalized_ct,
+                        should_close,
+                        seq_ref,
+                    )
+                }
             })
-        } else {
-            handle_non_producer_append(
-                &storage,
-                &name,
-                messages,
-                &normalized_ct,
-                should_close,
-                seq_ref,
-            )
-        }
+            .await
     })
     .await
 }
 
 /// Non-producer append path. Always returns 204 No Content on success.
 fn handle_non_producer_append(
-    storage: &Arc<crate::streams::StreamService>,
+    storage: &crate::streams::StreamService,
     name: &str,
     messages: Vec<bytes::Bytes>,
     content_type: &str,
@@ -125,7 +129,7 @@ fn handle_non_producer_append(
 }
 
 struct ProducerAppendArgs<'a> {
-    storage: &'a Arc<crate::streams::StreamService>,
+    storage: &'a crate::streams::StreamService,
     name: &'a str,
     messages: Vec<bytes::Bytes>,
     content_type: &'a str,
@@ -204,10 +208,7 @@ fn handle_producer_append(args: ProducerAppendArgs<'_>) -> ProblemResult<Respons
 }
 
 /// Build the 409 Conflict response for a closed stream.
-fn stream_closed_response(
-    storage: &Arc<crate::streams::StreamService>,
-    name: &str,
-) -> ProblemResponse {
+fn stream_closed_response(storage: &crate::streams::StreamService, name: &str) -> ProblemResponse {
     let response = ProblemResponse::from(Error::StreamClosed)
         .with_header(names::STREAM_CLOSED, header_value("true"));
 

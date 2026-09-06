@@ -5,6 +5,7 @@
 //! multiple listeners with the same initialized state.
 
 use crate::config::Config;
+use crate::execution::{AsyncStreams, Execution};
 use crate::middleware::proxy_trust::ProxyTrustState;
 use crate::protocol::stream_name::StreamNameLimits;
 use crate::{handlers, middleware, storage::Storage};
@@ -14,6 +15,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
+
+#[cfg(test)]
+mod tests;
 
 /// Combined read-stream configuration extracted as a single axum `Extension`.
 ///
@@ -38,8 +42,8 @@ pub(crate) struct StreamBasePath(pub Arc<str>);
 
 /// Optional readiness and cancellation hooks for [`Server`].
 ///
-/// By default `/readyz` is omitted. [`RunningServer::shutdown`] cancels and joins
-/// the worker. Supply an external token with [`Self::with_shutdown`] to integrate
+/// By default `/readyz` is omitted. [`RunningServer::shutdown`] joins the worker
+/// and drains admitted storage jobs. Supply an external token with [`Self::with_shutdown`] to integrate
 /// cancellation with caller-owned HTTP listeners.
 #[derive(Debug, Clone, Default)]
 pub struct RouterOptions {
@@ -56,7 +60,7 @@ impl RouterOptions {
         self
     }
 
-    /// Propagate cancellation to long-poll, SSE, and subscription workers.
+    /// Stop storage admission and cancel long-poll, SSE, and subscription workers.
     /// The caller must also stop its HTTP listener during shutdown.
     #[must_use]
     pub fn with_shutdown(mut self, shutdown: CancellationToken) -> Self {
@@ -89,11 +93,11 @@ pub enum ServerError {
     ShutdownRequested,
 }
 
-struct StorageLease(usize);
+pub(crate) struct StorageLease(Arc<dyn Storage>);
 static OWNERS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
     std::sync::OnceLock::new();
 impl StorageLease {
-    fn acquire(storage: &Arc<dyn Storage>) -> Result<Self, ServerError> {
+    pub(crate) fn acquire(storage: &Arc<dyn Storage>) -> Result<Self, ServerError> {
         let identity = Arc::as_ptr(storage).cast::<()>() as usize;
         let mut owners = OWNERS
             .get_or_init(Default::default)
@@ -102,7 +106,7 @@ impl StorageLease {
         if !owners.insert(identity) {
             return Err(ServerError::StorageAlreadyOwned);
         }
-        Ok(Self(identity))
+        Ok(Self(storage.clone()))
     }
 }
 impl Drop for StorageLease {
@@ -111,13 +115,13 @@ impl Drop for StorageLease {
             owners
                 .lock()
                 .expect("storage owner registry lock poisoned")
-                .remove(&self.0);
+                .remove(&(Arc::as_ptr(&self.0).cast::<()>() as usize));
         }
     }
 }
 
 struct ServerState {
-    service: Arc<crate::streams::StreamService>,
+    service: Arc<AsyncStreams>,
     subscriptions: Arc<crate::subscriptions::Service<dyn Storage>>,
     config: Config,
     options: RouterOptions,
@@ -126,6 +130,7 @@ struct ServerState {
 }
 impl Drop for ServerState {
     fn drop(&mut self) {
+        self.service.execution.close();
         self.options.shutdown.cancel();
     }
 }
@@ -154,21 +159,30 @@ impl Server {
             shutdown: options.shutdown.child_token(),
             ..options
         };
-        let lease = StorageLease::acquire(&service.storage)?;
-        let subscriptions = crate::subscriptions::initialize(service.storage.clone(), config)?;
+        let lease = Arc::new(StorageLease::acquire(&service.storage)?);
+        let execution = Execution::new(
+            config.limits.max_storage_jobs,
+            options.shutdown.clone(),
+            lease.clone(),
+        );
+        let subscriptions =
+            crate::subscriptions::initialize(service.storage.clone(), config, execution.clone())?;
         Ok(Self {
             state: ServerState {
-                service: Arc::new(service),
+                service: Arc::new(AsyncStreams {
+                    service: Arc::new(service),
+                    execution,
+                }),
                 subscriptions,
                 config: config.clone(),
                 options,
                 worker: tokio::sync::Mutex::new(None),
-                lease: Arc::new(lease),
+                lease,
             },
         })
     }
 
-    /// Start the subscription worker in the currently entered Tokio runtime.
+    /// Bind storage execution and start the subscription worker in the entered Tokio runtime.
     ///
     /// # Errors
     /// Returns [`ServerError::RuntimeRequired`] outside Tokio.
@@ -178,6 +192,7 @@ impl Server {
         }
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| ServerError::RuntimeRequired)?;
+        self.state.service.execution.start(runtime.clone());
         let weak = Arc::downgrade(&self.state.subscriptions);
         let shutdown = self.state.options.shutdown.clone();
         let lease = self.state.lease.clone();
@@ -194,18 +209,20 @@ impl Server {
 
 /// Cloneable server owner with composable HTTP surfaces and explicit shutdown.
 ///
-/// Routers retain this owner's state. Dropping the final handle/router cancels
-/// the worker; use [`Self::shutdown`] to also await its completion. Stop HTTP
+/// Routers retain this owner's state. Dropping the final handle/router closes
+/// storage admission and cancels the worker. Use [`Self::shutdown`] to await
+/// worker completion and every admitted storage job. Stop HTTP
 /// listeners separately and drain them using the same cancellation source.
 #[derive(Clone)]
 pub struct RunningServer {
     state: Arc<ServerState>,
 }
 impl RunningServer {
-    /// Access shared stream operations without backend-specific types.
+    /// Access synchronous stream operations without backend-specific types.
+    /// These direct calls use the caller's thread and are outside server admission/drain accounting.
     #[must_use]
     pub fn streams(&self) -> &crate::streams::StreamService {
-        &self.state.service
+        &self.state.service.service
     }
 
     /// Combined protocol, subscriptions, optional admin, and probe routes.
@@ -233,20 +250,31 @@ impl RunningServer {
         self.finish(self.probe_group())
     }
 
-    /// Cancel live reads and workers, then await worker and delivery-task completion.
+    /// Close storage admission, cancel live reads/workers, and drain admitted storage jobs.
     ///
-    /// Concurrent callers all wait for completion. HTTP listeners are caller-owned.
+    /// Concurrent callers all wait for completion. Cancelling this future leaves the
+    /// drain available to a subsequent caller. Jobs retain their capacity and storage
+    /// ownership after a request disconnects. Keep the serving Tokio runtime alive
+    /// until draining completes; a deadline cannot stop synchronous filesystem calls.
+    /// HTTP listeners are caller-owned. Completion does not imply every operation succeeded.
     /// # Errors
-    /// Returns the Tokio join error if the worker panicked or was aborted externally.
+    /// Returns the worker's Tokio join error after storage drain if it panicked or was aborted.
     pub async fn shutdown(&self) -> Result<(), tokio::task::JoinError> {
+        self.state.service.execution.close();
         self.state.options.shutdown.cancel();
         let mut worker = self.state.worker.lock().await;
-        if let Some(task) = worker.as_mut() {
+        let result = if let Some(task) = worker.as_mut() {
             let result = task.await;
+            if let Err(error) = &result {
+                tracing::error!(%error, "subscription worker stopped unexpectedly; draining storage");
+            }
             *worker = None;
-            result?;
-        }
-        Ok(())
+            result
+        } else {
+            Ok(())
+        };
+        self.state.service.execution.drain().await;
+        result
     }
 
     fn protocol_group(&self) -> Router {
@@ -326,7 +354,7 @@ fn cors_layer(origins: &str) -> CorsLayer {
 /// routes are kept out of this tree so protocol handlers do not need to know
 /// about admin enablement or policy.
 fn protocol_routes(
-    storage: Arc<crate::streams::StreamService>,
+    storage: Arc<AsyncStreams>,
     config: &Config,
     shutdown: CancellationToken,
     stream_base_path: Arc<str>,
@@ -366,7 +394,7 @@ fn protocol_routes(
 /// These routes are operator-focused and opt-in. Keep them in a separate
 /// subrouter so different Tower middleware can be layered around admin traffic
 /// without changing protocol behaviour.
-fn admin_routes(storage: Arc<crate::streams::StreamService>) -> Router {
+fn admin_routes(storage: Arc<AsyncStreams>) -> Router {
     Router::new()
         .route("/streams", get(handlers::list::list_streams))
         .layer(axum_middleware::from_fn(

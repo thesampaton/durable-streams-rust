@@ -18,11 +18,16 @@ use std::sync::Arc;
 ///
 /// Returns 500 if the underlying storage backend cannot be read.
 pub async fn list_streams(
-    State(storage): State<Arc<crate::streams::StreamService>>,
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     original_uri: OriginalUri,
 ) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
-        Ok(Json(storage.list_entries()?).into_response())
+        Ok(Json(
+            storage
+                .run("list", crate::streams::StreamService::list_entries)
+                .await?,
+        )
+        .into_response())
     })
     .await
 }

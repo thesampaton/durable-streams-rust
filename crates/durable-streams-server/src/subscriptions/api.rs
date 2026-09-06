@@ -2,6 +2,7 @@ use super::model::{Configuration, Database, DeliveryType, Link, Subscription};
 use super::{
     ApiError, ApiResult, Completion, Service, crypto, delivery, issue_wake, model, pending, refresh,
 };
+use crate::execution::JobError;
 use crate::{
     middleware::proxy_trust::ProxyTrustResult, protocol::offset::Offset, storage::Storage,
 };
@@ -113,8 +114,37 @@ pub(super) async fn control<S: Storage + ?Sized + 'static>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let mut configuration = validated_configuration(&method, &body, service.allow_local).await?;
-    let mut guard = service.database.lock().await;
+    let configuration = validated_configuration(&method, &body, service.allow_local).await?;
+    let execution = service.execution.clone();
+    execution
+        .run("subscription control", move || {
+            control_transaction(
+                &service,
+                &control,
+                &origin,
+                method,
+                &headers,
+                &body,
+                configuration,
+            )
+        })
+        .await
+        .map_err(ApiError::from_execution)?
+}
+
+fn control_transaction<S: Storage + ?Sized>(
+    service: &Service<S>,
+    control: &str,
+    origin: &ProxyTrustResult,
+    method: Method,
+    headers: &HeaderMap,
+    body: &Bytes,
+    mut configuration: Option<Configuration>,
+) -> ApiResult<Response> {
+    let mut guard = service
+        .database
+        .lock()
+        .expect("subscription database lock poisoned");
     service.load(&mut guard)?;
     let mut db = guard.as_ref().expect("database loaded").clone();
     let jwk = crypto::jwk(&db.signing_key)?;
@@ -148,11 +178,11 @@ pub(super) async fn control<S: Storage + ?Sized + 'static>(
     refresh(&mut db, &tails, now);
     let response = if method == Method::PUT && action.is_empty() {
         create_subscription(
-            &service,
+            service,
             &mut db,
             id,
             configuration.take().expect("PUT configuration parsed"),
-            &origin,
+            origin,
             &tails,
         )?
     } else {
@@ -173,7 +203,7 @@ pub(super) async fn control<S: Storage + ?Sized + 'static>(
                 sub.wake = None;
                 StatusCode::NO_CONTENT.into_response()
             }
-            (Method::POST, "streams") => add_streams(sub, &body, &tails)?,
+            (Method::POST, "streams") => add_streams(sub, body, &tails)?,
             (Method::DELETE, path) if path.starts_with("streams/") => {
                 let path = &path[8..];
                 model::validate_path(path)?;
@@ -187,15 +217,15 @@ pub(super) async fn control<S: Storage + ?Sized + 'static>(
                 StatusCode::NO_CONTENT.into_response()
             }
             (Method::POST, "claim") if sub.config.kind == DeliveryType::PullWake => {
-                claim_subscription(sub, id, &db.signing_key, &body, &tails, now)?
+                claim_subscription(sub, id, &db.signing_key, body, &tails, now)?
             }
             (Method::POST, "callback" | "ack" | "release") => complete(
                 sub,
                 CompletionContext {
                     id,
                     key: &db.signing_key,
-                    headers: &headers,
-                    body: &body,
+                    headers,
+                    body,
                     action,
                     tails: &tails,
                     now,

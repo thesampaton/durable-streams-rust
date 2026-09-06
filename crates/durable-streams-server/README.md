@@ -107,8 +107,17 @@ server across listeners.
 `protocol_router()`, `admin_router()`, and `probe_router()` support separate
 middleware. Embedded readiness is opt-in through `RouterOptions::with_readiness`.
 The application owns its HTTP listener: cancel live reads, drain the listener,
-then await `RunningServer::shutdown()` to join the worker. Storage operations
-remain synchronous and can block the calling thread.
+then await `RunningServer::shutdown()` to join the worker and drain admitted
+storage jobs before stopping Tokio. HTTP handlers and subscription persistence
+share bounded blocking execution; idle live reads and webhook HTTP remain async.
+Direct `Storage`/`StreamService` calls remain synchronous and outside that bound.
+
+`limits.max_storage_jobs` (or `DS_LIMITS__MAX_STORAGE_JOBS`) defaults to 64. It
+limits queued plus running local jobs across every listener/router clone. When
+full, requests receive 503 with `Retry-After: 1` and background work defers.
+Accepted writes keep their slot after disconnect. This does not impose an
+aggregate budget on uploads, response buffers or unrelated blocking tasks.
+See the [execution design](../../docs/design/blocking-execution-boundary.md).
 
 Run `cargo doc -p durable-streams-server --no-deps --open` for compiled Rust
 examples and API details. The [migration guide](../../docs/migrations/server-api.md)

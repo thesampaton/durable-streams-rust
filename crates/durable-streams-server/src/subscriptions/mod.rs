@@ -9,28 +9,31 @@ mod api;
 mod crypto;
 mod delivery;
 mod model;
+mod worker;
 
-use crate::{config::Config, protocol::offset::Offset, storage::Storage};
+pub(crate) use worker::run;
+
+use crate::{
+    config::Config,
+    execution::{Execution, ExecutionError, JobError},
+    protocol::offset::Offset,
+    storage::Storage,
+};
 use axum::{
     Json, Router,
-    body::Bytes,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::any,
 };
-use chrono::Utc;
 use model::{Database, DeliveryType, Link, Subscription, Wake};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Weak},
-    time::Duration,
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
 };
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ApiError {
     status: StatusCode,
     code: &'static str,
@@ -97,12 +100,19 @@ impl IntoResponse for ApiError {
         if let (Some(dst), Some(extra)) = (error.as_object_mut(), self.extra.as_object()) {
             dst.extend(extra.clone());
         }
-        (self.status, Json(json!({"error":error}))).into_response()
+        let mut response = (self.status, Json(json!({"error":error}))).into_response();
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 
 pub(crate) struct Service<S: ?Sized> {
     storage: Arc<S>,
+    execution: Arc<Execution>,
     database: Mutex<Option<Database>>,
     base_path: String,
     allow_local: bool,
@@ -111,9 +121,11 @@ pub(crate) struct Service<S: ?Sized> {
 pub(crate) fn initialize(
     storage: Arc<dyn Storage>,
     config: &Config,
+    execution: Arc<Execution>,
 ) -> Result<Arc<Service<dyn Storage>>, crate::router::ServerError> {
     let mut service = Service {
         storage,
+        execution,
         database: Mutex::new(None),
         base_path: config
             .http
@@ -124,7 +136,10 @@ pub(crate) fn initialize(
     };
     let mut database = None;
     service.load(&mut database)?;
-    *service.database.get_mut() = database;
+    *service
+        .database
+        .get_mut()
+        .expect("new subscription database lock") = database;
     Ok(Arc::new(service))
 }
 
@@ -279,190 +294,15 @@ struct Completion {
     done: bool,
 }
 
-struct Job {
-    id: String,
-    generation: u64,
-    url: String,
-    body: Vec<u8>,
-    signature: String,
-}
-
-pub(crate) async fn run<S: Storage + ?Sized + 'static>(
-    weak: Weak<Service<S>>,
-    shutdown: CancellationToken,
-) {
-    let mut interval = tokio::time::interval(Duration::from_millis(100));
-    let mut jobs: tokio::task::JoinSet<(String, u64, ApiResult<bool>)> =
-        tokio::task::JoinSet::new();
-    let mut active = BTreeSet::new();
-    loop {
-        tokio::select! {
-            () = shutdown.cancelled() => break,
-            Some(result) = jobs.join_next(), if !jobs.is_empty() => {
-                if let Ok((id, generation, result)) = result {
-                    active.remove(&(id.clone(), generation));
-                    let Some(service) = weak.upgrade() else { break; };
-                    if let Err(error) = finish(&service, &id, generation, result).await { tracing::warn!(code = error.code, "could not persist webhook result"); }
-                }
-            },
-            _ = interval.tick() => {
-                let Some(service) = weak.upgrade() else { break; };
-                match tick(&service, &active).await {
-                    Ok(work) => for job in work {
-                        active.insert((job.id.clone(), job.generation));
-                        let allow_local = service.allow_local;
-                        jobs.spawn(async move {
-                            let result = delivery::deliver(&job.url, allow_local, job.body, job.signature).await;
-                            (job.id, job.generation, result)
-                        });
-                    },
-                    Err(error) => tracing::warn!(code = error.code, "subscription reconciliation failed"),
-                }
-            },
-        }
+impl JobError for ApiError {
+    fn is_server_error(&self) -> bool {
+        self.status.is_server_error()
     }
-    jobs.abort_all();
-    while jobs.join_next().await.is_some() {}
-}
-
-async fn tick<S: Storage + ?Sized>(
-    service: &Service<S>,
-    active: &BTreeSet<(String, u64)>,
-) -> ApiResult<Vec<Job>> {
-    let mut guard = service.database.lock().await;
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
-    // Avoid scanning application streams when no subscriptions need reconciliation.
-    if db.subscriptions.values().all(|s| s.deleted) {
-        return Ok(Vec::new());
+    fn from_execution(error: ExecutionError) -> Self {
+        let mut response = Self::internal("subscription execution unavailable");
+        if matches!(error, ExecutionError::Failed) {
+            response.status = StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        response
     }
-    let tails = service.tails()?;
-    let now = Utc::now().timestamp_millis();
-    refresh(&mut db, &tails, now);
-    let mut jobs = Vec::new();
-    let mut pull = Vec::new();
-    let jwk = crypto::jwk(&db.signing_key)?;
-    for (id, sub) in &mut db.subscriptions {
-        if sub.deleted {
-            continue;
-        }
-        if sub.wake.is_none() && pending(sub, &tails) {
-            issue_wake(sub, id, &db.signing_key, &tails, now)?;
-        }
-        let Some(wake) = &mut sub.wake else {
-            continue;
-        };
-        if wake.delivered
-            || sub.next_attempt_at > now
-            || active.contains(&(id.clone(), wake.generation))
-        {
-            continue;
-        }
-        if sub.config.kind == DeliveryType::PullWake {
-            if let Some(path) = wake.streams.iter().find(|s| s.has_pending).map(|s| &s.path) {
-                pull.push((id.clone(), wake.generation, sub.config.wake_stream.clone().expect("validated wake stream"), json!({"type":"wake", "subscription_id":id, "stream":path, "generation":wake.generation, "ts":now})));
-            }
-        } else if active.len() + jobs.len() < 16 {
-            wake.lease_until = Some(now + sub.config.lease_ttl_ms);
-            sub.failed = false;
-            let body = serde_json::to_vec(&json!({"subscription_id":id, "wake_id":wake.id, "generation":wake.generation, "streams":wake.streams,
-                "callback_url":format!("{}{}/__ds/subscriptions/{id}/callback", sub.origin, service.base_path), "callback_token":wake.token})).map_err(ApiError::json)?;
-            let timestamp = Utc::now().timestamp();
-            let mut signed = format!("{timestamp}.").into_bytes();
-            signed.extend_from_slice(&body);
-            let signature = format!(
-                "t={timestamp},kid={},ed25519={}",
-                jwk["kid"].as_str().expect("JWK kid"),
-                crypto::signature(&db.signing_key, &signed)?
-            );
-            jobs.push(Job {
-                id: id.clone(),
-                generation: wake.generation,
-                url: sub
-                    .config
-                    .webhook
-                    .as_ref()
-                    .expect("validated webhook")
-                    .url
-                    .clone(),
-                body,
-                signature,
-            });
-            // Persist a retry deadline before sending: restart must not produce a tight retry loop.
-            sub.next_attempt_at = now + 6_000;
-        }
-    }
-    service.save(&mut guard, db.clone())?;
-    // At-least-once wake publication: a crash between append and marking delivered
-    // may repeat a generation; subscription-level claims still fence workers.
-    for (id, generation, stream, event) in pull {
-        let bytes = Bytes::from(serde_json::to_vec(&event).map_err(ApiError::json)?);
-        let result = service
-            .storage
-            .append(&stream, bytes, "application/json")
-            .map(|result| result.start_offset);
-        if let Some(sub) = db.subscriptions.get_mut(&id) {
-            if result.is_ok() {
-                if let Some(wake) = &mut sub.wake
-                    && wake.generation == generation
-                {
-                    wake.delivered = true;
-                }
-                sub.failed = false;
-            } else {
-                sub.failed = true;
-                sub.next_attempt_at = now + 1_000;
-            }
-        }
-    }
-    service.save(&mut guard, db)?;
-    Ok(jobs)
-}
-
-async fn finish<S: Storage + ?Sized>(
-    service: &Service<S>,
-    id: &str,
-    generation: u64,
-    result: ApiResult<bool>,
-) -> ApiResult<()> {
-    let mut guard = service.database.lock().await;
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
-    let Some(sub) = db.subscriptions.get_mut(id).filter(|s| !s.deleted) else {
-        return Ok(());
-    };
-    let Some(wake) = &mut sub.wake else {
-        return Ok(());
-    };
-    if wake.generation != generation
-        || wake
-            .lease_until
-            .is_some_and(|until| until <= Utc::now().timestamp_millis())
-    {
-        return Ok(());
-    }
-    let now = Utc::now().timestamp_millis();
-    if let Ok(done) = result {
-        wake.delivered = true;
-        sub.failed = false;
-        sub.attempts = 0;
-        if done {
-            for stream in &wake.streams {
-                if let Some(link) = sub.links.get_mut(&stream.path) {
-                    link.acked_offset = link.acked_offset.clone().max(stream.tail_offset.clone());
-                }
-            }
-            sub.wake = None;
-            sub.next_attempt_at = now;
-        }
-    } else {
-        sub.failed = true;
-        let delay = 1_000_i64
-            .saturating_mul(1_i64 << sub.attempts.min(6))
-            .min(60_000);
-        sub.attempts = sub.attempts.saturating_add(1);
-        let jitter = crypto::retry_jitter()?;
-        sub.next_attempt_at = now + delay + delay * jitter / 1_000;
-    }
-    service.save(&mut guard, db)
 }

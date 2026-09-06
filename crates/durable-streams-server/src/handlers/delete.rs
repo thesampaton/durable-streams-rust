@@ -17,12 +17,14 @@ use std::sync::Arc;
 ///
 /// Returns `Error::NotFound` if the stream does not exist.
 pub async fn delete_stream(
-    State(storage): State<Arc<crate::streams::StreamService>>,
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
 ) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
-        storage.delete(&name)?;
+        storage
+            .run("delete", move |service| service.delete(&name))
+            .await?;
         Ok(StatusCode::NO_CONTENT.into_response())
     })
     .await
