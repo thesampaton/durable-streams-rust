@@ -125,9 +125,10 @@ Working-tree validation used Rust 1.94.1 and Node 20.16.0 (the CI Node major):
   roots and no competing test load.
 - Client conformance 0.2.3: 255 passed, zero failed, and 14 upstream capability
   skips. Client behavior fixes from the review remain separate.
-- Production storage calls have not been offloaded. No throughput or contention
-  benchmark was run. The release candidate still needs the repository's CI/MSRV
-  gates.
+- The blocking-boundary example passed its admission, disconnect, and drain
+  assertions against real file storage. It remains a proposal; production
+  storage calls have not been offloaded. No throughput or contention benchmark
+  was run. The release candidate still needs the repository's CI/MSRV gates.
 
 ### 2026-09-06 file backend consolidation
 

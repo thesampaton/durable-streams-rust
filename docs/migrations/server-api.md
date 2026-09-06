@@ -150,8 +150,9 @@ These commits sync their journal, log, metadata, and directory before returning;
 no throughput improvement is claimed.
 
 Storage and `StreamService` remain synchronous. The proposed execution boundary
-for HTTP/background callers will be reviewed separately, following the
-correctness and API work above.
+for HTTP/background callers is a [separate design review with a runnable
+example](../design/blocking-execution-boundary.md), following the correctness
+and API work above.
 
 ## Legacy transport configuration
 
