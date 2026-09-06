@@ -947,43 +947,10 @@ impl AcidStorage {
         let meta = Self::read_stream_meta(&streams, name)?
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
-
-        if from_offset.is_now() {
-            return Ok(ReadResult {
-                messages: Vec::new(),
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            });
-        }
-
-        if meta.fork_info.is_none() {
-            drop(streams);
-            drop(txn);
-            let messages = self.read_non_forked_table_messages(name, from_offset, shard_idx)?;
-
-            return Ok(ReadResult {
-                messages,
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            });
-        }
-
-        let fi = meta.fork_info.clone().expect("checked above");
-        let closed = meta.closed;
-        drop(streams);
-        drop(txn);
-
-        let all_messages = self.collect_fork_chain_messages(name, from_offset, &fi)?;
-
-        Ok(ReadResult {
-            messages: all_messages,
-            next_offset,
-            at_tail: true,
-            closed,
-        })
+        let messages = txn
+            .open_table(MESSAGES)
+            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+        Self::read_snapshot(&streams, &messages, name, from_offset, &meta)
     }
 
     /// Read path when the stream has a TTL that needs renewal (write transaction).
@@ -1000,53 +967,11 @@ impl AcidStorage {
             .map_err(|e| Self::storage_err("failed to open streams table", e))?;
         let mut meta = Self::read_stream_meta(&streams, name)?
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
-        fork::check_stream_access(&meta.config, meta.state, name)?;
-
-        let next_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
-        let result = if from_offset.is_now() {
-            ReadResult {
-                messages: Vec::new(),
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            }
-        } else if meta.fork_info.is_none() {
-            let messages = self.read_non_forked_table_messages(name, from_offset, shard_idx)?;
-
-            ReadResult {
-                messages,
-                next_offset,
-                at_tail: true,
-                closed: meta.closed,
-            }
-        } else {
-            let fi = meta.fork_info.clone().expect("checked above");
-            let closed = meta.closed;
-            drop(streams);
-            drop(txn);
-
-            let all_messages = self.collect_fork_chain_messages(name, from_offset, &fi)?;
-
-            let shard = &self.shards[shard_idx];
-            let txn = Self::begin_write_txn(&shard.db)?;
-            let mut streams = txn
-                .open_table(STREAMS)
-                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-            let mut meta = Self::read_stream_meta(&streams, name)?
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-            fork::renew_ttl(&mut meta.config);
-            Self::write_stream_meta(&mut streams, name, &meta)?;
-            drop(streams);
-            txn.commit()
-                .map_err(|e| Self::storage_err("failed to commit ttl renewal", e))?;
-
-            return Ok(ReadResult {
-                messages: all_messages,
-                next_offset,
-                at_tail: true,
-                closed,
-            });
-        };
+        let messages = txn
+            .open_table(MESSAGES)
+            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+        let result = Self::read_snapshot(&streams, &messages, name, from_offset, &meta)?;
+        drop(messages);
 
         fork::renew_ttl(&mut meta.config);
         Self::write_stream_meta(&mut streams, name, &meta)?;
