@@ -1,8 +1,7 @@
 name: Pre-release
 
-# Heavier gates that are not part of the PR path because they either
-# require a nightly toolchain, take longer than the main CI loop, or
-# exercise the matrix of backends needed before a release.
+# Release-candidate validation, including the disk-backend matrix and client suite.
+# The public API snapshot also runs in the PR gate.
 #
 # Runs manually via "Run workflow" in the Actions tab, or automatically
 # when a per-crate release tag is pushed (for example

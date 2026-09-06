@@ -9,7 +9,7 @@ use std::process::Command;
 const SNAPSHOT_PATH: &str = "tests/snapshots/public-api.txt";
 
 #[test]
-#[ignore = "requires nightly rustdoc JSON; run before release"]
+#[ignore = "requires nightly rustdoc JSON; run via scripts/check-server-public-api.sh"]
 fn server_public_api_matches_snapshot() -> Result<(), Box<dyn Error>> {
     assert_running_on_nightly()?;
 

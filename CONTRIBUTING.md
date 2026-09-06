@@ -64,8 +64,9 @@ setup or assertion should fail the test; production code retains the lint.
 
 For public API changes, inspect the rustdoc and run
 `./scripts/check-server-public-api.sh` with the installed nightly toolchain.
-Review snapshot changes as compatibility changes, rather than accepting a new
-snapshot solely to make the test pass. For protocol changes, also run the
+The snapshot also runs in the required PR checks. Review snapshot changes as
+compatibility changes, rather than accepting a new snapshot solely to make the
+test pass. For protocol changes, also run the
 applicable conformance suite through `scripts/conformance`.
 
 ## Releasing
