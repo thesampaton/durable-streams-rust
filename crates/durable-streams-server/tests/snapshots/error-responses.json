@@ -1,0 +1,600 @@
+[
+  {
+    "body": {
+      "code": "NOT_FOUND",
+      "detail": "Stream not found: missing",
+      "status": 404,
+      "title": "Stream Not Found",
+      "type": "/errors/not-found"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 404,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "NOT_FOUND",
+      "detail": "Stream not found: missing",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Not Found",
+      "type": "/errors/not-found"
+    }
+  },
+  {
+    "body": {
+      "code": "ALREADY_EXISTS",
+      "detail": "Stream already exists with different configuration",
+      "status": 409,
+      "title": "Stream Already Exists",
+      "type": "/errors/already-exists"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "ALREADY_EXISTS",
+      "detail": "Stream already exists with different configuration",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Already Exists",
+      "type": "/errors/already-exists"
+    }
+  },
+  {
+    "body": {
+      "code": "INVALID_OFFSET",
+      "detail": "Invalid offset format: bad",
+      "status": 400,
+      "title": "Invalid Offset",
+      "type": "/errors/invalid-offset"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "INVALID_OFFSET",
+      "detail": "Invalid offset format: bad",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Invalid Offset",
+      "type": "/errors/invalid-offset"
+    }
+  },
+  {
+    "body": {
+      "code": "CONTENT_TYPE_MISMATCH",
+      "detail": "Content type mismatch: expected text/plain, got application/json",
+      "status": 409,
+      "title": "Content Type Mismatch",
+      "type": "/errors/content-type-mismatch"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "CONTENT_TYPE_MISMATCH",
+      "detail": "Content type mismatch: expected text/plain, got application/json",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Content Type Mismatch",
+      "type": "/errors/content-type-mismatch"
+    }
+  },
+  {
+    "body": {
+      "code": "STREAM_CLOSED",
+      "detail": "Stream is closed",
+      "status": 409,
+      "title": "Stream Closed",
+      "type": "/errors/stream-closed"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "STREAM_CLOSED",
+      "detail": "Stream is closed",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Closed",
+      "type": "/errors/stream-closed"
+    }
+  },
+  {
+    "body": {
+      "code": "SEQUENCE_CONFLICT",
+      "detail": "Producer sequence gap: expected 3, got 5",
+      "status": 409,
+      "title": "Sequence Conflict",
+      "type": "/errors/sequence-conflict"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "SEQUENCE_CONFLICT",
+      "detail": "Producer sequence gap: expected 3, got 5",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Sequence Conflict",
+      "type": "/errors/sequence-conflict"
+    }
+  },
+  {
+    "body": {
+      "code": "PRODUCER_EPOCH_FENCED",
+      "detail": "Producer epoch fenced: current 3, received 1",
+      "status": 403,
+      "title": "Producer Epoch Fenced",
+      "type": "/errors/producer-epoch-fenced"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 403,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "PRODUCER_EPOCH_FENCED",
+      "detail": "Producer epoch fenced: current 3, received 1",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Producer Epoch Fenced",
+      "type": "/errors/producer-epoch-fenced"
+    }
+  },
+  {
+    "body": {
+      "code": "BAD_REQUEST",
+      "detail": "Invalid producer state: incomplete headers",
+      "status": 400,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "BAD_REQUEST",
+      "detail": "Invalid producer state: incomplete headers",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    }
+  },
+  {
+    "body": {
+      "code": "PAYLOAD_TOO_LARGE",
+      "detail": "Memory limit exceeded",
+      "status": 413,
+      "title": "Payload Too Large",
+      "type": "/errors/payload-too-large"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 413,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "PAYLOAD_TOO_LARGE",
+      "detail": "Memory limit exceeded",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Payload Too Large",
+      "type": "/errors/payload-too-large"
+    }
+  },
+  {
+    "body": {
+      "code": "PAYLOAD_TOO_LARGE",
+      "detail": "Stream size limit exceeded",
+      "status": 413,
+      "title": "Payload Too Large",
+      "type": "/errors/payload-too-large"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 413,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "PAYLOAD_TOO_LARGE",
+      "detail": "Stream size limit exceeded",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Payload Too Large",
+      "type": "/errors/payload-too-large"
+    }
+  },
+  {
+    "body": {
+      "code": "BAD_REQUEST",
+      "detail": "Invalid TTL format: bad",
+      "status": 400,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "BAD_REQUEST",
+      "detail": "Invalid TTL format: bad",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    }
+  },
+  {
+    "body": {
+      "code": "BAD_REQUEST",
+      "detail": "Cannot specify both TTL and Expires-At",
+      "status": 400,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "BAD_REQUEST",
+      "detail": "Cannot specify both TTL and Expires-At",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    }
+  },
+  {
+    "body": {
+      "code": "NOT_FOUND",
+      "detail": "Stream has expired",
+      "status": 404,
+      "title": "Stream Not Found",
+      "type": "/errors/not-found"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 404,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "NOT_FOUND",
+      "detail": "Stream has expired",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Not Found",
+      "type": "/errors/not-found"
+    }
+  },
+  {
+    "body": {
+      "code": "INVALID_JSON",
+      "detail": "Invalid JSON: bad",
+      "status": 400,
+      "title": "Invalid JSON",
+      "type": "/errors/invalid-json"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "INVALID_JSON",
+      "detail": "Invalid JSON: bad",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Invalid JSON",
+      "type": "/errors/invalid-json"
+    }
+  },
+  {
+    "body": {
+      "code": "EMPTY_BODY",
+      "detail": "Empty request body requires Stream-Closed: true",
+      "status": 400,
+      "title": "Empty Body",
+      "type": "/errors/empty-body"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "EMPTY_BODY",
+      "detail": "Empty request body requires Stream-Closed: true",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Empty Body",
+      "type": "/errors/empty-body"
+    }
+  },
+  {
+    "body": {
+      "code": "EMPTY_ARRAY",
+      "detail": "Empty JSON arrays are not permitted for append",
+      "status": 400,
+      "title": "Empty Array",
+      "type": "/errors/empty-array"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "EMPTY_ARRAY",
+      "detail": "Empty JSON arrays are not permitted for append",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Empty Array",
+      "type": "/errors/empty-array"
+    }
+  },
+  {
+    "body": {
+      "code": "BAD_REQUEST",
+      "detail": "Invalid header value for Stream-Seq: bad",
+      "status": 400,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "BAD_REQUEST",
+      "detail": "Invalid header value for Stream-Seq: bad",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    }
+  },
+  {
+    "body": {
+      "code": "INVALID_STREAM_NAME",
+      "detail": "Invalid stream name: bad",
+      "status": 400,
+      "title": "Invalid Stream Name",
+      "type": "/errors/invalid-stream-name"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "INVALID_STREAM_NAME",
+      "detail": "Invalid stream name: bad",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Invalid Stream Name",
+      "type": "/errors/invalid-stream-name"
+    }
+  },
+  {
+    "body": {
+      "code": "SEQUENCE_CONFLICT",
+      "detail": "Stream-Seq ordering violation: last=b, received=a",
+      "status": 409,
+      "title": "Sequence Conflict",
+      "type": "/errors/sequence-conflict"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "SEQUENCE_CONFLICT",
+      "detail": "Stream-Seq ordering violation: last=b, received=a",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Sequence Conflict",
+      "type": "/errors/sequence-conflict"
+    }
+  },
+  {
+    "body": {
+      "code": "UNAVAILABLE",
+      "detail": "The server is temporarily unable to complete the request.",
+      "status": 503,
+      "title": "Service Unavailable",
+      "type": "/errors/unavailable"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": "1",
+    "status": 503,
+    "telemetry": {
+      "backend": "file",
+      "class": "unavailable",
+      "code": "UNAVAILABLE",
+      "detail": "The server is temporarily unable to complete the request.",
+      "internal": "private timeout",
+      "operation": "append",
+      "retry_after": 1,
+      "title": "Service Unavailable",
+      "type": "/errors/unavailable"
+    }
+  },
+  {
+    "body": {
+      "code": "INSUFFICIENT_STORAGE",
+      "detail": "The server does not have enough storage capacity to complete the request.",
+      "status": 507,
+      "title": "Insufficient Storage",
+      "type": "/errors/insufficient-storage"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 507,
+    "telemetry": {
+      "backend": "acid",
+      "class": "insufficient_storage",
+      "code": "INSUFFICIENT_STORAGE",
+      "detail": "The server does not have enough storage capacity to complete the request.",
+      "internal": "private disk path",
+      "operation": "commit",
+      "retry_after": null,
+      "title": "Insufficient Storage",
+      "type": "/errors/insufficient-storage"
+    }
+  },
+  {
+    "body": {
+      "code": "GONE",
+      "detail": "Stream is gone: deleted",
+      "status": 410,
+      "title": "Stream Gone",
+      "type": "/errors/gone"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 410,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "GONE",
+      "detail": "Stream is gone: deleted",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Gone",
+      "type": "/errors/gone"
+    }
+  },
+  {
+    "body": {
+      "code": "PATH_BLOCKED",
+      "detail": "Stream path is reserved by a soft-deleted lineage: reserved",
+      "status": 409,
+      "title": "Stream Path Blocked",
+      "type": "/errors/path-blocked"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "PATH_BLOCKED",
+      "detail": "Stream path is reserved by a soft-deleted lineage: reserved",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Stream Path Blocked",
+      "type": "/errors/path-blocked"
+    }
+  },
+  {
+    "body": {
+      "code": "BAD_REQUEST",
+      "detail": "Fork offset is beyond the source stream's tail",
+      "status": 400,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 400,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "BAD_REQUEST",
+      "detail": "Fork offset is beyond the source stream's tail",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Bad Request",
+      "type": "/errors/bad-request"
+    }
+  },
+  {
+    "body": {
+      "code": "FORK_FROM_TOMBSTONE",
+      "detail": "Cannot fork from deleted stream: deleted",
+      "status": 409,
+      "title": "Fork From Deleted Stream",
+      "type": "/errors/fork-from-tombstone"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 409,
+    "telemetry": {
+      "backend": null,
+      "class": null,
+      "code": "FORK_FROM_TOMBSTONE",
+      "detail": "Cannot fork from deleted stream: deleted",
+      "internal": null,
+      "operation": null,
+      "retry_after": null,
+      "title": "Fork From Deleted Stream",
+      "type": "/errors/fork-from-tombstone"
+    }
+  },
+  {
+    "body": {
+      "code": "INTERNAL_ERROR",
+      "detail": "The server encountered an internal error.",
+      "status": 500,
+      "title": "Internal Server Error",
+      "type": "/errors/internal"
+    },
+    "content_type": "application/problem+json",
+    "retry_after": null,
+    "status": 500,
+    "telemetry": {
+      "backend": null,
+      "class": "internal",
+      "code": "INTERNAL_ERROR",
+      "detail": "The server encountered an internal error.",
+      "internal": "private internal failure",
+      "operation": null,
+      "retry_after": null,
+      "title": "Internal Server Error",
+      "type": "/errors/internal"
+    }
+  }
+]
