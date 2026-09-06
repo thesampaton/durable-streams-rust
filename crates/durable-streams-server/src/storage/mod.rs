@@ -124,6 +124,20 @@ pub struct ForkInfo {
         deserialize_with = "crate::protocol::offset::deserialize_offset"
     )]
     pub fork_offset: Offset,
+    /// Sub-position used at creation (bytes for binary, message count for JSON).
+    #[serde(default)]
+    pub sub_offset: u64,
+}
+
+/// Additional options for atomic fork creation.
+#[derive(Debug, Clone, Default)]
+pub struct ForkOptions {
+    /// Bytes or JSON messages to inherit after the anchor offset.
+    pub sub_offset: u64,
+    /// Inherit the source content type when the HTTP header was omitted.
+    pub inherit_content_type: bool,
+    /// Optional initial entity body, validated using the effective content type.
+    pub initial_body: Bytes,
 }
 
 /// Lifecycle state of a stream (active or soft-deleted tombstone).
@@ -197,6 +211,7 @@ pub enum CreateStreamResult {
 /// have been resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ForkCreateSpec {
+    pub sub_offset: u64,
     pub source_name: String,
     pub fork_offset: Offset,
     pub config: StreamConfig,
@@ -406,4 +421,28 @@ pub trait Storage: Send + Sync {
         fork_offset: Option<&Offset>,
         config: StreamConfig,
     ) -> Result<CreateStreamResult>;
+
+    /// Create a fork and its partial inherited data and initial body atomically.
+    ///
+    /// Implementations must validate the request before making the fork visible.
+    /// The default supports only the original, empty-body fork operation.
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&Offset>,
+        config: StreamConfig,
+        options: ForkOptions,
+    ) -> Result<CreateStreamResult> {
+        if options.sub_offset != 0
+            || options.inherit_content_type
+            || !options.initial_body.is_empty()
+        {
+            return Err(crate::protocol::error::Error::InvalidHeader {
+                header: "Stream-Forked-From".to_string(),
+                reason: "storage backend does not support extended fork creation".to_string(),
+            });
+        }
+        self.create_fork(name, source_name, fork_offset, config)
+    }
 }

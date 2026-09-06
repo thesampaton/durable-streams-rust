@@ -196,6 +196,26 @@ impl Storage for TestStorage {
         }
     }
 
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source_name: &str,
+        offset: Option<&Offset>,
+        config: StreamConfig,
+        options: durable_streams_server::storage::ForkOptions,
+    ) -> Result<CreateStreamResult> {
+        match self {
+            Self::Memory(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+            Self::File(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+            Self::Acid(inner) => {
+                inner.create_fork_with_options(name, source_name, offset, config, options)
+            }
+        }
+    }
     fn create_fork(
         &self,
         name: &str,
