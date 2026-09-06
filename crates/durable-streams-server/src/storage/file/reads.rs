@@ -1,3 +1,4 @@
+use super::super::shared::PendingRead;
 use super::{FileStorage, MessageIndex, StreamEntry};
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
@@ -7,6 +8,54 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 impl FileStorage {
+    /// Capture either a complete read or the local half of a fork while locked.
+    pub(super) fn prepare_read(stream: &StreamEntry, from_offset: &Offset) -> Result<PendingRead> {
+        let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+        if from_offset.is_now() {
+            return Ok(PendingRead::Complete(super::ReadResult {
+                messages: Vec::new(),
+                next_offset,
+                at_tail: true,
+                closed: stream.closed,
+            }));
+        }
+        match &stream.fork_info {
+            None => Self::read_local_file_messages(stream, from_offset, next_offset)
+                .map(PendingRead::Complete),
+            Some(info) => Ok(PendingRead::Fork {
+                info: info.clone(),
+                local: super::ReadResult {
+                    messages: Self::read_fork_local_messages(
+                        stream,
+                        from_offset,
+                        &info.fork_offset,
+                    )?,
+                    next_offset,
+                    at_tail: true,
+                    closed: stream.closed,
+                },
+            }),
+        }
+    }
+
+    /// Ancestor lookup acquires the stream map, so no stream lock may be held.
+    pub(super) fn finish_read(
+        &self,
+        from_offset: &Offset,
+        pending: PendingRead,
+    ) -> Result<super::ReadResult> {
+        match pending {
+            PendingRead::Complete(result) => Ok(result),
+            PendingRead::Fork { info, local } => self.assemble_fork_read(
+                from_offset,
+                &info,
+                local.messages,
+                local.next_offset,
+                local.closed,
+            ),
+        }
+    }
+
     pub(super) fn read_messages(file: &File, index_slice: &[MessageIndex]) -> Result<Vec<Bytes>> {
         if index_slice.is_empty() {
             return Ok(Vec::new());

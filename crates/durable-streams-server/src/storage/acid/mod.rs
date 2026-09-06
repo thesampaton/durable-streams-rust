@@ -621,3 +621,18 @@ impl ClassifyError for serde_json::Error {
         Error::Storage(detail)
     }
 }
+
+impl StoredStreamMeta {
+    fn metadata(&self) -> super::StreamMetadata {
+        super::build_stream_metadata(
+            self.config.clone(),
+            self.next_read_seq,
+            self.next_byte_offset,
+            self.closed,
+            self.total_bytes,
+            self.next_read_seq,
+            self.created_at,
+            self.updated_at,
+        )
+    }
+}

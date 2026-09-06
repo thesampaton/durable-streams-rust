@@ -121,6 +121,18 @@ struct StreamEntry {
 }
 
 impl StreamEntry {
+    fn metadata(&self) -> super::StreamMetadata {
+        super::build_stream_metadata(
+            self.config.clone(),
+            self.next_read_seq,
+            self.next_byte_offset,
+            self.closed,
+            self.total_bytes,
+            u64::try_from(self.index.len()).unwrap_or(u64::MAX),
+            self.created_at,
+            self.updated_at,
+        )
+    }
     fn new(config: StreamConfig, file: File, dir: PathBuf) -> Self {
         let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
         let file_len = file.metadata().map_or(0, |m| m.len());

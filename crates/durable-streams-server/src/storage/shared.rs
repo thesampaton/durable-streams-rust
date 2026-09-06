@@ -283,3 +283,13 @@ pub(crate) fn check_producer(
     }
     Ok(ProducerCheck::Accept)
 }
+
+/// Owned read data captured under a backend's stream lock. Ancestor traversal
+/// must happen after releasing that lock, so a fork retains its local snapshot.
+pub(crate) enum PendingRead {
+    Complete(super::ReadResult),
+    Fork {
+        info: super::ForkInfo,
+        local: super::ReadResult,
+    },
+}

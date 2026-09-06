@@ -585,6 +585,45 @@ mod extended_contract {
                 assert_eq!(storage.read("child", &anchor).unwrap().messages, vec![Bytes::from("d")]);
             }
 
+            /// Issue #32 / PROTOCOL.md reads: TTL and non-TTL forks use the
+            /// same offset, closure, visibility and metadata rules.
+            #[test]
+            fn test_read_modes_and_metadata_agree_for_ttl_forks() {
+                for ttl in [false, true] {
+                    let handle = create_test_storage(BACKEND);
+                    let storage = &handle.storage;
+                    let config = if ttl { plain_text_config().with_ttl(60) } else { plain_text_config() };
+                    storage.create_stream("source", config.clone()).unwrap();
+                    storage.append("source", Bytes::from("a"), "text/plain").unwrap();
+                    let anchor = storage.head("source").unwrap().next_offset;
+                    storage.create_fork("fork", "source", None, config).unwrap();
+                    storage.append("fork", Bytes::from("b"), "text/plain").unwrap();
+                    let tail = storage.head("fork").unwrap().next_offset;
+                    storage.delete("source").unwrap();
+                    storage.close_stream("fork").unwrap();
+                    let all = storage.read("fork", &Offset::start()).unwrap();
+                    assert_eq!(all.messages, vec![Bytes::from("a"), Bytes::from("b")]);
+                    let resumed = storage.read("fork", &anchor).unwrap();
+                    assert_eq!(resumed.messages, vec![Bytes::from("b")]);
+                    for offset in [tail.clone(), Offset::now()] {
+                        let read = storage.read("fork", &offset).unwrap();
+                        assert!(read.messages.is_empty());
+                        assert!(read.at_tail && read.closed);
+                        assert_eq!(read.next_offset, tail);
+                    }
+                    assert!(!storage.exists("source"));
+                    assert!(storage.subscribe("source").is_none());
+                    let listed = storage.list_streams().unwrap();
+                    assert_eq!(listed.len(), 1);
+                    assert_eq!(listed[0].0, "fork");
+                    let head = storage.head("fork").unwrap();
+                    assert_eq!(listed[0].1.next_offset, head.next_offset);
+                    assert_eq!(listed[0].1.message_count, head.message_count);
+                    assert_eq!(listed[0].1.config, head.config);
+                    assert_eq!(listed[0].1.closed, head.closed);
+                }
+            }
+
             /// Subscription control data is private and independent of stream quotas/listing.
             #[test]
             fn test_subscription_snapshot_replaces_state_without_creating_streams() {

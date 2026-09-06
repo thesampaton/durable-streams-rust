@@ -151,76 +151,22 @@ impl Storage for FileStorage {
         let stream_arc = self
             .get_stream(name)
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let needs_ttl_renewal = {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
-            stream.config.ttl_seconds.is_some()
-        };
-
-        if !needs_ttl_renewal {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-
-            if from_offset.is_now() {
-                return Ok(ReadResult {
-                    messages: Vec::new(),
-                    next_offset,
-                    at_tail: true,
-                    closed: stream.closed,
-                });
-            }
-
-            if stream.fork_info.is_none() {
-                return Self::read_local_file_messages(&stream, from_offset, next_offset);
-            }
-
-            let fi = stream.fork_info.clone().expect("checked above");
-            let closed = stream.closed;
-            let fork_local_messages =
-                Self::read_fork_local_messages(&stream, from_offset, &fi.fork_offset)?;
-            drop(stream);
-
-            return self.assemble_fork_read(
-                from_offset,
-                &fi,
-                fork_local_messages,
-                next_offset,
-                closed,
-            );
-        }
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
+        let stream = stream_arc.read().expect("stream lock poisoned");
         super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
-
-        let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-        if from_offset.is_now() {
+        let pending = if stream.config.ttl_seconds.is_some() {
+            drop(stream);
+            let mut stream = stream_arc.write().expect("stream lock poisoned");
+            super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
+            let pending = Self::prepare_read(&stream, from_offset)?;
             super::super::fork::renew_ttl(&mut stream.config);
             self.write_metadata_for(name, &stream)?;
-            return Ok(ReadResult {
-                messages: Vec::new(),
-                next_offset,
-                at_tail: true,
-                closed: stream.closed,
-            });
-        }
-
-        if stream.fork_info.is_none() {
-            let result = Self::read_local_file_messages(&stream, from_offset, next_offset)?;
-            super::super::fork::renew_ttl(&mut stream.config);
-            self.write_metadata_for(name, &stream)?;
-            return Ok(result);
-        }
-
-        let fi = stream.fork_info.clone().expect("checked above");
-        let closed = stream.closed;
-        let fork_local_messages =
-            Self::read_fork_local_messages(&stream, from_offset, &fi.fork_offset)?;
-        super::super::fork::renew_ttl(&mut stream.config);
-        self.write_metadata_for(name, &stream)?;
-        drop(stream);
-
-        self.assemble_fork_read(from_offset, &fi, fork_local_messages, next_offset, closed)
+            pending
+        } else {
+            let pending = Self::prepare_read(&stream, from_offset)?;
+            drop(stream);
+            pending
+        };
+        self.finish_read(from_offset, pending)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -264,16 +210,7 @@ impl Storage for FileStorage {
 
         super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
-        Ok(super::super::build_stream_metadata(
-            stream.config.clone(),
-            stream.next_read_seq,
-            stream.next_byte_offset,
-            stream.closed,
-            stream.total_bytes,
-            u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-            stream.created_at,
-            stream.updated_at,
-        ))
+        Ok(stream.metadata())
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -529,19 +466,7 @@ impl Storage for FileStorage {
             if !super::super::is_stream_visible(&stream.config, stream.state) {
                 continue;
             }
-            result.push((
-                name.clone(),
-                super::super::build_stream_metadata(
-                    stream.config.clone(),
-                    stream.next_read_seq,
-                    stream.next_byte_offset,
-                    stream.closed,
-                    stream.total_bytes,
-                    u64::try_from(stream.index.len()).unwrap_or(u64::MAX),
-                    stream.created_at,
-                    stream.updated_at,
-                ),
-            ));
+            result.push((name.clone(), stream.metadata()));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)

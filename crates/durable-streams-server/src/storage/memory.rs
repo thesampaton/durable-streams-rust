@@ -4,6 +4,7 @@
 //! the same [`super::Storage`] contract as the disk-backed backends, but
 //! without persistence across restarts.
 
+use super::shared::PendingRead;
 use super::{
     CreateStreamResult, ForkInfo, Message, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
     ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata, StreamState,
@@ -46,6 +47,18 @@ struct StreamEntry {
 }
 
 impl StreamEntry {
+    fn metadata(&self) -> super::StreamMetadata {
+        super::build_stream_metadata(
+            self.config.clone(),
+            self.next_read_seq,
+            self.next_byte_offset,
+            self.closed,
+            self.total_bytes,
+            u64::try_from(self.messages.len()).unwrap_or(u64::MAX),
+            self.created_at,
+            self.updated_at,
+        )
+    }
     fn new(config: StreamConfig) -> Self {
         // Stream starts open; the handler closes it after any initial appends.
         // The `created_closed` flag in config is stored for idempotent checks only.
@@ -142,13 +155,59 @@ impl InMemoryStorage {
         }
     }
 
+    /// Capture either a complete read or the local half of a fork while locked.
+    fn prepare_read(stream: &StreamEntry, from_offset: &Offset) -> PendingRead {
+        let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+        if from_offset.is_now() {
+            return PendingRead::Complete(ReadResult {
+                messages: Vec::new(),
+                next_offset,
+                at_tail: true,
+                closed: stream.closed,
+            });
+        }
+        match &stream.fork_info {
+            None => {
+                PendingRead::Complete(Self::read_local_messages(stream, from_offset, next_offset))
+            }
+            Some(info) => PendingRead::Fork {
+                info: info.clone(),
+                local: ReadResult {
+                    messages: stream.messages.iter().map(|m| m.data.clone()).collect(),
+                    next_offset,
+                    at_tail: true,
+                    closed: stream.closed,
+                },
+            },
+        }
+    }
+
+    /// Ancestor lookup acquires the stream map, so no stream lock may be held.
+    fn finish_read(
+        &self,
+        name: &str,
+        from_offset: &Offset,
+        pending: PendingRead,
+    ) -> Result<ReadResult> {
+        match pending {
+            PendingRead::Complete(result) => Ok(result),
+            PendingRead::Fork { info, local } => self.assemble_fork_read(
+                name,
+                from_offset,
+                &info,
+                local.messages,
+                local.next_offset,
+                local.closed,
+            ),
+        }
+    }
+
     /// Read messages from a stream's local storage (no fork traversal).
-    #[allow(clippy::unnecessary_wraps)]
     fn read_local_messages(
         stream: &StreamEntry,
         from_offset: &Offset,
         next_offset: Offset,
-    ) -> Result<ReadResult> {
+    ) -> ReadResult {
         let start_idx = if from_offset.is_start() {
             0
         } else {
@@ -167,12 +226,12 @@ impl InMemoryStorage {
 
         let at_tail = start_idx + messages.len() >= stream.messages.len();
 
-        Ok(ReadResult {
+        ReadResult {
             messages,
             next_offset,
             at_tail,
             closed: stream.closed,
-        })
+        }
     }
 
     /// Walk up the fork chain after a hard-delete, decrementing `ref_count`s
@@ -479,79 +538,26 @@ impl Storage for InMemoryStorage {
         let stream_arc = self
             .get_stream(name)
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let needs_ttl_renewal = {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            super::fork::check_stream_access(&stream.config, stream.state, name)?;
-            stream.config.ttl_seconds.is_some()
-        };
-
-        if !needs_ttl_renewal {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-
-            if from_offset.is_now() {
-                return Ok(ReadResult {
-                    messages: Vec::new(),
-                    next_offset,
-                    at_tail: true,
-                    closed: stream.closed,
-                });
-            }
-
-            if stream.fork_info.is_none() {
-                return Self::read_local_messages(&stream, from_offset, next_offset);
-            }
-
-            let fi = stream.fork_info.clone().expect("checked above");
-            let closed = stream.closed;
-            let fork_messages_data: Vec<Bytes> =
-                stream.messages.iter().map(|m| m.data.clone()).collect();
+        let stream = stream_arc.read().expect("stream lock poisoned");
+        super::fork::check_stream_access(&stream.config, stream.state, name)?;
+        if stream.config.ttl_seconds.is_none() {
+            let pending = Self::prepare_read(&stream, from_offset);
             drop(stream);
-
-            return self.assemble_fork_read(
-                name,
-                from_offset,
-                &fi,
-                fork_messages_data,
-                next_offset,
-                closed,
-            );
+            return self.finish_read(name, from_offset, pending);
         }
+        drop(stream);
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
-
-        let next_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-        let result = if from_offset.is_now() {
-            ReadResult {
-                messages: Vec::new(),
-                next_offset,
-                at_tail: true,
-                closed: stream.closed,
+        let result = match Self::prepare_read(&stream, from_offset) {
+            PendingRead::Complete(result) => result,
+            pending @ PendingRead::Fork { .. } => {
+                drop(stream);
+                let result = self.finish_read(name, from_offset, pending)?;
+                stream = stream_arc.write().expect("stream lock poisoned");
+                result
             }
-        } else if stream.fork_info.is_none() {
-            Self::read_local_messages(&stream, from_offset, next_offset)?
-        } else {
-            let fi = stream.fork_info.clone().expect("checked above");
-            let closed = stream.closed;
-            let fork_messages_data: Vec<Bytes> =
-                stream.messages.iter().map(|m| m.data.clone()).collect();
-            drop(stream);
-
-            let result = self.assemble_fork_read(
-                name,
-                from_offset,
-                &fi,
-                fork_messages_data,
-                next_offset,
-                closed,
-            )?;
-
-            stream = stream_arc.write().expect("stream lock poisoned");
-            result
         };
-
         super::fork::renew_ttl(&mut stream.config);
         Ok(result)
     }
@@ -596,16 +602,7 @@ impl Storage for InMemoryStorage {
 
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
-        Ok(super::build_stream_metadata(
-            stream.config.clone(),
-            stream.next_read_seq,
-            stream.next_byte_offset,
-            stream.closed,
-            stream.total_bytes,
-            u64::try_from(stream.messages.len()).unwrap_or(u64::MAX),
-            stream.created_at,
-            stream.updated_at,
-        ))
+        Ok(stream.metadata())
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -829,19 +826,7 @@ impl Storage for InMemoryStorage {
             if !super::is_stream_visible(&stream.config, stream.state) {
                 continue;
             }
-            result.push((
-                name.clone(),
-                super::build_stream_metadata(
-                    stream.config.clone(),
-                    stream.next_read_seq,
-                    stream.next_byte_offset,
-                    stream.closed,
-                    stream.total_bytes,
-                    u64::try_from(stream.messages.len()).unwrap_or(u64::MAX),
-                    stream.created_at,
-                    stream.updated_at,
-                ),
-            ));
+            result.push((name.clone(), stream.metadata()));
         }
         result.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(result)

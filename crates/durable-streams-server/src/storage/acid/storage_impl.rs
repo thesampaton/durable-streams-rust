@@ -6,9 +6,9 @@ use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
 use crate::storage::{
     CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendPrecheck,
-    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata,
-    build_stream_metadata, fork, is_stream_expired, is_stream_visible, precheck_append,
-    precheck_batch_append, precheck_producer_append,
+    ProducerAppendResult, ReadResult, Storage, StreamMetadata, apply_append_metadata, fork,
+    is_stream_expired, is_stream_visible, precheck_append, precheck_batch_append,
+    precheck_producer_append,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
@@ -233,26 +233,25 @@ impl Storage for AcidStorage {
 
     fn read(&self, name: &str, from_offset: &Offset) -> Result<ReadResult> {
         let shard_idx = self.existing_shard_index(name)?;
-        let needs_ttl_renewal = {
-            let shard = &self.shards[shard_idx];
-            let txn = shard
-                .db
-                .begin_read()
-                .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
-            let streams = txn
-                .open_table(STREAMS)
-                .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-            let meta = Self::read_stream_meta(&streams, name)?
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-            fork::check_stream_access(&meta.config, meta.state, name)?;
-            meta.config.ttl_seconds.is_some()
-        };
-
-        if !needs_ttl_renewal {
-            return self.read_without_ttl_renewal(name, from_offset, shard_idx);
+        let txn = self.shards[shard_idx]
+            .db
+            .begin_read()
+            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
+        let streams = txn
+            .open_table(STREAMS)
+            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
+        let meta = Self::read_stream_meta(&streams, name)?
+            .ok_or_else(|| Error::NotFound(name.to_string()))?;
+        fork::check_stream_access(&meta.config, meta.state, name)?;
+        if meta.config.ttl_seconds.is_some() {
+            drop(streams);
+            drop(txn);
+            return self.read_with_ttl_renewal(name, from_offset, shard_idx);
         }
-
-        self.read_with_ttl_renewal(name, from_offset, shard_idx)
+        let messages = txn
+            .open_table(MESSAGES)
+            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
+        Self::read_snapshot(&streams, &messages, name, from_offset, &meta)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
@@ -321,16 +320,7 @@ impl Storage for AcidStorage {
 
         fork::check_stream_access(&meta.config, meta.state, name)?;
 
-        Ok(build_stream_metadata(
-            meta.config,
-            meta.next_read_seq,
-            meta.next_byte_offset,
-            meta.closed,
-            meta.total_bytes,
-            meta.next_read_seq,
-            meta.created_at,
-            meta.updated_at,
-        ))
+        Ok(meta.metadata())
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
@@ -747,19 +737,7 @@ impl Storage for AcidStorage {
                     continue;
                 }
 
-                result.push((
-                    name,
-                    build_stream_metadata(
-                        meta.config,
-                        meta.next_read_seq,
-                        meta.next_byte_offset,
-                        meta.closed,
-                        meta.total_bytes,
-                        meta.next_read_seq,
-                        meta.created_at,
-                        meta.updated_at,
-                    ),
-                ));
+                result.push((name, meta.metadata()));
             }
         }
 
@@ -927,32 +905,6 @@ impl Storage for AcidStorage {
 
 /// Private helpers extracted from long `Storage` trait methods.
 impl AcidStorage {
-    /// Read path when the stream has no TTL (read-only transaction).
-    fn read_without_ttl_renewal(
-        &self,
-        name: &str,
-        from_offset: &Offset,
-        shard_idx: usize,
-    ) -> Result<ReadResult> {
-        let shard = &self.shards[shard_idx];
-        let txn = shard
-            .db
-            .begin_read()
-            .map_err(|e| Self::storage_err("failed to begin read transaction", e))?;
-
-        let streams = txn
-            .open_table(STREAMS)
-            .map_err(|e| Self::storage_err("failed to open streams table", e))?;
-
-        let meta = Self::read_stream_meta(&streams, name)?
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let messages = txn
-            .open_table(MESSAGES)
-            .map_err(|e| Self::storage_err("failed to open messages table", e))?;
-        Self::read_snapshot(&streams, &messages, name, from_offset, &meta)
-    }
-
     /// Read path when the stream has a TTL that needs renewal (write transaction).
     fn read_with_ttl_renewal(
         &self,
