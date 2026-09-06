@@ -44,6 +44,13 @@ jobs:
           - name: file-fast
             env:
               DS_STORAGE__MODE: file-fast
+          - name: file-durable
+            env:
+              DS_STORAGE__MODE: file-durable
+          - name: acid-file
+            env:
+              DS_STORAGE__MODE: acid
+              DS_STORAGE__ACID_BACKEND: file
           - name: acid-memory
             env:
               DS_STORAGE__MODE: acid

@@ -16,8 +16,8 @@ exclude = ["CLAUDE.md", "**/CLAUDE.md"]
 pedantic = { level = "warn", priority = -1 }
 
 # Spec versions implemented:
-# - Spec SHA: 8e3ef080ec3a74745ce363d59322f1cbe6de19cc
-# - Conformance: 0.3.0
+# - Spec SHA: a172acc389351cb3db6deb5cd60e3dec11e7ff39
+# - Conformance: 0.3.6 (including subscriptions)
 
 [dependencies]
 ring = "0.17"
