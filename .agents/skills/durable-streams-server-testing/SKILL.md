@@ -56,7 +56,7 @@ gap.
 
 ### External conformance
 
-The upstream `@durable-streams/server-conformance-tests@0.2.3` suite is the
+The upstream `@durable-streams/server-conformance-tests@0.3.6` suite is the
 acceptance gate for server behaviour in this workspace.
 
 Run it through the workspace harness:

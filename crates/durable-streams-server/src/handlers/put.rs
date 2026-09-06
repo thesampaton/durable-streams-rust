@@ -8,7 +8,9 @@ use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemResponse, ProblemResult};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
-use crate::storage::{CreateStreamResult, CreateWithDataResult, Storage, StreamConfig};
+use crate::storage::{
+    CreateStreamResult, CreateWithDataResult, ForkOptions, Storage, StreamConfig,
+};
 use axum::{
     Extension,
     body::Body,
@@ -46,6 +48,39 @@ pub async fn create_stream<S: Storage>(
         let created_closed = parse_stream_closed(&headers);
         let config = build_config(&headers, normalized_ct.clone(), created_closed)?;
 
+        let sub_offset = headers
+            .get(names::STREAM_FORK_SUB_OFFSET)
+            .map(|value| {
+                let raw = value.to_str().map_err(|_| Error::InvalidHeader {
+                    header: "Stream-Fork-Sub-Offset".into(),
+                    reason: "expected a non-negative integer".into(),
+                })?;
+                if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(Error::InvalidHeader {
+                        header: "Stream-Fork-Sub-Offset".into(),
+                        reason: "expected a non-negative integer".into(),
+                    });
+                }
+                raw.parse::<u64>().map_err(|_| Error::InvalidHeader {
+                    header: "Stream-Fork-Sub-Offset".into(),
+                    reason: "integer out of range".into(),
+                })
+            })
+            .transpose()?;
+        if !headers.contains_key(names::STREAM_FORKED_FROM)
+            && (sub_offset.is_some() || headers.contains_key(names::STREAM_FORK_OFFSET))
+        {
+            return Err(Error::InvalidHeader {
+                header: "Stream-Forked-From".into(),
+                reason: "required with fork offsets".into(),
+            }
+            .into());
+        }
+        let options = ForkOptions {
+            sub_offset: sub_offset.unwrap_or(0),
+            inherit_content_type: !headers.contains_key("content-type"),
+            initial_body: body_bytes.clone(),
+        };
         let location = build_location_url(&request_origin, &stream_base_path, &name);
 
         if let Some(forked_from) = headers
@@ -55,13 +90,16 @@ pub async fn create_stream<S: Storage>(
             create_fork_stream(
                 &storage,
                 &name,
-                forked_from,
-                headers
-                    .get(names::STREAM_FORK_OFFSET)
-                    .and_then(|v| v.to_str().ok()),
+                (
+                    forked_from,
+                    headers
+                        .get(names::STREAM_FORK_OFFSET)
+                        .and_then(|v| v.to_str().ok()),
+                ),
                 &stream_base_path,
                 config,
                 &location,
+                options,
             )
         } else {
             create_standard_stream(
@@ -138,20 +176,23 @@ fn build_config(
 fn create_fork_stream<S: Storage>(
     storage: &Arc<S>,
     name: &str,
-    forked_from: &str,
-    fork_offset_raw: Option<&str>,
+    (forked_from, fork_offset_raw): (&str, Option<&str>),
     stream_base_path: &str,
     config: StreamConfig,
     location: &str,
+    options: ForkOptions,
 ) -> ProblemResult<Response> {
     let source_name = strip_stream_base_path(forked_from, stream_base_path);
+    if source_name.split('/').next() == Some("__ds") {
+        return Err(Error::InvalidStreamName("reserved control namespace".into()).into());
+    }
     let fork_offset = match fork_offset_raw {
         Some(raw) => Some(Offset::from_str(raw)?),
         None => None,
     };
 
     let create_result = storage
-        .create_fork(name, &source_name, fork_offset.as_ref(), config)
+        .create_fork_with_options(name, &source_name, fork_offset.as_ref(), config, options)
         .map_err(ProblemResponse::from)?;
 
     let meta = storage.head(name)?;

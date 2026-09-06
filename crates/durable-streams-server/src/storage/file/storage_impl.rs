@@ -1,6 +1,5 @@
 use super::{
-    Arc, CreateStreamResult, CreateWithDataResult, Error, FileStorage, ForkInfo,
-    INITIAL_INDEX_CAPACITY, INITIAL_PRODUCERS_CAPACITY, NOTIFY_CHANNEL_CAPACITY, Offset,
+    Arc, CreateStreamResult, CreateWithDataResult, Error, FileStorage, ForkInfo, Offset,
     ProducerAppendResult, ProducerState, ReadResult, Result, RwLock, Storage, StreamConfig,
     StreamEntry, StreamMetadata, StreamState,
 };
@@ -548,12 +547,75 @@ impl Storage for FileStorage {
         Ok(result)
     }
 
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.root_dir.join("subscriptions.json")) {
+            Ok(data) => Ok(Some(data)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(Error::classify_io_failure(
+                "file",
+                "read subscriptions",
+                "failed to read subscription state",
+                &e,
+            )),
+        }
+    }
+
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let temporary = self.root_dir.join("subscriptions.json.tmp");
+        let result = (|| -> std::io::Result<()> {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            // Remove an abandoned temporary file from an interrupted prior write.
+            match fs::remove_file(&temporary) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(state)?;
+            file.sync_all()?;
+            fs::rename(&temporary, self.root_dir.join("subscriptions.json"))?;
+            fs::File::open(&self.root_dir)?.sync_all()
+        })();
+        result.map_err(|e| {
+            Error::classify_io_failure(
+                "file",
+                "persist subscriptions",
+                "failed to persist subscription state",
+                &e,
+            )
+        })
+    }
+
     fn create_fork(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
         config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        self.create_fork_with_options(
+            name,
+            source_name,
+            fork_offset,
+            config,
+            super::super::ForkOptions::default(),
+        )
+    }
+
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&Offset>,
+        mut config: StreamConfig,
+        options: super::super::ForkOptions,
     ) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
@@ -562,8 +624,11 @@ impl Storage for FileStorage {
             .ok_or_else(|| Error::NotFound(source_name.to_string()))?
             .clone();
 
-        let (fork_spec, resolved_offset) = {
+        let (mut fork_spec, resolved_offset) = {
             let source = source_arc.read().expect("stream lock poisoned");
+            if options.inherit_content_type {
+                config.content_type.clone_from(&source.config.content_type);
+            }
             let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
             super::super::fork::prepare_fork_spec(
                 source_name,
@@ -574,6 +639,15 @@ impl Storage for FileStorage {
                 &config,
             )?
         };
+
+        fork_spec.sub_offset = options.sub_offset;
+        let initial_messages = Self::fork_initial_messages(
+            &streams,
+            source_name,
+            &resolved_offset,
+            &fork_spec.config,
+            &options,
+        )?;
 
         if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
@@ -613,32 +687,24 @@ impl Storage for FileStorage {
         self.validate_stream_dir(&dir)?;
         let file = self.open_stream_file(&dir)?;
 
-        let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
-        let file_len = file.metadata().map_or(0, |m| m.len());
-        let entry = StreamEntry {
-            config: fork_spec.config,
-            index: Vec::with_capacity(INITIAL_INDEX_CAPACITY),
-            closed: config.created_closed,
-            next_read_seq: fork_read_seq,
-            next_byte_offset: fork_byte_offset,
-            total_bytes: 0,
-            created_at: Utc::now(),
-            updated_at: None,
-            producers: HashMap::with_capacity(INITIAL_PRODUCERS_CAPACITY),
-            notify,
-            last_seq: None,
-            file,
-            file_len,
-            dir: dir.clone(),
-            fork_info: Some(ForkInfo {
-                source_name: fork_spec.source_name,
-                fork_offset: resolved_offset,
-            }),
-            ref_count: 0,
-            state: StreamState::Active,
-        };
+        let mut entry = StreamEntry::new(fork_spec.config, file, dir.clone());
+        entry.closed = config.created_closed;
+        entry.next_read_seq = fork_read_seq;
+        entry.next_byte_offset = fork_byte_offset;
+        entry.fork_info = Some(ForkInfo {
+            sub_offset: options.sub_offset,
+            source_name: fork_spec.source_name,
+            fork_offset: resolved_offset,
+        });
 
+        if let Err(e) = self.append_records(name, &mut entry, &initial_messages) {
+            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
+                warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
+            }
+            return Err(e);
+        }
         if let Err(e) = self.write_metadata_for(name, &entry) {
+            self.rollback_total_bytes(entry.total_bytes);
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
             }
@@ -656,5 +722,46 @@ impl Storage for FileStorage {
         }
 
         Ok(CreateStreamResult::Created)
+    }
+}
+
+impl FileStorage {
+    fn fork_initial_messages(
+        streams: &HashMap<String, Arc<RwLock<StreamEntry>>>,
+        source_name: &str,
+        resolved_offset: &Offset,
+        config: &StreamConfig,
+        options: &super::super::ForkOptions,
+    ) -> Result<Vec<Bytes>> {
+        let mut source_messages = Vec::new();
+        if options.sub_offset > 0 {
+            let plan = super::super::fork::build_read_plan(source_name, |n| {
+                streams
+                    .get(n)
+                    .map(|arc| arc.read().expect("stream lock poisoned").fork_info.clone())
+            });
+            for segment in plan {
+                let arc = streams
+                    .get(&segment.name)
+                    .ok_or_else(|| Error::NotFound(segment.name.clone()))?;
+                let stream = arc.read().expect("stream lock poisoned");
+                let start = stream
+                    .index
+                    .partition_point(|m| m.offset < *resolved_offset);
+                let end = segment
+                    .read_up_to
+                    .as_ref()
+                    .map_or(stream.index.len(), |bound| {
+                        stream.index.partition_point(|m| m.offset < *bound)
+                    });
+                if start < end {
+                    source_messages.extend(Self::read_messages(
+                        &stream.file,
+                        &stream.index[start..end],
+                    )?);
+                }
+            }
+        }
+        super::super::fork::initial_fork_messages(config, options, source_messages)
     }
 }

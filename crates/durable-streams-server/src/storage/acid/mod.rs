@@ -46,6 +46,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::warn;
 
+const SUBSCRIPTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("subscriptions");
 const STREAMS: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const MESSAGES: TableDefinition<(&str, u64, u64), &[u8]> = TableDefinition::new("messages");
 
@@ -547,17 +548,14 @@ impl AcidStorage {
                 Some(meta.fork_info)
             });
 
-            for (i, segment) in plan.iter().enumerate() {
-                let effective_up_to = if i == plan.len() - 1 {
-                    Some(&fi.fork_offset)
-                } else {
-                    segment.read_up_to.as_ref()
-                };
-                let effective_from = if i == 0 {
-                    from_offset
-                } else {
-                    &Offset::start()
-                };
+            for segment in &plan {
+                let effective_up_to = Some(
+                    segment
+                        .read_up_to
+                        .as_ref()
+                        .map_or(&fi.fork_offset, |bound| bound.min(&fi.fork_offset)),
+                );
+                let effective_from = from_offset;
                 let segment_msgs =
                     self.read_messages_from_shard(&segment.name, effective_from, effective_up_to)?;
                 all_messages.extend(segment_msgs);

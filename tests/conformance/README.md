@@ -61,3 +61,32 @@ executes:
 ```bash
 cargo run --quiet -p durable-streams-server --
 ```
+
+## Server suite 0.3.6
+
+The server runner enables `subscriptions: true`, so all 338 upstream tests run,
+including the six subscription tests. Its local launcher enables insecure
+localhost webhooks for the suite's callback receivers. Production defaults keep
+this option disabled. Use a separate data directory and port for each backend
+run; short TTL and SSE tests should run without competing load.
+
+```bash
+DS_STORAGE__MODE=file-durable DS_STORAGE__DATA_DIR=/tmp/ds-file-conformance \
+  ./scripts/conformance/run-server-suite.sh
+DS_STORAGE__MODE=acid DS_STORAGE__ACID_BACKEND=file \
+  DS_STORAGE__DATA_DIR=/tmp/ds-acid-conformance \
+  ./scripts/conformance/run-server-suite.sh
+```
+
+The runner forwards Vitest arguments after npm's `--` separator (for example
+`./scripts/conformance/run-server-suite.sh -t "Reserved subscription APIs"`).
+Whole tests have a 30-second deadline because some upstream tests contain many
+sequential live-read race probes; individual protocol deadlines and assertions
+remain upstream-controlled. Override this with
+`DURABLE_STREAMS_SERVER_TEST_TIMEOUT_MS` when needed.
+
+Use Node 20 for the validation matrix, matching CI (verified with Node 20.20.2).
+During this update, Node 26.7.0's built-in fetch delayed reused-connection GETs
+by roughly 2.5 seconds on this macOS host, causing two-second TTL tests to expire
+before the request arrived. Node 20 did not exhibit that delay. No TTL grace
+period or protocol assertion changes were made to accommodate that behavior.

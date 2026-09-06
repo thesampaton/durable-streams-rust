@@ -82,6 +82,7 @@ impl StreamEntry {
 /// Appends to the same stream are serialized via `RwLock::write()`.
 /// Appends to different streams can proceed concurrently.
 pub struct InMemoryStorage {
+    subscription_state: RwLock<Option<Vec<u8>>>,
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
     total_bytes: AtomicU64,
     max_total_bytes: u64,
@@ -93,6 +94,7 @@ impl InMemoryStorage {
     #[must_use]
     pub fn new(max_total_bytes: u64, max_stream_bytes: u64) -> Self {
         Self {
+            subscription_state: RwLock::new(None),
             streams: RwLock::new(HashMap::new()),
             total_bytes: AtomicU64::new(0),
             max_total_bytes,
@@ -228,27 +230,22 @@ impl InMemoryStorage {
 
         let mut all_messages: Vec<Bytes> = Vec::new();
 
-        for (i, segment) in plan.iter().enumerate() {
+        for segment in &plan {
             let Some(seg_arc) = streams.get(&segment.name) else {
                 continue;
             };
             let seg_stream = seg_arc.read().expect("stream lock poisoned");
 
             // Determine the effective upper bound for this segment
-            let effective_up_to = if i == plan.len() - 1 {
-                // Last segment (the direct source): read up to `up_to`
-                Some(up_to)
-            } else {
-                // Intermediate segment: read up to this segment's read_up_to
-                segment.read_up_to.as_ref()
-            };
+            let effective_up_to = Some(
+                segment
+                    .read_up_to
+                    .as_ref()
+                    .map_or(up_to, |bound| bound.min(up_to)),
+            );
 
             // Determine start offset for this segment
-            let effective_from = if i == 0 {
-                from_offset
-            } else {
-                &Offset::start()
-            };
+            let effective_from = from_offset;
 
             // Collect messages in range
             let start_idx = if effective_from.is_start() {
@@ -850,12 +847,45 @@ impl Storage for InMemoryStorage {
         Ok(result)
     }
 
+    fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .subscription_state
+            .read()
+            .expect("subscription lock poisoned")
+            .clone())
+    }
+
+    fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
+        *self
+            .subscription_state
+            .write()
+            .expect("subscription lock poisoned") = Some(state.to_vec());
+        Ok(())
+    }
+
     fn create_fork(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
         config: StreamConfig,
+    ) -> Result<CreateStreamResult> {
+        self.create_fork_with_options(
+            name,
+            source_name,
+            fork_offset,
+            config,
+            super::ForkOptions::default(),
+        )
+    }
+
+    fn create_fork_with_options(
+        &self,
+        name: &str,
+        source_name: &str,
+        fork_offset: Option<&Offset>,
+        mut config: StreamConfig,
+        options: super::ForkOptions,
     ) -> Result<CreateStreamResult> {
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
@@ -864,8 +894,11 @@ impl Storage for InMemoryStorage {
             .ok_or_else(|| Error::NotFound(source_name.to_string()))?
             .clone();
 
-        let (fork_spec, resolved_offset) = {
+        let (mut fork_spec, resolved_offset) = {
             let source = source_arc.read().expect("stream lock poisoned");
+            if options.inherit_content_type {
+                config.content_type.clone_from(&source.config.content_type);
+            }
             let source_next_offset = Offset::new(source.next_read_seq, source.next_byte_offset);
             super::fork::prepare_fork_spec(
                 source_name,
@@ -876,6 +909,15 @@ impl Storage for InMemoryStorage {
                 &config,
             )?
         };
+
+        fork_spec.sub_offset = options.sub_offset;
+        let initial_messages = Self::fork_initial_messages(
+            &streams,
+            source_name,
+            &resolved_offset,
+            &fork_spec.config,
+            &options,
+        )?;
 
         if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
@@ -905,7 +947,7 @@ impl Storage for InMemoryStorage {
             resolved_offset.parse_components().unwrap_or((0, 0));
 
         let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
-        let entry = StreamEntry {
+        let mut entry = StreamEntry {
             config: fork_spec.config,
             messages: Vec::with_capacity(INITIAL_MESSAGES_CAPACITY),
             closed: config.created_closed,
@@ -918,6 +960,7 @@ impl Storage for InMemoryStorage {
             notify,
             last_seq: None,
             fork_info: Some(ForkInfo {
+                sub_offset: options.sub_offset,
                 source_name: fork_spec.source_name,
                 fork_offset: resolved_offset,
             }),
@@ -925,6 +968,7 @@ impl Storage for InMemoryStorage {
             state: StreamState::Active,
         };
 
+        self.commit_messages(&mut entry, initial_messages)?;
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
 
         // Increment source ref_count
@@ -939,3 +983,42 @@ impl Storage for InMemoryStorage {
 
 // Concurrent producer and Storage trait contract tests live in the
 // integration test suite (storage_backend_contract, concurrent_stress).
+
+impl InMemoryStorage {
+    fn fork_initial_messages(
+        streams: &HashMap<String, Arc<RwLock<StreamEntry>>>,
+        source_name: &str,
+        resolved_offset: &Offset,
+        config: &StreamConfig,
+        options: &super::ForkOptions,
+    ) -> Result<Vec<Bytes>> {
+        let mut source_messages = Vec::new();
+        if options.sub_offset > 0 {
+            let plan = super::fork::build_read_plan(source_name, |n| {
+                streams
+                    .get(n)
+                    .map(|arc| arc.read().expect("stream lock poisoned").fork_info.clone())
+            });
+            for segment in plan {
+                let arc = streams
+                    .get(&segment.name)
+                    .ok_or_else(|| Error::NotFound(segment.name.clone()))?;
+                let stream = arc.read().expect("stream lock poisoned");
+                source_messages.extend(
+                    stream
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            m.offset >= *resolved_offset
+                                && segment
+                                    .read_up_to
+                                    .as_ref()
+                                    .is_none_or(|bound| m.offset < *bound)
+                        })
+                        .map(|m| m.data.clone()),
+                );
+            }
+        }
+        super::fork::initial_fork_messages(config, options, source_messages)
+    }
+}

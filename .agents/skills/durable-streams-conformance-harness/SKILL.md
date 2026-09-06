@@ -40,9 +40,9 @@ When standards alignment changes, those records should move together.
 Current tracked baselines for this repo:
 
 - protocol document: Durable Streams Protocol `1.0-draft`
-- protocol revision: `f091f315e4c3ca6769b45135ab8b5f53d70b1751`
+- protocol revision: `a172acc389351cb3db6deb5cd60e3dec11e7ff39`
 - client conformance suite: `@durable-streams/client-conformance-tests@0.2.3`
-- server conformance suite: `@durable-streams/server-conformance-tests@0.2.3`
+- server conformance suite: `@durable-streams/server-conformance-tests@0.3.6`
 
 The current server crate in this workspace is a lift-and-shift of published
 `durable-streams-server` `0.1.3`.
@@ -104,7 +104,7 @@ The workspace-level runner:
 - optionally launches the local server via `start-server.sh`
 - uses `DURABLE_STREAMS_SERVER_URL` as the target base URL
 - creates a temporary Vitest entrypoint that calls
-  `runConformanceTests({ baseUrl })` from the pinned npm package
+  `runConformanceTests({ baseUrl, subscriptions: true })` from the pinned npm package
 - invokes that entrypoint via `npm exec vitest run ...`
 
 Supported local environment knobs:
@@ -154,3 +154,9 @@ This skill should not define:
 - server crate internals
 
 Those should live in the protocol skill or future crate-specific skills.
+
+The 0.3.6 server suite runs all 338 cases including its six subscription tests.
+The local launcher enables `DS_HTTP__ALLOW_INSECURE_WEBHOOKS=true` for the suite's
+localhost callback receivers. Production defaults keep that exception disabled.
+Use separate data directories and ports for backend validation. Avoid competing
+load during the upstream suite's short TTL and SSE timing checks.
