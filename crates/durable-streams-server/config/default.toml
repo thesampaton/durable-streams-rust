@@ -17,6 +17,10 @@ stream_base_path = "/v1/stream"
 # Required only if you intentionally want `cors_origins = "*"` in production.
 # allow_wildcard_cors = false
 
+[admin]
+enabled = false # opt-in operator routes only; protect with trusted network/proxy/access control
+base_path = "/admin" # GET /admin/streams when enabled
+
 [storage]
 mode = "memory" # memory | file-fast | file-durable | acid
 # data_dir = "./data/streams" # required for file-fast, file-durable, or acid

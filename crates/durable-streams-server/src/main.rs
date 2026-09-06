@@ -4,13 +4,16 @@ use axum_server::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use durable_streams_server::{
-    config::{Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode},
+    config::{
+        AcidBackend, Config, ConfigLoadOptions, DeploymentProfile, StorageMode, TransportMode,
+    },
     router,
     startup::{
         StartupError, StartupPhase, bind_tcp_listener, build_tls_server_config, log_phase,
         log_startup_failure, log_transport_summary, preflight_tls_files,
     },
     storage::{Storage, acid::AcidStorage, file::FileStorage, memory::InMemoryStorage},
+    streams::{StreamListEntry, StreamService},
     transfer::{
         export::{ExportOptions, export_streams},
         import::{ConflictPolicy, ImportOptions, import_streams},
@@ -47,11 +50,14 @@ struct Cli {
 enum Command {
     /// Start the HTTP server (default when no subcommand is given)
     Serve,
-    /// List all streams with their metadata
+    /// List all streams with their metadata from configured local storage
     List {
         /// Output as JSON instead of a table
         #[arg(long)]
         json: bool,
+        /// Full URL for explicit remote admin listing, e.g. <http://127.0.0.1:4437/admin/streams>
+        #[arg(long)]
+        url: Option<String>,
     },
     /// Export streams to JSON
     Export {
@@ -179,8 +185,13 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Command::List { json } => {
-            if let Err(err) = run_with_storage(&config, |storage| run_list(storage, json)) {
+        Command::List { json, url } => {
+            let result = if let Some(url) = url.as_deref() {
+                run_list_http(url, json).await
+            } else {
+                run_list_local(&config, json)
+            };
+            if let Err(err) = result {
                 eprintln!("{err}");
                 std::process::exit(1);
             }
@@ -261,45 +272,100 @@ where
 
 // ── List command ────────────────────────────────────────────────────
 
-fn run_list(storage: &dyn Storage, json: bool) -> Result<(), String> {
-    let streams = storage
-        .list_streams()
-        .map_err(|e| format!("failed to list streams: {e}"))?;
-
-    if json {
-        print_streams_json(&streams);
-    } else {
-        print_streams_table(&streams);
+fn run_list_local(config: &Config, json: bool) -> Result<(), String> {
+    if config.storage.mode == StorageMode::Acid
+        && config.storage.acid_backend == AcidBackend::InMemory
+    {
+        return Err(
+            "cannot list local streams for storage.acid_backend='in-memory': storage is process-local and has no durable state to inspect; use acid_backend='file', or pass --url to query an explicitly enabled admin endpoint"
+                .to_string(),
+        );
     }
+    match config.storage.mode {
+        StorageMode::Memory => Err(
+            "cannot list local streams for storage.mode='memory': in-memory storage is process-local and has no durable state to inspect; use file or acid storage, or pass --url to query an explicitly enabled admin endpoint"
+                .to_string(),
+        ),
+        StorageMode::FileFast | StorageMode::FileDurable => {
+            let service = StreamService::new(Arc::new(build_file_storage(config)?));
+            let entries = service
+                .list_entries()
+                .map_err(|e| format!("failed to list streams: {e}"))?;
+            print_stream_entries(&entries, json);
+            Ok(())
+        }
+        StorageMode::Acid => {
+            let service = StreamService::new(Arc::new(build_acid_storage(config)?));
+            let entries = service
+                .list_entries()
+                .map_err(|e| format!("failed to list streams: {e}"))?;
+            print_stream_entries(&entries, json);
+            Ok(())
+        }
+    }
+}
+
+async fn run_list_http(list_url: &str, json: bool) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+    let response = client
+        .get(list_url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("failed to connect to server at {list_url}: {e}"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("server returned {status}: {body}"));
+    }
+
+    let entries: Vec<StreamListEntry> = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse response from {list_url}: {e}"))?;
+
+    print_stream_entries(&entries, json);
     Ok(())
 }
 
-fn print_streams_json(streams: &[(String, durable_streams_server::storage::StreamMetadata)]) {
-    let entries: Vec<serde_json::Value> = streams
+fn print_stream_entries(entries: &[StreamListEntry], json: bool) {
+    if json {
+        print_streams_json(entries);
+    } else {
+        print_streams_table(entries);
+    }
+}
+
+fn print_streams_json(entries: &[StreamListEntry]) {
+    // Keep the CLI's established JSON contract independent of the admin response.
+    let entries: Vec<serde_json::Value> = entries
         .iter()
-        .map(|(name, meta)| {
+        .map(|entry| {
             serde_json::json!({
-                "name": name,
-                "status": if meta.closed { "closed" } else { "open" },
-                "message_count": meta.message_count,
-                "total_bytes": meta.total_bytes,
-                "content_type": meta.config.content_type,
-                "created_at": meta.created_at.to_rfc3339(),
-                "updated_at": meta.updated_at.map(|t| t.to_rfc3339()),
-                "ttl_seconds": meta.config.ttl_seconds,
-                "expires_at": meta.config.expires_at.map(|t| t.to_rfc3339()),
+                "name": entry.name,
+                "status": if entry.closed { "closed" } else { "open" },
+                "message_count": entry.message_count,
+                "total_bytes": entry.total_bytes,
+                "content_type": entry.content_type,
+                "created_at": entry.created_at.to_rfc3339(),
+                "updated_at": entry.updated_at.map(|t| t.to_rfc3339()),
+                "ttl_seconds": entry.ttl_seconds,
+                "expires_at": entry.expires_at.map(|t| t.to_rfc3339()),
             })
         })
         .collect();
-
     println!(
         "{}",
         serde_json::to_string_pretty(&entries).expect("JSON serialization should not fail")
     );
 }
 
-fn print_streams_table(streams: &[(String, durable_streams_server::storage::StreamMetadata)]) {
-    if streams.is_empty() {
+fn print_streams_table(entries: &[StreamListEntry]) {
+    if entries.is_empty() {
         println!("No streams found.");
         return;
     }
@@ -310,29 +376,29 @@ fn print_streams_table(streams: &[(String, durable_streams_server::storage::Stre
     );
     println!("{}", "-".repeat(132));
 
-    for (name, meta) in streams {
-        let status = if meta.closed { "closed" } else { "open" };
-        let bytes = format_bytes(meta.total_bytes);
-        let created = meta.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
-        let updated = meta.updated_at.map_or_else(
+    for entry in entries {
+        let status = if entry.closed { "closed" } else { "open" };
+        let bytes = format_bytes(entry.total_bytes);
+        let created = entry.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let updated = entry.updated_at.map_or_else(
             || "-".to_string(),
             |t| t.format("%Y-%m-%d %H:%M:%S").to_string(),
         );
 
         println!(
             "{:<30} {:<8} {:>10} {:>12} {:<24} {:<22} {:<22}",
-            truncate(name, 30),
+            truncate(&entry.name, 30),
             status,
-            meta.message_count,
+            entry.message_count,
             bytes,
-            truncate(&meta.config.content_type, 24),
+            truncate(&entry.content_type, 24),
             created,
             updated
         );
     }
 
     println!();
-    println!("{} stream(s) total", streams.len());
+    println!("{} stream(s) total", entries.len());
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -569,7 +635,8 @@ async fn wait_for_shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use super::{run_list_local, truncate};
+    use durable_streams_server::Config;
 
     #[test]
     fn truncate_respects_utf8_boundaries() {
@@ -581,5 +648,12 @@ mod tests {
     fn truncate_handles_small_limits() {
         assert_eq!(truncate("abcdef", 2), "..");
         assert_eq!(truncate("abcdef", 3), "...");
+    }
+
+    #[test]
+    fn local_list_rejects_memory_storage() {
+        let err = run_list_local(&Config::default(), true).expect_err("memory list should fail");
+        assert!(err.contains("storage.mode='memory'"));
+        assert!(err.contains("--url"));
     }
 }

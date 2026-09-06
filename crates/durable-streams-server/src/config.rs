@@ -275,6 +275,8 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// HTTP protocol surface configuration.
     pub http: HttpConfig,
+    /// Optional operator/admin HTTP surface configuration.
+    pub admin: AdminConfig,
     /// Persistence backend configuration.
     pub storage: StorageConfig,
     /// Transport and connection behaviour.
@@ -315,6 +317,19 @@ pub struct HttpConfig {
     /// When `true`, wildcard CORS (`"*"`) is accepted without warnings or
     /// profile-level validation errors. Defaults to `false`.
     pub allow_wildcard_cors: bool,
+}
+
+/// Optional operator/admin HTTP surface configuration.
+///
+/// Admin routes are disabled by default and are intended for trusted networks,
+/// reverse proxies, or external access-control layers. The server deliberately
+/// does not own authentication or authorization policy for this surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdminConfig {
+    /// Whether to mount the admin router.
+    pub enabled: bool,
+    /// Mount path for operator-focused admin routes, e.g. `/admin`.
+    pub base_path: String,
 }
 
 /// Persistence configuration.
@@ -457,6 +472,10 @@ pub enum ConfigValidationError {
     InvalidBindAddress { value: String, reason: String },
     #[error("http.stream_base_path is invalid: '{value}' ({reason})")]
     InvalidStreamBasePath { value: String, reason: String },
+    #[error("admin.base_path is invalid: '{value}' ({reason})")]
+    InvalidAdminBasePath { value: String, reason: String },
+    #[error("admin.base_path must not overlap http.stream_base_path")]
+    AdminBasePathConflictsWithStreamBasePath,
     #[error("http.cors_origins contains an empty origin entry")]
     EmptyCorsOrigin,
     #[error("http.cors_origins entry is invalid: '{value}'")]
@@ -542,6 +561,7 @@ struct ConfigPatch {
     server: ServerConfigPatch,
     limits: LimitsConfigPatch,
     http: HttpConfigPatch,
+    admin: AdminConfigPatch,
     storage: StorageConfigPatch,
     transport: TransportConfigPatch,
     proxy: ProxyConfigPatch,
@@ -575,6 +595,13 @@ struct HttpConfigPatch {
     cors_origins: Option<String>,
     stream_base_path: Option<String>,
     allow_wildcard_cors: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct AdminConfigPatch {
+    enabled: Option<bool>,
+    base_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -761,6 +788,7 @@ impl Config {
         self.apply_server_patch(&patch.server);
         self.apply_limits_patch(&patch.limits);
         self.apply_http_patch(&patch.http);
+        self.apply_admin_patch(&patch.admin);
         self.apply_storage_patch(&patch.storage);
         self.apply_transport_patch(&patch.transport, &patch.tls, &patch.server, ctx);
         self.apply_proxy_patch(&patch.proxy);
@@ -803,6 +831,15 @@ impl Config {
         }
         if let Some(allow_wildcard_cors) = patch.allow_wildcard_cors {
             self.http.allow_wildcard_cors = allow_wildcard_cors;
+        }
+    }
+
+    fn apply_admin_patch(&mut self, patch: &AdminConfigPatch) {
+        if let Some(enabled) = patch.enabled {
+            self.admin.enabled = enabled;
+        }
+        if let Some(base_path) = &patch.base_path {
+            self.admin.base_path.clone_from(base_path);
         }
     }
 
@@ -916,6 +953,7 @@ impl Config {
         self.apply_server_env(get)?;
         self.apply_limits_env(get)?;
         self.apply_http_env(get)?;
+        self.apply_admin_env(get)?;
         self.apply_storage_env(get)?;
         self.apply_transport_env(get, ctx)?;
         self.apply_proxy_env(get)?;
@@ -979,6 +1017,17 @@ impl Config {
             self.http.stream_base_path = stream_base_path;
         }
         env_parse_into!(self, get, "DS_HTTP__ALLOW_WILDCARD_CORS" => http.allow_wildcard_cors : bool);
+        Ok(())
+    }
+
+    fn apply_admin_env(
+        &mut self,
+        get: &impl Fn(&str) -> Option<String>,
+    ) -> Result<(), ConfigLoadError> {
+        env_parse_into!(self, get, "DS_ADMIN__ENABLED" => admin.enabled : bool);
+        if let Some(base_path) = get("DS_ADMIN__BASE_PATH") {
+            self.admin.base_path = base_path;
+        }
         Ok(())
     }
 
@@ -1092,6 +1141,10 @@ impl Config {
         validate_socket_addr(&self.server.bind_address)?;
         validate_cors_origins(&self.http.cors_origins)?;
         validate_stream_base_path(&self.http.stream_base_path)?;
+        validate_admin_base_path(&self.admin.base_path)?;
+        if self.admin.enabled {
+            validate_admin_path_separation(&self.http.stream_base_path, &self.admin.base_path)?;
+        }
         self.validate_limits()?;
         self.validate_storage()?;
         self.validate_transport()?;
@@ -1292,6 +1345,15 @@ impl Config {
                     .to_string(),
             );
         }
+        if self.admin.enabled {
+            match self.bind_socket_addr() {
+                Ok(addr) if !addr.ip().is_loopback() => w.push(format!(
+                    "admin routes are enabled on non-loopback bind address {addr}; \
+                     place them behind a trusted network, reverse proxy, or external access-control layer"
+                )),
+                _ => {}
+            }
+        }
         w
     }
 
@@ -1344,6 +1406,10 @@ impl Default for Config {
                 cors_origins: "*".to_string(),
                 stream_base_path: DEFAULT_STREAM_BASE_PATH.to_string(),
                 allow_wildcard_cors: false,
+            },
+            admin: AdminConfig {
+                enabled: false,
+                base_path: "/admin".to_string(),
             },
             storage: StorageConfig {
                 mode: StorageMode::Memory,
@@ -1618,6 +1684,63 @@ fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
     Ok(())
 }
 
+fn validate_admin_base_path(raw: &str) -> Result<(), ConfigValidationError> {
+    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*']) {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must be a literal path without whitespace or route parameters".to_string(),
+        });
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must be a non-empty absolute path".to_string(),
+        });
+    }
+    if !trimmed.starts_with('/') {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must start with '/'".to_string(),
+        });
+    }
+    if trimmed == "/" {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must not be '/'".to_string(),
+        });
+    }
+    if trimmed.ends_with('/') {
+        return Err(ConfigValidationError::InvalidAdminBasePath {
+            value: raw.to_string(),
+            reason: "must not end with '/'".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_admin_path_separation(
+    stream_base_path: &str,
+    admin_base_path: &str,
+) -> Result<(), ConfigValidationError> {
+    if paths_overlap(stream_base_path, admin_base_path) {
+        return Err(ConfigValidationError::AdminBasePathConflictsWithStreamBasePath);
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == "/"
+        || right == "/"
+        || left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn valid_acid_shard_count(value: usize) -> bool {
     (1..=256).contains(&value) && value.is_power_of_two()
 }
@@ -1736,6 +1859,8 @@ mod tests {
         assert_eq!(config.limits.max_memory_bytes, 100 * 1024 * 1024);
         assert_eq!(config.limits.max_stream_bytes, 10 * 1024 * 1024);
         assert_eq!(config.http.cors_origins, "*");
+        assert!(!config.admin.enabled);
+        assert_eq!(config.admin.base_path, "/admin");
         assert_eq!(config.transport.connection.long_poll_timeout_secs, 30);
         assert_eq!(config.transport.connection.sse_reconnect_interval_secs, 60);
         assert_eq!(config.http.stream_base_path, DEFAULT_STREAM_BASE_PATH);
@@ -1965,6 +2090,65 @@ key_path = "/tmp/key.pem"
         assert!(rendered.contains("\"transport\""));
         assert!(rendered.contains("\"observability\""));
         assert!(rendered.contains("\"proxy\""));
+    }
+
+    #[test]
+    fn test_disabled_admin_allows_overlapping_stream_mounts() {
+        for path in ["/admin", "/admin/events", "/"] {
+            let mut config = Config::default();
+            config.http.stream_base_path = path.to_string();
+            assert!(config.validate().is_ok(), "disabled admin reserves {path}");
+        }
+    }
+
+    #[test]
+    fn test_enabled_admin_rejects_overlapping_stream_mounts() {
+        for path in ["/admin", "/admin/events", "/"] {
+            let mut config = Config::default();
+            config.admin.enabled = true;
+            config.http.stream_base_path = path.to_string();
+            assert_eq!(
+                config.validate(),
+                Err(ConfigValidationError::AdminBasePathConflictsWithStreamBasePath),
+                "overlapping mount: {path}"
+            );
+        }
+
+        let mut config = Config::default();
+        config.admin.enabled = true;
+        config.admin.base_path = "/v1/stream/admin".to_string();
+        assert_eq!(
+            config.validate(),
+            Err(ConfigValidationError::AdminBasePathConflictsWithStreamBasePath)
+        );
+        config.admin.base_path = "/v1/streams-admin".to_string();
+        assert!(
+            config.validate().is_ok(),
+            "shared text prefix is not overlap"
+        );
+    }
+
+    #[test]
+    fn test_admin_base_path_rejects_nonliteral_or_whitespace_paths() {
+        for path in [
+            " /admin",
+            "/admin ",
+            "/{*path}",
+            "/{tenant}",
+            "/:admin",
+            "/*admin",
+        ] {
+            let mut config = Config::default();
+            config.admin.enabled = true;
+            config.admin.base_path = path.to_string();
+            assert!(
+                matches!(
+                    config.validate(),
+                    Err(ConfigValidationError::InvalidAdminBasePath { .. })
+                ),
+                "invalid admin mount: {path}"
+            );
+        }
     }
 
     #[test]

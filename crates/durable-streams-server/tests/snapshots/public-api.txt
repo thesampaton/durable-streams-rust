@@ -25,6 +25,7 @@ pub durable_streams_server::config::ConfigLoadError::OverrideFileNotFound::path:
 pub durable_streams_server::config::ConfigLoadError::TomlParse
 pub durable_streams_server::config::ConfigLoadError::TomlParse::message: alloc::string::String
 pub enum durable_streams_server::config::ConfigValidationError
+pub durable_streams_server::config::ConfigValidationError::AdminBasePathConflictsWithStreamBasePath
 pub durable_streams_server::config::ConfigValidationError::ClientCaRequiresMtls
 pub durable_streams_server::config::ConfigValidationError::EmptyCorsOrigin
 pub durable_streams_server::config::ConfigValidationError::EmptyHttpVersions
@@ -39,6 +40,9 @@ pub durable_streams_server::config::ConfigValidationError::HttpModeDisallowsTlsF
 pub durable_streams_server::config::ConfigValidationError::HttpModeDoesNotSupportHttp2
 pub durable_streams_server::config::ConfigValidationError::IdentityHeaderRequiresHeaderMode
 pub durable_streams_server::config::ConfigValidationError::InvalidAcidShardCount
+pub durable_streams_server::config::ConfigValidationError::InvalidAdminBasePath
+pub durable_streams_server::config::ConfigValidationError::InvalidAdminBasePath::reason: alloc::string::String
+pub durable_streams_server::config::ConfigValidationError::InvalidAdminBasePath::value: alloc::string::String
 pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress
 pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress::reason: alloc::string::String
 pub durable_streams_server::config::ConfigValidationError::InvalidBindAddress::value: alloc::string::String
@@ -139,7 +143,11 @@ impl durable_streams_server::config::TransportMode
 pub fn durable_streams_server::config::TransportMode::uses_tls(self) -> bool
 impl core::fmt::Display for durable_streams_server::config::TransportMode
 pub fn durable_streams_server::config::TransportMode::fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct durable_streams_server::config::AdminConfig
+pub durable_streams_server::config::AdminConfig::base_path: alloc::string::String
+pub durable_streams_server::config::AdminConfig::enabled: bool
 pub struct durable_streams_server::config::Config
+pub durable_streams_server::config::Config::admin: durable_streams_server::config::AdminConfig
 pub durable_streams_server::config::Config::http: durable_streams_server::config::HttpConfig
 pub durable_streams_server::config::Config::limits: durable_streams_server::config::LimitsConfig
 pub durable_streams_server::config::Config::observability: durable_streams_server::config::ObservabilityConfig
@@ -521,14 +529,6 @@ pub fn durable_streams_server::storage::StreamConfig::with_expires_at(self, expi
 pub fn durable_streams_server::storage::StreamConfig::with_ttl(self, ttl_seconds: u64) -> Self
 impl core::cmp::PartialEq for durable_streams_server::storage::StreamConfig
 pub fn durable_streams_server::storage::StreamConfig::eq(&self, other: &Self) -> bool
-pub struct durable_streams_server::storage::StreamMetadata
-pub durable_streams_server::storage::StreamMetadata::closed: bool
-pub durable_streams_server::storage::StreamMetadata::config: durable_streams_server::storage::StreamConfig
-pub durable_streams_server::storage::StreamMetadata::created_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
-pub durable_streams_server::storage::StreamMetadata::message_count: u64
-pub durable_streams_server::storage::StreamMetadata::next_offset: durable_streams_server::protocol::offset::Offset
-pub durable_streams_server::storage::StreamMetadata::total_bytes: u64
-pub durable_streams_server::storage::StreamMetadata::updated_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
 pub trait durable_streams_server::storage::Storage: core::marker::Send + core::marker::Sync
 pub fn durable_streams_server::storage::Storage::append(&self, name: &str, data: bytes::bytes::Bytes, content_type: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::protocol::offset::Offset>
 pub fn durable_streams_server::storage::Storage::append_with_producer(&self, name: &str, messages: alloc::vec::Vec<bytes::bytes::Bytes>, content_type: &str, producer: &durable_streams_server::protocol::producer::ProducerHeaders, should_close: bool, seq: core::option::Option<&str>) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ProducerAppendResult>
@@ -589,6 +589,36 @@ pub fn durable_streams_server::storage::memory::InMemoryStorage::head(&self, nam
 pub fn durable_streams_server::storage::memory::InMemoryStorage::list_streams(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::storage::StreamMetadata)>>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
 pub fn durable_streams_server::storage::memory::InMemoryStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
+pub type durable_streams_server::storage::StreamMetadata = durable_streams_server::streams::StreamMetadata
+pub mod durable_streams_server::streams
+pub struct durable_streams_server::streams::StreamListEntry
+pub durable_streams_server::streams::StreamListEntry::closed: bool
+pub durable_streams_server::streams::StreamListEntry::content_type: alloc::string::String
+pub durable_streams_server::streams::StreamListEntry::created_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub durable_streams_server::streams::StreamListEntry::expires_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub durable_streams_server::streams::StreamListEntry::message_count: u64
+pub durable_streams_server::streams::StreamListEntry::name: alloc::string::String
+pub durable_streams_server::streams::StreamListEntry::total_bytes: u64
+pub durable_streams_server::streams::StreamListEntry::ttl_seconds: core::option::Option<u64>
+pub durable_streams_server::streams::StreamListEntry::updated_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+impl durable_streams_server::streams::StreamListEntry
+pub fn durable_streams_server::streams::StreamListEntry::from_metadata(name: alloc::string::String, meta: &durable_streams_server::streams::StreamMetadata) -> Self
+pub struct durable_streams_server::streams::StreamMetadata
+pub durable_streams_server::streams::StreamMetadata::closed: bool
+pub durable_streams_server::streams::StreamMetadata::config: durable_streams_server::storage::StreamConfig
+pub durable_streams_server::streams::StreamMetadata::created_at: chrono::datetime::DateTime<chrono::offset::utc::Utc>
+pub durable_streams_server::streams::StreamMetadata::message_count: u64
+pub durable_streams_server::streams::StreamMetadata::next_offset: durable_streams_server::protocol::offset::Offset
+pub durable_streams_server::streams::StreamMetadata::total_bytes: u64
+pub durable_streams_server::streams::StreamMetadata::updated_at: core::option::Option<chrono::datetime::DateTime<chrono::offset::utc::Utc>>
+pub struct durable_streams_server::streams::StreamService<S: durable_streams_server::storage::Storage>
+impl<S: durable_streams_server::storage::Storage> durable_streams_server::streams::StreamService<S>
+pub fn durable_streams_server::streams::StreamService<S>::head(&self, name: &str) -> durable_streams_server::protocol::error::Result<durable_streams_server::streams::StreamMetadata>
+pub fn durable_streams_server::streams::StreamService<S>::list(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<(alloc::string::String, durable_streams_server::streams::StreamMetadata)>>
+pub fn durable_streams_server::streams::StreamService<S>::list_entries(&self) -> durable_streams_server::protocol::error::Result<alloc::vec::Vec<durable_streams_server::streams::StreamListEntry>>
+pub fn durable_streams_server::streams::StreamService<S>::new(storage: alloc::sync::Arc<S>) -> Self
+impl<S: durable_streams_server::storage::Storage> core::clone::Clone for durable_streams_server::streams::StreamService<S>
+pub fn durable_streams_server::streams::StreamService<S>::clone(&self) -> Self
 pub mod durable_streams_server::transfer
 pub mod durable_streams_server::transfer::export
 pub struct durable_streams_server::transfer::export::ExportOptions
@@ -681,6 +711,7 @@ pub fn durable_streams_server::storage::acid::AcidStorage::list_streams(&self) -
 pub fn durable_streams_server::storage::acid::AcidStorage::read(&self, name: &str, from_offset: &durable_streams_server::protocol::offset::Offset) -> durable_streams_server::protocol::error::Result<durable_streams_server::storage::ReadResult>
 pub fn durable_streams_server::storage::acid::AcidStorage::subscribe(&self, name: &str) -> core::option::Option<tokio::sync::broadcast::Receiver<()>>
 pub struct durable_streams_server::Config
+pub durable_streams_server::Config::admin: durable_streams_server::config::AdminConfig
 pub durable_streams_server::Config::http: durable_streams_server::config::HttpConfig
 pub durable_streams_server::Config::limits: durable_streams_server::config::LimitsConfig
 pub durable_streams_server::Config::observability: durable_streams_server::config::ObservabilityConfig
