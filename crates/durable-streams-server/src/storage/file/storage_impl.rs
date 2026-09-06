@@ -3,6 +3,7 @@ use super::{
     ProducerAppendResult, ProducerState, ReadResult, Result, RwLock, Storage, StreamConfig,
     StreamEntry, StreamMetadata, StreamState,
 };
+use crate::storage::shared::release_bytes;
 use bytes::Bytes;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -19,12 +20,7 @@ impl Storage for FileStorage {
         seq: Option<&str>,
         close: bool,
     ) -> Result<crate::storage::AppendResult> {
-        if messages.is_empty() && !close {
-            return Err(Error::InvalidHeader {
-                header: "Content-Length".to_string(),
-                reason: "batch cannot be empty".to_string(),
-            });
-        }
+        super::super::shared::validate_batch_shape(&messages, close)?;
 
         let stream_arc = self
             .get_stream(name)
@@ -33,20 +29,15 @@ impl Storage for FileStorage {
         let mut stream = stream_arc.write().expect("stream lock poisoned");
         stream.ensure_available()?;
 
-        let pending_seq = if messages.is_empty() {
-            super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
-            super::super::shared::validate_seq(stream.last_seq.as_deref(), seq)?
-        } else {
-            super::super::precheck_batch_append(
-                &stream.config,
-                stream.state,
-                stream.closed,
-                stream.last_seq.as_deref(),
-                name,
-                content_type,
-                seq,
-            )?
-        };
+        let pending_seq = super::super::precheck_batch_append(
+            &stream.config,
+            stream.state,
+            stream.closed,
+            stream.last_seq.as_deref(),
+            name,
+            (!messages.is_empty()).then_some(content_type),
+            seq,
+        )?;
         let start_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
         self.append_transaction(&mut stream, false, |stream| {
             self.append_records(name, stream, &messages)?;
@@ -144,11 +135,6 @@ impl Storage for FileStorage {
         super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         Ok(stream.metadata())
-    }
-
-    fn close_stream(&self, name: &str) -> Result<()> {
-        self.append_batch(name, Vec::new(), "", None, true)
-            .map(|_| ())
     }
 
     fn append_with_producer(
@@ -315,7 +301,7 @@ impl Storage for FileStorage {
         let closed = entry.closed;
 
         if let Err(e) = self.write_metadata_for(name, &entry) {
-            self.rollback_total_bytes(entry.total_bytes);
+            release_bytes(&self.total_bytes, entry.total_bytes);
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
             }
@@ -371,7 +357,7 @@ impl Storage for FileStorage {
             ))
         });
         if result.is_ok() {
-            self.rollback_total_bytes(old_bytes);
+            release_bytes(&self.total_bytes, old_bytes);
         }
         result
     }
@@ -494,22 +480,6 @@ impl Storage for FileStorage {
         })
     }
 
-    fn create_fork(
-        &self,
-        name: &str,
-        source_name: &str,
-        fork_offset: Option<&Offset>,
-        config: crate::storage::StreamOptions,
-    ) -> Result<CreateStreamResult> {
-        self.create_fork_with_options(
-            name,
-            source_name,
-            fork_offset,
-            config,
-            super::super::ForkOptions::default(),
-        )
-    }
-
     fn create_fork_with_options(
         &self,
         name: &str,
@@ -608,7 +578,7 @@ impl Storage for FileStorage {
             return Err(e);
         }
         if let Err(e) = self.write_metadata_for(name, &entry) {
-            self.rollback_total_bytes(entry.total_bytes);
+            release_bytes(&self.total_bytes, entry.total_bytes);
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
             }
@@ -641,31 +611,23 @@ impl FileStorage {
         let mut source_messages = Vec::new();
         if options.sub_offset > 0 {
             let plan = super::super::fork::build_read_plan(source_name, |n| {
-                streams
+                Ok(streams
                     .get(n)
-                    .map(|arc| arc.read().expect("stream lock poisoned").fork_info.clone())
-            });
+                    .and_then(|arc| arc.read().expect("stream lock poisoned").fork_info.clone()))
+            })?;
             for segment in plan {
                 let arc = streams
                     .get(&segment.name)
                     .ok_or_else(|| Error::NotFound(segment.name.clone()))?;
                 let stream = arc.read().expect("stream lock poisoned");
                 stream.ensure_available()?;
-                let start = stream
-                    .index
-                    .partition_point(|m| m.offset < *resolved_offset);
-                let end = segment
-                    .read_up_to
-                    .as_ref()
-                    .map_or(stream.index.len(), |bound| {
-                        stream.index.partition_point(|m| m.offset < *bound)
-                    });
-                if start < end {
-                    source_messages.extend(Self::read_messages(
-                        &stream.file,
-                        &stream.index[start..end],
-                    )?);
-                }
+                let range = super::super::fork::message_range(
+                    &stream.index,
+                    resolved_offset,
+                    segment.read_up_to.as_ref(),
+                    |m| &m.offset,
+                );
+                source_messages.extend(Self::read_messages(&stream.file, &stream.index[range])?);
             }
         }
         super::super::fork::initial_fork_messages(config, options, source_messages)

@@ -2,6 +2,7 @@
 
 use super::{FileStorage, StreamEntry, StreamMeta};
 use crate::protocol::error::{Error, Result};
+use crate::storage::shared::release_bytes;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::path::Path;
@@ -99,9 +100,12 @@ impl FileStorage {
             let meta: StreamMeta = serde_json::from_slice(&undo.metadata)
                 .map_err(|e| Error::Storage(e.to_string()))?;
             if restore_log {
-                self.rollback_total_bytes(stream.total_bytes);
+                release_bytes(&self.total_bytes, stream.total_bytes);
             } else {
-                self.rollback_total_bytes(stream.total_bytes.saturating_sub(old_total));
+                release_bytes(
+                    &self.total_bytes,
+                    stream.total_bytes.saturating_sub(old_total),
+                );
             }
             stream.config = meta.config;
             stream.closed = meta.closed;

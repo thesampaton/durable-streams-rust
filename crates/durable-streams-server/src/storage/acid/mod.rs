@@ -27,6 +27,7 @@ use super::{ForkInfo, NOTIFY_CHANNEL_CAPACITY, ProducerState, StreamConfig, Stre
 use crate::config::AcidBackend;
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
+use crate::storage::shared::release_bytes;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use redb::backends::InMemoryBackend;
@@ -261,34 +262,7 @@ impl AcidStorage {
             return Ok(());
         }
 
-        if self
-            .total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|next| *next <= self.max_total_bytes)
-            })
-            .is_err()
-        {
-            return Err(Error::MemoryLimitExceeded);
-        }
-        Ok(())
-    }
-
-    fn rollback_total_bytes(&self, bytes: u64) {
-        self.saturating_sub_total_bytes(bytes);
-    }
-
-    fn saturating_sub_total_bytes(&self, bytes: u64) {
-        if bytes == 0 {
-            return;
-        }
-
-        self.total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_sub(bytes))
-            })
-            .ok();
+        crate::storage::shared::reserve_bytes(&self.total_bytes, self.max_total_bytes, bytes)
     }
 
     fn read_stream_meta<T>(streams: &T, name: &str) -> Result<Option<StoredStreamMeta>>
@@ -391,13 +365,6 @@ impl AcidStorage {
         }
     }
 
-    fn batch_bytes(messages: &[Bytes]) -> u64 {
-        messages
-            .iter()
-            .map(|m| u64::try_from(m.len()).unwrap_or(u64::MAX))
-            .sum()
-    }
-
     fn cascade_delete_acid(&self, parent_name: &str) -> Result<()> {
         let mut current_parent = parent_name.to_string();
         while let Some(shard_idx) = self.find_stream_shard_index(&current_parent)? {
@@ -430,7 +397,7 @@ impl AcidStorage {
                 txn.commit()
                     .map_err(|e| Self::storage_err("failed to commit cascade delete", e))?;
 
-                self.saturating_sub_total_bytes(total_bytes);
+                release_bytes(&self.total_bytes, total_bytes);
                 self.drop_notifier(&current_parent);
 
                 match next_parent {
@@ -478,29 +445,42 @@ impl AcidStorage {
                 .ok_or_else(|| Error::InvalidOffset("non-concrete offset in read range".into()))?
         };
 
-        let mut lineage = vec![(name.to_string(), meta.fork_info.clone())];
-        while let Some(parent) = lineage.last().and_then(|(_, fi)| fi.as_ref()) {
-            let source = parent.source_name.clone();
-            let ancestor = Self::read_stream_meta(streams, &source)?
-                .ok_or_else(|| Error::NotFound(source.clone()))?;
-            lineage.push((source, ancestor.fork_info));
-        }
         let plan = super::fork::build_read_plan(name, |segment_name| {
-            lineage
-                .iter()
-                .find(|(n, _)| n == segment_name)
-                .map(|(_, fi)| fi.clone())
-        });
+            if segment_name == name {
+                return Ok(meta.fork_info.clone());
+            }
+            Self::read_stream_meta(streams, segment_name)?
+                .map(|ancestor| ancestor.fork_info)
+                .ok_or_else(|| Error::NotFound(segment_name.to_string()))
+        })?;
+        result.messages = Self::read_message_ranges(
+            messages,
+            plan,
+            start,
+            "failed to read stream range",
+            "failed to read stream message",
+        )?;
+        Ok(result)
+    }
+
+    /// Materialize a lineage using the message table from the caller's transaction.
+    fn read_message_ranges(
+        messages: &impl ReadableTable<(&'static str, u64, u64), &'static [u8]>,
+        plan: Vec<super::fork::ReadSegment>,
+        start: (u64, u64),
+        range_context: &'static str,
+        message_context: &'static str,
+    ) -> Result<Vec<Bytes>> {
+        let mut result = Vec::new();
         for segment in plan {
             let iter = messages
                 .range(
                     (segment.name.as_str(), start.0, start.1)
                         ..=(segment.name.as_str(), u64::MAX, u64::MAX),
                 )
-                .map_err(|e| Self::storage_err("failed to read stream range", e))?;
+                .map_err(|e| Self::storage_err(range_context, e))?;
             for item in iter {
-                let (key, value) =
-                    item.map_err(|e| Self::storage_err("failed to read stream message", e))?;
+                let (key, value) = item.map_err(|e| Self::storage_err(message_context, e))?;
                 let (_, seq, byte) = key.value();
                 if segment
                     .read_up_to
@@ -509,7 +489,7 @@ impl AcidStorage {
                 {
                     break;
                 }
-                result.messages.push(Bytes::copy_from_slice(value.value()));
+                result.push(Bytes::copy_from_slice(value.value()));
             }
         }
         Ok(result)

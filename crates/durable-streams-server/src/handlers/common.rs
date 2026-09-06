@@ -5,7 +5,6 @@
 //! rather than re-implementing the same HTTP plumbing.
 
 use crate::protocol::headers::{self, names};
-use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemDetails, ProblemResponse, ProblemResult, request_instance};
 use axum::body::{Body, Bytes};
@@ -64,13 +63,7 @@ pub fn parse_stream_closed(headers: &HeaderMap) -> bool {
 /// Empty JSON arrays return `Ok(vec![])`; callers enforce their own
 /// policy (PUT accepts them; POST rejects unless closing).
 pub fn extract_messages(body: Bytes, normalized_ct: &str) -> ProblemResult<Vec<Bytes>> {
-    if body.is_empty() {
-        Ok(vec![])
-    } else if json_mode::is_json_content_type(normalized_ct) {
-        Ok(json_mode::process_append(&body)?)
-    } else {
-        Ok(vec![body])
-    }
+    crate::protocol::extract_messages(body, normalized_ct).map_err(Into::into)
 }
 
 /// Attach the request instance to any problem-response produced inside `f`.

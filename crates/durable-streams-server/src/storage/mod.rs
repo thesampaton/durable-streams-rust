@@ -364,8 +364,8 @@ pub enum ProducerAppendResult {
 /// Persistence contract for Durable Streams server state.
 ///
 /// Methods are synchronous and may block on filesystem I/O or lock acquisition.
-/// HTTP and subscription callers currently execute them directly; async callers
-/// need an appropriate execution context. Backends own atomicity, ordering, and
+/// Server HTTP and subscription callers use a bounded blocking execution adapter.
+/// Direct Rust callers provide their own execution context. Backends own atomicity, ordering, and
 /// recovery regardless of how the operation is scheduled.
 ///
 /// Implementations are expected to preserve these invariants:
@@ -442,9 +442,13 @@ pub trait Storage: Send + Sync {
     /// Mark a stream closed so future appends are rejected.
     ///
     /// Prevents further appends.
+    /// The default delegates to an empty, final [`Self::append_batch`].
     /// Returns `Ok(())` if already closed (idempotent).
     /// Returns `Err(Error::NotFound)` if stream doesn't exist.
-    fn close_stream(&self, name: &str) -> Result<()>;
+    fn close_stream(&self, name: &str) -> Result<()> {
+        self.append_batch(name, Vec::new(), "", None, true)
+            .map(|_| ())
+    }
 
     /// Append with idempotent producer sequencing.
     ///
@@ -543,13 +547,22 @@ pub trait Storage: Send + Sync {
     ///
     /// Returns `Err(StreamGone)` if the source is tombstoned.
     /// Returns `Err(ForkOffsetBeyondTail)` if `fork_offset` exceeds the source tail.
+    /// The default delegates to [`Self::create_fork_with_options`] with default options.
     fn create_fork(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
         config: StreamOptions,
-    ) -> Result<CreateStreamResult>;
+    ) -> Result<CreateStreamResult> {
+        self.create_fork_with_options(
+            name,
+            source_name,
+            fork_offset,
+            config,
+            ForkOptions::default(),
+        )
+    }
 
     /// Create a fork and its partial inherited data and initial body atomically.
     ///

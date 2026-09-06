@@ -25,16 +25,7 @@ impl FileStorage {
                 .map(PendingRead::Complete),
             Some(info) => Ok(PendingRead::Fork {
                 info: info.clone(),
-                local: super::ReadResult {
-                    messages: Self::read_fork_local_messages(
-                        stream,
-                        from_offset,
-                        &info.fork_offset,
-                    )?,
-                    next_offset,
-                    at_tail: true,
-                    closed: stream.closed,
-                },
+                local: Self::read_local_file_messages(stream, from_offset, next_offset)?,
             }),
         }
     }
@@ -45,16 +36,9 @@ impl FileStorage {
         from_offset: &Offset,
         pending: PendingRead,
     ) -> Result<super::ReadResult> {
-        match pending {
-            PendingRead::Complete(result) => Ok(result),
-            PendingRead::Fork { info, local } => self.assemble_fork_read(
-                from_offset,
-                &info,
-                local.messages,
-                local.next_offset,
-                local.closed,
-            ),
-        }
+        pending.finish(from_offset, |source, from, up_to| {
+            self.read_source_chain(source, from, up_to)
+        })
     }
 
     pub(super) fn read_messages(file: &File, index_slice: &[MessageIndex]) -> Result<Vec<Bytes>> {
@@ -126,11 +110,10 @@ impl FileStorage {
 
         // Build the ancestor chain from source to root
         let plan = super::super::fork::build_read_plan(source_name, |n| {
-            streams.get(n).map(|arc| {
-                let s = arc.read().expect("stream lock poisoned");
-                s.fork_info.clone()
-            })
-        });
+            Ok(streams
+                .get(n)
+                .and_then(|arc| arc.read().expect("stream lock poisoned").fork_info.clone()))
+        })?;
 
         let mut all_messages: Vec<Bytes> = Vec::new();
 
@@ -141,108 +124,40 @@ impl FileStorage {
             let seg_stream = seg_arc.read().expect("stream lock poisoned");
             seg_stream.ensure_available()?;
 
-            let effective_up_to = Some(
-                segment
-                    .read_up_to
-                    .as_ref()
-                    .map_or(up_to, |bound| bound.min(up_to)),
+            let up_to = segment
+                .read_up_to
+                .as_ref()
+                .map_or(up_to, |bound| bound.min(up_to));
+            let range = super::super::fork::message_range(
+                &seg_stream.index,
+                from_offset,
+                Some(up_to),
+                |m| &m.offset,
             );
-
-            let effective_from = from_offset;
-
-            let start_idx = if effective_from.is_start() {
-                0
-            } else {
-                match seg_stream
-                    .index
-                    .binary_search_by(|m| m.offset.cmp(effective_from))
-                {
-                    Ok(idx) | Err(idx) => idx,
-                }
-            };
-
-            let end_idx = if let Some(bound) = effective_up_to {
-                match seg_stream.index.binary_search_by(|m| m.offset.cmp(bound)) {
-                    Ok(idx) | Err(idx) => idx,
-                }
-            } else {
-                seg_stream.index.len()
-            };
-
-            if start_idx < end_idx {
-                let index_slice = &seg_stream.index[start_idx..end_idx];
-                let msgs = Self::read_messages(&seg_stream.file, index_slice)?;
-                all_messages.extend(msgs);
-            }
+            all_messages.extend(Self::read_messages(
+                &seg_stream.file,
+                &seg_stream.index[range],
+            )?);
         }
 
         Ok(all_messages)
     }
 
-    /// Read messages from a non-forked stream using the in-memory index.
+    /// Read a stream's local suffix using its in-memory index.
     pub(super) fn read_local_file_messages(
         stream: &StreamEntry,
         from_offset: &Offset,
         next_offset: Offset,
     ) -> Result<super::ReadResult> {
-        let start_idx = if from_offset.is_start() {
-            0
-        } else {
-            match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                Ok(idx) | Err(idx) => idx,
-            }
-        };
-
-        let index_slice = &stream.index[start_idx..];
-        let messages = Self::read_messages(&stream.file, index_slice)?;
-        let at_tail = start_idx + messages.len() >= stream.index.len();
+        let range =
+            super::super::fork::message_range(&stream.index, from_offset, None, |m| &m.offset);
+        let messages = Self::read_messages(&stream.file, &stream.index[range])?;
 
         Ok(super::ReadResult {
             messages,
             next_offset,
-            at_tail,
-            closed: stream.closed,
-        })
-    }
-
-    /// Read the local portion of a forked stream's messages from disk.
-    pub(super) fn read_fork_local_messages(
-        stream: &StreamEntry,
-        from_offset: &Offset,
-        fork_offset: &Offset,
-    ) -> Result<Vec<Bytes>> {
-        if from_offset.is_start() || *from_offset <= *fork_offset {
-            Self::read_messages(&stream.file, &stream.index)
-        } else {
-            let start_idx = match stream.index.binary_search_by(|m| m.offset.cmp(from_offset)) {
-                Ok(idx) | Err(idx) => idx,
-            };
-            Self::read_messages(&stream.file, &stream.index[start_idx..])
-        }
-    }
-
-    /// Combine source chain messages with fork-local messages into a read result.
-    pub(super) fn assemble_fork_read(
-        &self,
-        from_offset: &Offset,
-        fi: &super::ForkInfo,
-        fork_local_messages: Vec<Bytes>,
-        next_offset: Offset,
-        closed: bool,
-    ) -> Result<super::ReadResult> {
-        let mut all_messages: Vec<Bytes> = Vec::new();
-        if from_offset.is_start() || *from_offset < fi.fork_offset {
-            let source_messages =
-                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset)?;
-            all_messages.extend(source_messages);
-        }
-        all_messages.extend(fork_local_messages);
-
-        Ok(super::ReadResult {
-            messages: all_messages,
-            next_offset,
             at_tail: true,
-            closed,
+            closed: stream.closed,
         })
     }
 }

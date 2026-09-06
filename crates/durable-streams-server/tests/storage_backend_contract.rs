@@ -35,6 +35,28 @@ storage_backend_tests! {
     mod core {
         use super::*;
 
+        // Direct Rust writes distinguish an empty batch from empty records.
+        #[test]
+        fn zero_byte_records_survive_create_append_producer_and_replace() {
+            let handle = create_test_storage(BACKEND);
+            let storage = &handle.storage;
+            storage.create_stream_with_data("empty-records", plain_text_config(), vec![Bytes::new()], false).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new()]);
+            assert_eq!(read.next_offset, Offset::new(1, 0));
+            storage.append_batch("empty-records", vec![Bytes::new()], "text/plain", None, false).unwrap();
+            storage.append_with_producer("empty-records", vec![Bytes::new()], "text/plain", &producer("p", 0, 0), false, None).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new(); 3]);
+            assert_eq!(read.next_offset, Offset::new(3, 0));
+            storage.replace_stream("empty-records", plain_text_config(), vec![Bytes::new(); 2], true).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new(); 2]);
+            assert_eq!(read.next_offset, Offset::new(2, 0));
+            assert!(read.closed);
+            assert_eq!(storage.total_bytes(), 0);
+        }
+
         #[test]
         fn create_idempotent_and_config_mismatch() {
             let handle = create_test_storage(BACKEND);
@@ -477,7 +499,8 @@ storage_backend_tests! {
             let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
-            let expires_at = Utc::now() + chrono::Duration::milliseconds(300);
+            // Allow disk-backed setup to finish under concurrent suite load.
+            let expires_at = Utc::now() + chrono::Duration::seconds(2);
             let config = plain_text_config().with_expires_at(expires_at);
             storage.create_stream("source", config).unwrap();
             storage
@@ -490,7 +513,8 @@ storage_backend_tests! {
                 .unwrap();
             assert_eq!(fork_created, CreateStreamResult::Created);
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let until_expiry = (expires_at - Utc::now()).to_std().unwrap_or_default();
+            std::thread::sleep(until_expiry + std::time::Duration::from_millis(50));
             let removed = storage.cleanup_expired_streams();
             assert_eq!(removed, 1);
 

@@ -5,14 +5,14 @@ use super::{
 use crate::Storage;
 use crate::protocol::error::Error;
 use crate::protocol::producer::ProducerHeaders;
+use crate::storage::shared::{payload_bytes, release_bytes};
 use crate::storage::{
     CreateStreamResult, CreateWithDataResult, ForkCreateSpec, ProducerAppendPrecheck,
     ProducerAppendResult, ReadResult, StreamMetadata, apply_append_metadata, fork,
-    is_stream_expired, is_stream_visible, precheck_batch_append, precheck_producer_append,
+    is_stream_expired, is_stream_visible, precheck_producer_append,
 };
 use chrono::Utc;
 use redb::{ReadableDatabase, ReadableTable};
-use std::collections::HashMap;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -33,14 +33,9 @@ impl Storage for AcidStorage {
         seq: Option<&str>,
         close: bool,
     ) -> Result<crate::storage::AppendResult> {
-        if messages.is_empty() && !close {
-            return Err(Error::InvalidHeader {
-                header: "Content-Length".to_string(),
-                reason: "batch cannot be empty".to_string(),
-            });
-        }
+        crate::storage::shared::validate_batch_shape(&messages, close)?;
 
-        let batch_bytes = Self::batch_bytes(&messages);
+        let batch_bytes = payload_bytes(&messages);
         self.reserve_total_bytes(batch_bytes)?;
 
         let result = (|| {
@@ -56,38 +51,26 @@ impl Storage for AcidStorage {
             let mut meta = Self::read_stream_meta(&streams, name)?
                 .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
-            let pending_seq = if messages.is_empty() {
-                crate::storage::fork::check_stream_access(&meta.config, meta.state, name)?;
-                crate::storage::shared::validate_seq(meta.last_seq.as_deref(), seq)?
-            } else {
-                precheck_batch_append(
-                    &meta.config,
-                    meta.state,
-                    meta.closed,
-                    meta.last_seq.as_deref(),
-                    name,
-                    content_type,
-                    seq,
-                )?
-            };
-
-            if meta.total_bytes + batch_bytes > self.max_stream_bytes {
-                return Err(Error::StreamSizeLimitExceeded);
-            }
+            let pending_seq = crate::storage::precheck_batch_append(
+                &meta.config,
+                meta.state,
+                meta.closed,
+                meta.last_seq.as_deref(),
+                name,
+                (!messages.is_empty()).then_some(content_type),
+                seq,
+            )?;
 
             let start_offset = Offset::new(meta.next_read_seq, meta.next_byte_offset);
-            for data in &messages {
-                let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-                message_table
-                    .insert(
-                        (name, meta.next_read_seq, meta.next_byte_offset),
-                        data.as_ref(),
-                    )
-                    .map_err(|e| Self::storage_err("failed to append batch message", e))?;
-                meta.next_read_seq += 1;
-                meta.next_byte_offset += len;
-                meta.total_bytes += len;
-            }
+            Self::write_messages(
+                name,
+                &messages,
+                batch_bytes,
+                self.max_stream_bytes,
+                &mut meta,
+                &mut message_table,
+                "failed to append batch message",
+            )?;
 
             apply_append_metadata(
                 &mut meta.config,
@@ -114,7 +97,7 @@ impl Storage for AcidStorage {
         })();
 
         if result.is_err() {
-            self.rollback_total_bytes(batch_bytes);
+            release_bytes(&self.total_bytes, batch_bytes);
             return result;
         }
 
@@ -185,7 +168,7 @@ impl Storage for AcidStorage {
         txn.commit()
             .map_err(|e| Self::storage_err("failed to commit delete", e))?;
 
-        self.saturating_sub_total_bytes(total_bytes);
+        release_bytes(&self.total_bytes, total_bytes);
         self.drop_notifier(name);
 
         if let Some(fi) = fork_info {
@@ -214,11 +197,6 @@ impl Storage for AcidStorage {
         Ok(meta.metadata())
     }
 
-    fn close_stream(&self, name: &str) -> Result<()> {
-        self.append_batch(name, Vec::new(), "", None, true)
-            .map(|_| ())
-    }
-
     fn append_with_producer(
         &self,
         name: &str,
@@ -228,7 +206,7 @@ impl Storage for AcidStorage {
         should_close: bool,
         seq: Option<&str>,
     ) -> Result<ProducerAppendResult> {
-        let batch_bytes = Self::batch_bytes(&messages);
+        let batch_bytes = payload_bytes(&messages);
         self.reserve_total_bytes(batch_bytes)?;
 
         let result = (|| {
@@ -267,22 +245,15 @@ impl Storage for AcidStorage {
                 }
             };
 
-            if meta.total_bytes + batch_bytes > self.max_stream_bytes {
-                return Err(Error::StreamSizeLimitExceeded);
-            }
-
-            for data in &messages {
-                let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-                message_table
-                    .insert(
-                        (name, meta.next_read_seq, meta.next_byte_offset),
-                        data.as_ref(),
-                    )
-                    .map_err(|e| Self::storage_err("failed to append producer message", e))?;
-                meta.next_read_seq += 1;
-                meta.next_byte_offset += len;
-                meta.total_bytes += len;
-            }
+            Self::write_messages(
+                name,
+                &messages,
+                batch_bytes,
+                self.max_stream_bytes,
+                &mut meta,
+                &mut message_table,
+                "failed to append producer message",
+            )?;
 
             if should_close {
                 meta.closed = true;
@@ -323,7 +294,7 @@ impl Storage for AcidStorage {
         })();
 
         if result.is_err() || matches!(result, Ok(ProducerAppendResult::Duplicate { .. })) {
-            self.rollback_total_bytes(batch_bytes);
+            release_bytes(&self.total_bytes, batch_bytes);
         }
 
         if result.is_ok() && (!messages.is_empty() || should_close) {
@@ -342,7 +313,7 @@ impl Storage for AcidStorage {
     ) -> Result<CreateWithDataResult> {
         let config = config.resolve(Utc::now())?;
         let should_close = should_close || config.created_closed;
-        let batch_bytes = Self::batch_bytes(&messages);
+        let batch_bytes = payload_bytes(&messages);
 
         let mut reserved = false;
         let mut removed_expired_bytes = 0_u64;
@@ -400,13 +371,14 @@ impl Storage for AcidStorage {
             }
 
             let mut meta = Self::new_stream_meta(config);
-            Self::write_initial_messages(
+            Self::write_messages(
                 name,
                 &messages,
                 batch_bytes,
                 self.max_stream_bytes,
                 &mut meta,
                 &mut message_table,
+                "failed to append create-with-data message",
             )?;
 
             if should_close {
@@ -430,12 +402,12 @@ impl Storage for AcidStorage {
         })();
 
         if result.is_err() && reserved {
-            self.rollback_total_bytes(batch_bytes);
+            release_bytes(&self.total_bytes, batch_bytes);
         }
 
         if result.is_ok() {
             if removed_expired_bytes > 0 {
-                self.saturating_sub_total_bytes(removed_expired_bytes);
+                release_bytes(&self.total_bytes, removed_expired_bytes);
                 self.drop_notifier(name);
                 if let Some(parent) = removed_expired_parent {
                     self.cascade_delete_acid(&parent)?;
@@ -458,7 +430,7 @@ impl Storage for AcidStorage {
     ) -> Result<crate::storage::AppendResult> {
         let config = config.resolve(Utc::now())?;
         let closed = closed || config.created_closed;
-        let bytes = Self::batch_bytes(&messages);
+        let bytes = payload_bytes(&messages);
         self.reserve_total_bytes(bytes)?;
         let result = (|| {
             let shard = &self.shards[self.existing_shard_index(name)?];
@@ -474,13 +446,14 @@ impl Storage for AcidStorage {
             fork::check_replace(previous.ref_count, previous.fork_info.as_ref())?;
             Self::delete_stream_messages(&mut records, name)?;
             let mut meta = Self::new_stream_meta(config);
-            Self::write_initial_messages(
+            Self::write_messages(
                 name,
                 &messages,
                 bytes,
                 self.max_stream_bytes,
                 &mut meta,
                 &mut records,
+                "failed to append create-with-data message",
             )?;
             meta.closed = closed;
             Self::write_stream_meta(&mut streams, name, &meta)?;
@@ -488,7 +461,7 @@ impl Storage for AcidStorage {
             drop(streams);
             txn.commit()
                 .map_err(|e| Self::storage_err("commit replacement", e))?;
-            self.saturating_sub_total_bytes(previous.total_bytes);
+            release_bytes(&self.total_bytes, previous.total_bytes);
             Ok(crate::storage::AppendResult::new(
                 Offset::new(0, 0),
                 Offset::new(meta.next_read_seq, meta.next_byte_offset),
@@ -496,7 +469,7 @@ impl Storage for AcidStorage {
             ))
         })();
         if result.is_err() {
-            self.rollback_total_bytes(bytes);
+            release_bytes(&self.total_bytes, bytes);
         } else {
             self.notify_stream(name);
         }
@@ -609,7 +582,7 @@ impl Storage for AcidStorage {
                 Ok(()) => {
                     let committed_len = committed.len();
                     for (name, bytes, parent) in committed {
-                        self.rollback_total_bytes(bytes);
+                        release_bytes(&self.total_bytes, bytes);
                         self.drop_notifier(&name);
                         if let Some(parent) = parent {
                             let _ = self.cascade_delete_acid(&parent);
@@ -688,22 +661,6 @@ impl Storage for AcidStorage {
         }
         txn.commit()
             .map_err(|e| Self::storage_err("commit subscription state", e))
-    }
-
-    fn create_fork(
-        &self,
-        name: &str,
-        source_name: &str,
-        fork_offset: Option<&Offset>,
-        config: crate::storage::StreamOptions,
-    ) -> Result<CreateStreamResult> {
-        self.create_fork_with_options(
-            name,
-            source_name,
-            fork_offset,
-            config,
-            super::super::ForkOptions::default(),
-        )
     }
 
     fn create_fork_with_options(
@@ -785,17 +742,18 @@ impl Storage for AcidStorage {
             }
         }
 
-        let batch_bytes = Self::batch_bytes(&initial_messages);
+        let batch_bytes = payload_bytes(&initial_messages);
         self.reserve_total_bytes(batch_bytes)?;
         let result = (|| {
             let mut fork_meta = Self::build_fork_stored_meta(&fork_spec, &config, &resolved_offset);
-            Self::write_initial_messages(
+            Self::write_messages(
                 name,
                 &initial_messages,
                 batch_bytes,
                 self.max_stream_bytes,
                 &mut fork_meta,
                 &mut messages,
+                "failed to append create-with-data message",
             )?;
             Self::write_stream_meta(&mut streams, name, &fork_meta)?;
             source_meta.ref_count += 1;
@@ -809,7 +767,7 @@ impl Storage for AcidStorage {
                 .map_err(|e| Self::storage_err("failed to commit create fork", e))
         });
         if result.is_err() {
-            self.rollback_total_bytes(batch_bytes);
+            release_bytes(&self.total_bytes, batch_bytes);
         }
         result?;
 
@@ -850,18 +808,16 @@ impl AcidStorage {
         Ok(result)
     }
 
-    /// Write initial messages into the MESSAGES table during stream creation.
-    fn write_initial_messages(
+    /// Insert records and advance metadata within the caller's transaction.
+    fn write_messages(
         name: &str,
         messages: &[Bytes],
         batch_bytes: u64,
         max_stream_bytes: u64,
         meta: &mut StoredStreamMeta,
         message_table: &mut redb::Table<'_, (&str, u64, u64), &[u8]>,
+        operation: &'static str,
     ) -> Result<()> {
-        if batch_bytes == 0 {
-            return Ok(());
-        }
         if meta.total_bytes + batch_bytes > max_stream_bytes {
             return Err(Error::StreamSizeLimitExceeded);
         }
@@ -872,7 +828,7 @@ impl AcidStorage {
                     (name, meta.next_read_seq, meta.next_byte_offset),
                     data.as_ref(),
                 )
-                .map_err(|e| Self::storage_err("failed to append create-with-data message", e))?;
+                .map_err(|e| Self::storage_err(operation, e))?;
             meta.next_read_seq += 1;
             meta.next_byte_offset += len;
             meta.total_bytes += len;
@@ -950,24 +906,16 @@ impl AcidStorage {
     ) -> StoredStreamMeta {
         let (fork_read_seq, fork_byte_offset) =
             resolved_offset.parse_components().unwrap_or((0, 0));
-        StoredStreamMeta {
-            config: fork_spec.config.clone(),
-            closed: config.created_closed,
-            next_read_seq: fork_read_seq,
-            next_byte_offset: fork_byte_offset,
-            total_bytes: 0,
-            created_at: Utc::now(),
-            updated_at: None,
-            last_seq: None,
-            producers: HashMap::new(),
-            fork_info: Some(ForkInfo {
-                sub_offset: fork_spec.sub_offset,
-                source_name: fork_spec.source_name.clone(),
-                fork_offset: resolved_offset.clone(),
-            }),
-            ref_count: 0,
-            state: StreamState::Active,
-        }
+        let mut meta = Self::new_stream_meta(fork_spec.config.clone());
+        meta.closed = config.created_closed;
+        meta.next_read_seq = fork_read_seq;
+        meta.next_byte_offset = fork_byte_offset;
+        meta.fork_info = Some(ForkInfo::new(
+            fork_spec.source_name.clone(),
+            resolved_offset.clone(),
+            fork_spec.sub_offset,
+        ));
+        meta
     }
 
     /// Clean up expired stream bytes and notify after a successful create/fork.
@@ -978,7 +926,7 @@ impl AcidStorage {
         removed_expired_parent: Option<String>,
     ) -> Result<()> {
         if removed_expired_bytes > 0 {
-            self.saturating_sub_total_bytes(removed_expired_bytes);
+            release_bytes(&self.total_bytes, removed_expired_bytes);
             self.drop_notifier(name);
             if let Some(parent) = removed_expired_parent {
                 self.cascade_delete_acid(&parent)?;
@@ -1000,46 +948,18 @@ impl AcidStorage {
     ) -> Result<Vec<Bytes>> {
         let mut source_messages = Vec::new();
         if options.sub_offset > 0 {
-            let mut lineage = Vec::new();
-            let mut current = source_name.to_string();
-            loop {
-                let meta = Self::read_stream_meta(streams, &current)?
-                    .ok_or_else(|| Error::NotFound(current.clone()))?;
-                let parent = meta.fork_info.as_ref().map(|fi| fi.source_name.clone());
-                lineage.push((current, meta.fork_info));
-                match parent {
-                    Some(parent) => current = parent,
-                    None => break,
-                }
-            }
-            let plan = fork::build_read_plan(source_name, |n| {
-                lineage
-                    .iter()
-                    .find(|(name, _)| name == n)
-                    .map(|(_, fi)| fi.clone())
-            });
-            let (seq, byte) = resolved_offset.parse_components().unwrap_or((0, 0));
-            for segment in plan {
-                for item in messages
-                    .range(
-                        (segment.name.as_str(), seq, byte)
-                            ..=(segment.name.as_str(), u64::MAX, u64::MAX),
-                    )
-                    .map_err(|e| Self::storage_err("failed to read fork prefix", e))?
-                {
-                    let (key, value) =
-                        item.map_err(|e| Self::storage_err("failed to read fork prefix", e))?;
-                    let (_, seq, byte) = key.value();
-                    if segment
-                        .read_up_to
-                        .as_ref()
-                        .is_some_and(|bound| Offset::new(seq, byte) >= *bound)
-                    {
-                        break;
-                    }
-                    source_messages.push(Bytes::copy_from_slice(value.value()));
-                }
-            }
+            let plan = fork::build_read_plan(source_name, |name| {
+                Self::read_stream_meta(streams, name)?
+                    .map(|meta| meta.fork_info)
+                    .ok_or_else(|| Error::NotFound(name.to_string()))
+            })?;
+            source_messages = Self::read_message_ranges(
+                messages,
+                plan,
+                resolved_offset.parse_components().unwrap_or((0, 0)),
+                "failed to read fork prefix",
+                "failed to read fork prefix",
+            )?;
         }
         fork::initial_fork_messages(config, options, source_messages)
     }

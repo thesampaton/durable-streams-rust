@@ -134,15 +134,10 @@ pub(crate) fn evaluate_root_create(
     existing_ref_count: u32,
     requested_config: &StreamConfig,
 ) -> ExistingCreateDisposition {
-    if super::shared::is_stream_expired(existing_config) {
-        if existing_ref_count > 0 {
-            return ExistingCreateDisposition::Conflict(Error::StreamPathBlocked(name.to_string()));
-        }
-        return ExistingCreateDisposition::RemoveExpired;
-    }
-
-    if existing_state == StreamState::Tombstone {
-        return ExistingCreateDisposition::Conflict(Error::StreamPathBlocked(name.to_string()));
+    if let Some(disposition) =
+        existing_path_disposition(name, existing_config, existing_state, existing_ref_count)
+    {
+        return disposition;
     }
 
     if existing_config == requested_config {
@@ -168,15 +163,10 @@ pub(crate) fn prepare_fork_spec(
 ) -> Result<(ForkCreateSpec, Offset)> {
     check_fork_source_access(source_config, source_state, source_name)?;
     let resolved_offset = resolve_fork_offset(requested_fork_offset, source_next_offset)?;
-    if !requested_config
-        .content_type
-        .eq_ignore_ascii_case(&source_config.content_type)
-    {
-        return Err(Error::ContentTypeMismatch {
-            expected: source_config.content_type.clone(),
-            actual: requested_config.content_type.clone(),
-        });
-    }
+    super::shared::validate_content_type(
+        &source_config.content_type,
+        &requested_config.content_type,
+    )?;
     let spec = build_fork_create_spec(
         source_name,
         source_config,
@@ -196,15 +186,10 @@ pub(crate) fn evaluate_fork_create(
     existing_ref_count: u32,
     requested_spec: &ForkCreateSpec,
 ) -> ExistingCreateDisposition {
-    if super::shared::is_stream_expired(existing_config) {
-        if existing_ref_count > 0 {
-            return ExistingCreateDisposition::Conflict(Error::StreamPathBlocked(name.to_string()));
-        }
-        return ExistingCreateDisposition::RemoveExpired;
-    }
-
-    if existing_state == StreamState::Tombstone {
-        return ExistingCreateDisposition::Conflict(Error::StreamPathBlocked(name.to_string()));
+    if let Some(disposition) =
+        existing_path_disposition(name, existing_config, existing_state, existing_ref_count)
+    {
+        return disposition;
     }
 
     let expected_fork_info = ForkInfo {
@@ -283,13 +268,13 @@ pub(crate) struct ReadSegment {
 /// The leaf segment has `read_up_to = None` (read all its messages).
 pub(crate) fn build_read_plan(
     name: &str,
-    lookup: impl Fn(&str) -> Option<Option<ForkInfo>>,
-) -> Vec<ReadSegment> {
+    mut lookup: impl FnMut(&str) -> Result<Option<ForkInfo>>,
+) -> Result<Vec<ReadSegment>> {
     let mut chain: Vec<(String, Option<Offset>)> = Vec::new();
     let mut current = name.to_string();
 
     loop {
-        if let Some(Some(fork_info)) = lookup(&current) {
+        if let Some(fork_info) = lookup(&current)? {
             chain.push((current.clone(), Some(fork_info.fork_offset.clone())));
             current.clone_from(&fork_info.source_name);
         } else {
@@ -323,7 +308,26 @@ pub(crate) fn build_read_plan(
         }
         segment.read_up_to.clone_from(&bound);
     }
-    segments
+    Ok(segments)
+}
+
+/// Select an inclusive lower/exclusive upper range from an ordered local index.
+/// An inherited bound before the requested start produces an empty range.
+pub(crate) fn message_range<T>(
+    messages: &[T],
+    from: &Offset,
+    up_to: Option<&Offset>,
+    offset: impl Fn(&T) -> &Offset,
+) -> std::ops::Range<usize> {
+    let start = if from.is_start() {
+        0
+    } else {
+        messages.partition_point(|message| offset(message) < from)
+    };
+    let end = up_to.map_or(messages.len(), |bound| {
+        messages.partition_point(|message| offset(message) < bound)
+    });
+    start..end.max(start)
 }
 
 /// Validate and materialize the partial inherited prefix and initial body.
@@ -354,15 +358,10 @@ pub(crate) fn initial_fork_messages(
             messages.push(bytes::Bytes::copy_from_slice(&first[..count]));
         }
     }
-    if !options.initial_body.is_empty() {
-        if json {
-            messages.extend(crate::protocol::json_mode::process_append(
-                &options.initial_body,
-            )?);
-        } else {
-            messages.push(options.initial_body.clone());
-        }
-    }
+    messages.extend(crate::protocol::extract_messages(
+        options.initial_body.clone(),
+        &config.content_type,
+    )?);
     Ok(messages)
 }
 
@@ -372,4 +371,28 @@ pub(crate) fn check_replace(ref_count: u32, fork: Option<&ForkInfo>) -> Result<(
         return Err(Error::ReplacementHasForks);
     }
     Ok(())
+}
+
+/// Availability rules common to root and fork creation, before identity checks.
+fn existing_path_disposition(
+    name: &str,
+    existing_config: &StreamConfig,
+    existing_state: StreamState,
+    existing_ref_count: u32,
+) -> Option<ExistingCreateDisposition> {
+    if super::shared::is_stream_expired(existing_config) {
+        if existing_ref_count > 0 {
+            return Some(ExistingCreateDisposition::Conflict(
+                Error::StreamPathBlocked(name.to_string()),
+            ));
+        }
+        return Some(ExistingCreateDisposition::RemoveExpired);
+    }
+
+    if existing_state == StreamState::Tombstone {
+        return Some(ExistingCreateDisposition::Conflict(
+            Error::StreamPathBlocked(name.to_string()),
+        ));
+    }
+    None
 }

@@ -48,11 +48,7 @@ const _: fn() = || {
 
 impl Storage for TestStorage {
     fn create_stream(&self, name: &str, config: StreamOptions) -> Result<CreateStreamResult> {
-        match self {
-            Self::Memory(inner) => inner.create_stream(name, config),
-            Self::File(inner) => inner.create_stream(name, config),
-            Self::Acid(inner) => inner.create_stream(name, config),
-        }
+        self.as_storage().create_stream(name, config)
     }
 
     fn append(
@@ -61,11 +57,7 @@ impl Storage for TestStorage {
         data: bytes::Bytes,
         content_type: &str,
     ) -> Result<durable_streams_server::storage::AppendResult> {
-        match self {
-            Self::Memory(inner) => inner.append(name, data, content_type),
-            Self::File(inner) => inner.append(name, data, content_type),
-            Self::Acid(inner) => inner.append(name, data, content_type),
-        }
+        self.as_storage().append(name, data, content_type)
     }
 
     fn append_batch(
@@ -76,43 +68,24 @@ impl Storage for TestStorage {
         seq: Option<&str>,
         close: bool,
     ) -> Result<durable_streams_server::storage::AppendResult> {
-        match self {
-            Self::Memory(inner) => inner.append_batch(name, messages, content_type, seq, close),
-            Self::File(inner) => inner.append_batch(name, messages, content_type, seq, close),
-            Self::Acid(inner) => inner.append_batch(name, messages, content_type, seq, close),
-        }
+        self.as_storage()
+            .append_batch(name, messages, content_type, seq, close)
     }
 
     fn read(&self, name: &str, from_offset: &Offset) -> Result<ReadResult> {
-        match self {
-            Self::Memory(inner) => inner.read(name, from_offset),
-            Self::File(inner) => inner.read(name, from_offset),
-            Self::Acid(inner) => inner.read(name, from_offset),
-        }
+        self.as_storage().read(name, from_offset)
     }
 
     fn delete(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Memory(inner) => inner.delete(name),
-            Self::File(inner) => inner.delete(name),
-            Self::Acid(inner) => inner.delete(name),
-        }
+        self.as_storage().delete(name)
     }
 
     fn head(&self, name: &str) -> Result<StreamMetadata> {
-        match self {
-            Self::Memory(inner) => inner.head(name),
-            Self::File(inner) => inner.head(name),
-            Self::Acid(inner) => inner.head(name),
-        }
+        self.as_storage().head(name)
     }
 
     fn close_stream(&self, name: &str) -> Result<()> {
-        match self {
-            Self::Memory(inner) => inner.close_stream(name),
-            Self::File(inner) => inner.close_stream(name),
-            Self::Acid(inner) => inner.close_stream(name),
-        }
+        self.as_storage().close_stream(name)
     }
 
     fn append_with_producer(
@@ -124,32 +97,14 @@ impl Storage for TestStorage {
         should_close: bool,
         seq: Option<&str>,
     ) -> Result<ProducerAppendResult> {
-        match self {
-            Self::Memory(inner) => inner.append_with_producer(
-                name,
-                messages,
-                content_type,
-                producer,
-                should_close,
-                seq,
-            ),
-            Self::File(inner) => inner.append_with_producer(
-                name,
-                messages,
-                content_type,
-                producer,
-                should_close,
-                seq,
-            ),
-            Self::Acid(inner) => inner.append_with_producer(
-                name,
-                messages,
-                content_type,
-                producer,
-                should_close,
-                seq,
-            ),
-        }
+        self.as_storage().append_with_producer(
+            name,
+            messages,
+            content_type,
+            producer,
+            should_close,
+            seq,
+        )
     }
 
     fn create_stream_with_data(
@@ -159,17 +114,8 @@ impl Storage for TestStorage {
         messages: Vec<bytes::Bytes>,
         should_close: bool,
     ) -> Result<CreateWithDataResult> {
-        match self {
-            Self::Memory(inner) => {
-                inner.create_stream_with_data(name, config, messages, should_close)
-            }
-            Self::File(inner) => {
-                inner.create_stream_with_data(name, config, messages, should_close)
-            }
-            Self::Acid(inner) => {
-                inner.create_stream_with_data(name, config, messages, should_close)
-            }
-        }
+        self.as_storage()
+            .create_stream_with_data(name, config, messages, should_close)
     }
 
     fn replace_stream(
@@ -179,35 +125,20 @@ impl Storage for TestStorage {
         messages: Vec<bytes::Bytes>,
         closed: bool,
     ) -> Result<durable_streams_server::storage::AppendResult> {
-        match self {
-            Self::Memory(inner) => inner.replace_stream(name, config, messages, closed),
-            Self::File(inner) => inner.replace_stream(name, config, messages, closed),
-            Self::Acid(inner) => inner.replace_stream(name, config, messages, closed),
-        }
+        self.as_storage()
+            .replace_stream(name, config, messages, closed)
     }
 
     fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>> {
-        match self {
-            Self::Memory(inner) => inner.subscribe(name),
-            Self::File(inner) => inner.subscribe(name),
-            Self::Acid(inner) => inner.subscribe(name),
-        }
+        self.as_storage().subscribe(name)
     }
 
     fn cleanup_expired_streams(&self) -> usize {
-        match self {
-            Self::Memory(inner) => inner.cleanup_expired_streams(),
-            Self::File(inner) => inner.cleanup_expired_streams(),
-            Self::Acid(inner) => inner.cleanup_expired_streams(),
-        }
+        self.as_storage().cleanup_expired_streams()
     }
 
     fn list_streams(&self) -> Result<Vec<(String, StreamMetadata)>> {
-        match self {
-            Self::Memory(inner) => inner.list_streams(),
-            Self::File(inner) => inner.list_streams(),
-            Self::Acid(inner) => inner.list_streams(),
-        }
+        self.as_storage().list_streams()
     }
 
     fn create_fork_with_options(
@@ -218,31 +149,14 @@ impl Storage for TestStorage {
         config: StreamOptions,
         options: durable_streams_server::storage::ForkOptions,
     ) -> Result<CreateStreamResult> {
-        match self {
-            Self::Memory(inner) => {
-                inner.create_fork_with_options(name, source_name, offset, config, options)
-            }
-            Self::File(inner) => {
-                inner.create_fork_with_options(name, source_name, offset, config, options)
-            }
-            Self::Acid(inner) => {
-                inner.create_fork_with_options(name, source_name, offset, config, options)
-            }
-        }
+        self.as_storage()
+            .create_fork_with_options(name, source_name, offset, config, options)
     }
     fn load_subscription_state(&self) -> Result<Option<Vec<u8>>> {
-        match self {
-            Self::Memory(inner) => inner.load_subscription_state(),
-            Self::File(inner) => inner.load_subscription_state(),
-            Self::Acid(inner) => inner.load_subscription_state(),
-        }
+        self.as_storage().load_subscription_state()
     }
     fn save_subscription_state(&self, state: &[u8]) -> Result<()> {
-        match self {
-            Self::Memory(inner) => inner.save_subscription_state(state),
-            Self::File(inner) => inner.save_subscription_state(state),
-            Self::Acid(inner) => inner.save_subscription_state(state),
-        }
+        self.as_storage().save_subscription_state(state)
     }
     fn create_fork(
         &self,
@@ -251,15 +165,20 @@ impl Storage for TestStorage {
         fork_offset: Option<&StorageOffset>,
         config: StreamOptions,
     ) -> Result<CreateStreamResult> {
-        match self {
-            Self::Memory(inner) => inner.create_fork(name, source_name, fork_offset, config),
-            Self::File(inner) => inner.create_fork(name, source_name, fork_offset, config),
-            Self::Acid(inner) => inner.create_fork(name, source_name, fork_offset, config),
-        }
+        self.as_storage()
+            .create_fork(name, source_name, fork_offset, config)
     }
 }
 
 impl TestStorage {
+    fn as_storage(&self) -> &dyn Storage {
+        match self {
+            Self::Memory(inner) => inner,
+            Self::File(inner) => inner,
+            Self::Acid(inner) => inner,
+        }
+    }
+
     #[must_use]
     pub fn total_bytes(&self) -> u64 {
         match self {
