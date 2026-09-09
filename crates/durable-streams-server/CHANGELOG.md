@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/thesampaton/durable-streams-rust/compare/v0.3.0...v0.4.0) - 2026-09-09
+
+### Added
+
+- *(server)* bound storage execution and drain admitted jobs
+- *(server)* [**breaking**] consolidate file storage into one synced mode
+- *(server)* [**breaking**] consolidate APIs and make stream mutations atomic
+- *(server)* [**breaking**] consolidate router construction with runtime options
+- *(server)* implement durable subscriptions and delivery leases
+
+### Fixed
+
+- *(server)* keep ACID reads and TTL renewal in one transaction
+- *(server)* restore the protocol and conformance stack base
+- *(server)* align fork creation and SSE resume semantics
+- *(server)* preserve CLI listing JSON compatibility
+- *(server)* resolve listing lints and validate admin route boundaries
+- *(server)* rewrite cascade-delete loops as while-let
+
+### Other
+
+- *(server)* document simplification and condense reviews
+- *(server)* simplify initialized subscription state
+- *(server)* unify configuration and boundary parsing
+- *(server)* share storage operations and fork reads
+- *(server)* demonstrate bounded blocking execution and shutdown
+- simplify guides and link configuration examples
+- *(server)* pin the compiler used for public API snapshots
+- *(server)* require the public API snapshot on pull requests
+- add MIT license to the workspace and crate packages
+- Refactor durable streams implementation
+- *(server)* clarify storage read capture and lock boundaries
+- *(server)* define error responses in one exhaustive mapping
+- Revert "feat(server): align with latest protocol and subscription conformance"
+- validate stacked PRs with current Clippy
+- *(conformance)* upgrade server suite to 0.3.6
+- Document admin and stream API boundaries
+- Restore local-first stream list CLI
+- Add opt-in admin stream listing routes
+- Stabilize stream domain metadata API
+- describe offset panic invariant
+- clean up server helper patterns
+- *(server)* widen expiry window in resource_cleanup tests to stop CI flakes
+- *(config)* consolidate string enums via macro and dedupe prod patches
+- *(protocol)* remove `Error::InvalidBody` and replace with dedicated invalid-body problem response
+- *(server)* deduplicate storage construction and serve branches
+- Merge branch 'trunk' into refactor/handler-boilerplate
+- *(storage)* fix text for documentation FileFast vs FileDurable and expand imports in file storage implementation
+- *(storage)* refine storage durability wording
+- *(storage)* improve storage backend docs
+- *(storage)* split file storage and test helpers by concern
+- Refactor storage cascade and create paths
+- *(storage)* consolidate StreamMetadata construction via shared helper
+- *(storage)* extract create_fork and cascade_delete policy helpers
+- *(storage)* collapse create_stream disposition match via resolve_root_create
+- *(storage)* extract shared append prechecks across backends
+- Expand startup resilience tests per backend
+- replace with_each_backend closure with macro-generated per-backend tests
+- add PR gates, pre-release workflow, and release-plz standing PR
+
 ### Breaking Changes
 
 - Consolidate `file-fast` and `file-durable` into `file` (`StorageMode::File`).
