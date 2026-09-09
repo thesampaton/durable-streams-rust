@@ -30,6 +30,17 @@ pub struct StreamNameLimits {
 /// validation.
 pub struct StreamName(pub String);
 
+/// Structural predicates shared by literal names and subscription patterns.
+/// Callers retain their own limits, wildcard policy, and error envelopes.
+pub(crate) fn is_reserved(name: &str) -> bool {
+    name.split('/').next() == Some("__ds")
+}
+
+pub(crate) fn invalid_segment(name: &str) -> Option<&str> {
+    name.split('/')
+        .find(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+}
+
 /// Validate a stream name against the configured limits.
 ///
 /// Checks (in order):
@@ -40,7 +51,7 @@ pub struct StreamName(pub String);
 /// 5. Byte length within limit
 /// 6. Segment count within limit
 fn validate(name: &str, limits: &StreamNameLimits) -> Result<(), String> {
-    if name.split('/').next() == Some("__ds") {
+    if is_reserved(name) {
         return Err("__ds is reserved for control APIs".into());
     }
     if name.is_empty() {
@@ -51,7 +62,7 @@ fn validate(name: &str, limits: &StreamNameLimits) -> Result<(), String> {
         return Err("stream name must not end with '/'".to_string());
     }
 
-    for segment in name.split('/') {
+    if let Some(segment) = invalid_segment(name) {
         if segment.is_empty() {
             return Err(
                 "stream name contains empty segments (consecutive '/' characters)".to_string(),

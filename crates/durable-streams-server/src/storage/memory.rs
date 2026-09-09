@@ -7,11 +7,13 @@
 use super::shared::PendingRead;
 use super::{
     CreateStreamResult, ForkInfo, Message, NOTIFY_CHANNEL_CAPACITY, ProducerAppendResult,
-    ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata, StreamState,
+    ProducerState, ReadResult, StreamConfig, StreamMetadata, StreamState,
 };
+use crate::Storage;
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
 use crate::protocol::producer::ProducerHeaders;
+use crate::storage::shared::{payload_bytes, release_bytes};
 use bytes::Bytes;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -60,7 +62,7 @@ impl StreamEntry {
         )
     }
     fn new(config: StreamConfig) -> Self {
-        // Stream starts open; the handler closes it after any initial appends.
+        // Creation commits any initial messages and closure before publishing the entry.
         // The `created_closed` flag in config is stored for idempotent checks only.
         let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
         Self {
@@ -121,14 +123,6 @@ impl InMemoryStorage {
         self.total_bytes.load(Ordering::Acquire)
     }
 
-    fn saturating_sub_total_bytes(&self, bytes: u64) {
-        self.total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_sub(bytes))
-            })
-            .ok();
-    }
-
     fn get_stream(&self, name: &str) -> Option<Arc<RwLock<StreamEntry>>> {
         let streams = self.streams.read().expect("streams lock poisoned");
         streams.get(name).map(Arc::clone)
@@ -141,7 +135,7 @@ impl InMemoryStorage {
     ) -> Option<ForkInfo> {
         let stream_arc = streams.remove(name)?;
         let stream = stream_arc.read().expect("stream lock poisoned");
-        self.saturating_sub_total_bytes(stream.total_bytes);
+        release_bytes(&self.total_bytes, stream.total_bytes);
         stream.fork_info.clone()
     }
 
@@ -172,34 +166,16 @@ impl InMemoryStorage {
             }
             Some(info) => PendingRead::Fork {
                 info: info.clone(),
-                local: ReadResult {
-                    messages: stream.messages.iter().map(|m| m.data.clone()).collect(),
-                    next_offset,
-                    at_tail: true,
-                    closed: stream.closed,
-                },
+                local: Self::read_local_messages(stream, from_offset, next_offset),
             },
         }
     }
 
     /// Ancestor lookup acquires the stream map, so no stream lock may be held.
-    fn finish_read(
-        &self,
-        name: &str,
-        from_offset: &Offset,
-        pending: PendingRead,
-    ) -> Result<ReadResult> {
-        match pending {
-            PendingRead::Complete(result) => Ok(result),
-            PendingRead::Fork { info, local } => self.assemble_fork_read(
-                name,
-                from_offset,
-                &info,
-                local.messages,
-                local.next_offset,
-                local.closed,
-            ),
-        }
+    fn finish_read(&self, from_offset: &Offset, pending: PendingRead) -> Result<ReadResult> {
+        pending.finish(from_offset, |source, from, up_to| {
+            self.read_source_chain(source, from, up_to)
+        })
     }
 
     /// Read messages from a stream's local storage (no fork traversal).
@@ -208,28 +184,16 @@ impl InMemoryStorage {
         from_offset: &Offset,
         next_offset: Offset,
     ) -> ReadResult {
-        let start_idx = if from_offset.is_start() {
-            0
-        } else {
-            match stream
-                .messages
-                .binary_search_by(|m| m.offset.cmp(from_offset))
-            {
-                Ok(idx) | Err(idx) => idx,
-            }
-        };
-
-        let messages: Vec<Bytes> = stream.messages[start_idx..]
+        let range = super::fork::message_range(&stream.messages, from_offset, None, |m| &m.offset);
+        let messages = stream.messages[range]
             .iter()
             .map(|m| m.data.clone())
             .collect();
 
-        let at_tail = start_idx + messages.len() >= stream.messages.len();
-
         ReadResult {
             messages,
             next_offset,
-            at_tail,
+            at_tail: true,
             closed: stream.closed,
         }
     }
@@ -251,7 +215,7 @@ impl InMemoryStorage {
 
             if parent.state == StreamState::Tombstone && parent.ref_count == 0 {
                 let next_parent = parent.fork_info.as_ref().map(|fi| fi.source_name.clone());
-                self.saturating_sub_total_bytes(parent.total_bytes);
+                release_bytes(&self.total_bytes, parent.total_bytes);
                 drop(parent);
                 streams.remove(&current_parent);
 
@@ -276,16 +240,15 @@ impl InMemoryStorage {
         source_name: &str,
         from_offset: &Offset,
         up_to: &Offset,
-    ) -> Vec<Bytes> {
+    ) -> Result<Vec<Bytes>> {
         let streams = self.streams.read().expect("streams lock poisoned");
 
         // Build the ancestor chain from source to root
         let plan = super::fork::build_read_plan(source_name, |n| {
-            streams.get(n).map(|arc| {
-                let s = arc.read().expect("stream lock poisoned");
-                s.fork_info.clone()
-            })
-        });
+            Ok(streams
+                .get(n)
+                .and_then(|arc| arc.read().expect("stream lock poisoned").fork_info.clone()))
+        })?;
 
         let mut all_messages: Vec<Bytes> = Vec::new();
 
@@ -295,38 +258,18 @@ impl InMemoryStorage {
             };
             let seg_stream = seg_arc.read().expect("stream lock poisoned");
 
-            // Determine the effective upper bound for this segment
-            let effective_up_to = Some(
-                segment
-                    .read_up_to
-                    .as_ref()
-                    .map_or(up_to, |bound| bound.min(up_to)),
-            );
-
-            // Determine start offset for this segment
-            let effective_from = from_offset;
-
-            // Collect messages in range
-            let start_idx = if effective_from.is_start() {
-                0
-            } else {
-                match seg_stream
-                    .messages
-                    .binary_search_by(|m| m.offset.cmp(effective_from))
-                {
-                    Ok(idx) | Err(idx) => idx,
-                }
-            };
-
-            for msg in &seg_stream.messages[start_idx..] {
-                if effective_up_to.is_some_and(|bound| msg.offset >= *bound) {
-                    break;
-                }
-                all_messages.push(msg.data.clone());
-            }
+            let up_to = segment
+                .read_up_to
+                .as_ref()
+                .map_or(up_to, |bound| bound.min(up_to));
+            let range =
+                super::fork::message_range(&seg_stream.messages, from_offset, Some(up_to), |m| {
+                    &m.offset
+                });
+            all_messages.extend(seg_stream.messages[range].iter().map(|m| m.data.clone()));
         }
 
-        all_messages
+        Ok(all_messages)
     }
 
     /// Commit messages to a stream, checking memory limits first.
@@ -338,32 +281,21 @@ impl InMemoryStorage {
             return Ok(());
         }
 
-        let mut total_batch_bytes = 0u64;
-        let mut message_sizes = Vec::with_capacity(messages.len());
-        for data in &messages {
-            let byte_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-            message_sizes.push(byte_len);
-            total_batch_bytes += byte_len;
-        }
+        let total_batch_bytes = payload_bytes(&messages);
 
         // Reserve global bytes atomically (global precedence before per-stream).
-        if self
-            .total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(total_batch_bytes)
-                    .filter(|next| *next <= self.max_total_bytes)
-            })
-            .is_err()
-        {
-            return Err(Error::MemoryLimitExceeded);
-        }
+        crate::storage::shared::reserve_bytes(
+            &self.total_bytes,
+            self.max_total_bytes,
+            total_batch_bytes,
+        )?;
         if stream.total_bytes + total_batch_bytes > self.max_stream_bytes {
-            self.saturating_sub_total_bytes(total_batch_bytes);
+            release_bytes(&self.total_bytes, total_batch_bytes);
             return Err(Error::StreamSizeLimitExceeded);
         }
 
-        for (data, byte_len) in messages.into_iter().zip(message_sizes) {
+        for data in messages {
+            let byte_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
             let offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
             stream.next_read_seq += 1;
             stream.next_byte_offset += byte_len;
@@ -378,131 +310,18 @@ impl InMemoryStorage {
 
         Ok(())
     }
-
-    /// Read messages from a forked stream by combining source chain with local data.
-    ///
-    /// The caller must have already extracted fork info and local messages from
-    /// the stream entry (and dropped the lock if needed before calling this).
-    fn assemble_fork_read(
-        &self,
-        name: &str,
-        from_offset: &Offset,
-        fi: &super::ForkInfo,
-        fork_messages_data: Vec<Bytes>,
-        next_offset: Offset,
-        closed: bool,
-    ) -> Result<ReadResult> {
-        let mut all_messages: Vec<Bytes> = Vec::new();
-        if from_offset.is_start() || *from_offset < fi.fork_offset {
-            let source_messages =
-                self.read_source_chain(&fi.source_name, from_offset, &fi.fork_offset);
-            all_messages.extend(source_messages);
-        }
-
-        if from_offset.is_start() || *from_offset <= fi.fork_offset {
-            all_messages.extend(fork_messages_data);
-        } else {
-            let stream_arc = self
-                .get_stream(name)
-                .ok_or_else(|| Error::NotFound(name.to_string()))?;
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            let start_idx = match stream
-                .messages
-                .binary_search_by(|m| m.offset.cmp(from_offset))
-            {
-                Ok(idx) | Err(idx) => idx,
-            };
-            let msgs: Vec<Bytes> = stream.messages[start_idx..]
-                .iter()
-                .map(|m| m.data.clone())
-                .collect();
-            all_messages.extend(msgs);
-        }
-
-        Ok(ReadResult {
-            messages: all_messages,
-            next_offset,
-            at_tail: true,
-            closed,
-        })
-    }
 }
 
 impl Storage for InMemoryStorage {
-    fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
-        let mut streams = self.streams.write().expect("streams lock poisoned");
-
-        if let Some(stream_arc) = streams.get(name) {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::fork::evaluate_root_create(
-                name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
-                &config,
-            ) {
-                super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name);
-                }
-                super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
-            }
-        }
-
-        let entry = StreamEntry::new(config);
-        streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
-
-        Ok(CreateStreamResult::Created)
-    }
-
-    fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<Offset> {
-        let stream_arc = self
-            .get_stream(name)
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
-
-        super::precheck_append(
-            &stream.config,
-            stream.state,
-            stream.closed,
-            name,
-            content_type,
-        )?;
-
-        let offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-        self.commit_messages(&mut stream, vec![data])?;
-        {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::apply_append_metadata(config, last_seq, updated_at, None, Utc::now());
-        }
-
-        Ok(offset)
-    }
-
-    fn batch_append(
+    fn append_batch(
         &self,
         name: &str,
         messages: Vec<Bytes>,
         content_type: &str,
         seq: Option<&str>,
-    ) -> Result<Offset> {
-        if messages.is_empty() {
-            return Err(Error::InvalidHeader {
-                header: "Content-Length".to_string(),
-                reason: "batch cannot be empty".to_string(),
-            });
-        }
+        close: bool,
+    ) -> Result<crate::storage::AppendResult> {
+        super::shared::validate_batch_shape(&messages, close)?;
 
         let stream_arc = self
             .get_stream(name)
@@ -516,22 +335,33 @@ impl Storage for InMemoryStorage {
             stream.closed,
             stream.last_seq.as_deref(),
             name,
-            content_type,
+            (!messages.is_empty()).then_some(content_type),
             seq,
         )?;
 
+        let start_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+        let mut next_config = stream.config.clone();
+        let mut next_seq = stream.last_seq.clone();
+        let mut next_updated_at = stream.updated_at;
+        super::apply_append_metadata(
+            &mut next_config,
+            &mut next_seq,
+            &mut next_updated_at,
+            pending_seq,
+            Utc::now(),
+        )?;
         self.commit_messages(&mut stream, messages)?;
-        {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::apply_append_metadata(config, last_seq, updated_at, pending_seq, Utc::now());
-        }
+        stream.config = next_config;
+        stream.last_seq = next_seq;
+        stream.updated_at = next_updated_at;
 
-        Ok(Offset::new(stream.next_read_seq, stream.next_byte_offset))
+        stream.closed |= close;
+        let _ = stream.notify.send(());
+        Ok(crate::storage::AppendResult::new(
+            start_offset,
+            Offset::new(stream.next_read_seq, stream.next_byte_offset),
+            stream.closed,
+        ))
     }
 
     fn read(&self, name: &str, from_offset: &Offset) -> Result<ReadResult> {
@@ -543,7 +373,7 @@ impl Storage for InMemoryStorage {
         if stream.config.ttl_seconds.is_none() {
             let pending = Self::prepare_read(&stream, from_offset);
             drop(stream);
-            return self.finish_read(name, from_offset, pending);
+            return self.finish_read(from_offset, pending);
         }
         drop(stream);
 
@@ -553,12 +383,12 @@ impl Storage for InMemoryStorage {
             PendingRead::Complete(result) => result,
             pending @ PendingRead::Fork { .. } => {
                 drop(stream);
-                let result = self.finish_read(name, from_offset, pending)?;
+                let result = self.finish_read(from_offset, pending)?;
                 stream = stream_arc.write().expect("stream lock poisoned");
                 result
             }
         };
-        super::fork::renew_ttl(&mut stream.config);
+        super::fork::renew_ttl(&mut stream.config)?;
         Ok(result)
     }
 
@@ -603,24 +433,6 @@ impl Storage for InMemoryStorage {
         super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         Ok(stream.metadata())
-    }
-
-    fn close_stream(&self, name: &str) -> Result<()> {
-        let stream_arc = self
-            .get_stream(name)
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
-
-        super::fork::check_stream_access(&stream.config, stream.state, name)?;
-
-        stream.closed = true;
-        stream.updated_at = Some(Utc::now());
-        super::fork::renew_ttl(&mut stream.config);
-
-        let _ = stream.notify.send(());
-
-        Ok(())
     }
 
     fn append_with_producer(
@@ -675,21 +487,25 @@ impl Storage for InMemoryStorage {
         };
 
         let now = Utc::now();
+        let mut next_config = stream.config.clone();
+        let mut next_seq = stream.last_seq.clone();
+        let mut next_updated_at = stream.updated_at;
+        super::apply_append_metadata(
+            &mut next_config,
+            &mut next_seq,
+            &mut next_updated_at,
+            pending_seq,
+            now,
+        )?;
         self.commit_messages(&mut stream, messages)?;
 
         if should_close {
             stream.closed = true;
         }
 
-        {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::apply_append_metadata(config, last_seq, updated_at, pending_seq, now);
-        }
+        stream.config = next_config;
+        stream.last_seq = next_seq;
+        stream.updated_at = next_updated_at;
 
         stream.producers.insert(
             producer.id.clone(),
@@ -714,10 +530,12 @@ impl Storage for InMemoryStorage {
     fn create_stream_with_data(
         &self,
         name: &str,
-        config: StreamConfig,
+        config: crate::storage::StreamOptions,
         messages: Vec<Bytes>,
         should_close: bool,
     ) -> Result<super::CreateWithDataResult> {
+        let config = config.resolve(Utc::now())?;
+        let should_close = should_close || config.created_closed;
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
         if let Some(stream_arc) = streams.get(name) {
@@ -768,25 +586,48 @@ impl Storage for InMemoryStorage {
         })
     }
 
-    fn exists(&self, name: &str) -> bool {
-        let streams = self.streams.read().expect("streams lock poisoned");
-        if let Some(stream_arc) = streams.get(name) {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            super::is_stream_visible(&stream.config, stream.state)
-        } else {
-            false
-        }
+    fn replace_stream(
+        &self,
+        name: &str,
+        config: crate::storage::StreamOptions,
+        messages: Vec<Bytes>,
+        closed: bool,
+    ) -> Result<crate::storage::AppendResult> {
+        let config = config.resolve(Utc::now())?;
+        let closed = closed || config.created_closed;
+        let streams = self.streams.write().expect("streams lock poisoned");
+        let current = streams
+            .get(name)
+            .ok_or_else(|| Error::NotFound(name.into()))?;
+        let mut current = current.write().expect("stream lock poisoned");
+        super::fork::check_replace(current.ref_count, current.fork_info.as_ref())?;
+        let mut replacement = StreamEntry::new(config);
+        // Reserve the staged payload before releasing any bytes from the original.
+        self.commit_messages(&mut replacement, messages)?;
+        replacement.closed = closed;
+        replacement.notify = current.notify.clone();
+        release_bytes(&self.total_bytes, current.total_bytes);
+        let result = crate::storage::AppendResult::new(
+            Offset::new(0, 0),
+            Offset::new(replacement.next_read_seq, replacement.next_byte_offset),
+            closed,
+        );
+        *current = replacement;
+        let _ = current.notify.send(());
+        Ok(result)
     }
 
-    fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>> {
-        let stream_arc = self.get_stream(name)?;
+    fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>> {
+        let Some(stream_arc) = self.get_stream(name) else {
+            return Ok(None);
+        };
         let stream = stream_arc.read().expect("stream lock poisoned");
 
         if !super::is_stream_visible(&stream.config, stream.state) {
-            return None;
+            return Ok(None);
         }
 
-        Some(stream.notify.subscribe())
+        Ok(Some(stream.notify.subscribe()))
     }
 
     fn cleanup_expired_streams(&self) -> usize {
@@ -848,30 +689,15 @@ impl Storage for InMemoryStorage {
         Ok(())
     }
 
-    fn create_fork(
-        &self,
-        name: &str,
-        source_name: &str,
-        fork_offset: Option<&Offset>,
-        config: StreamConfig,
-    ) -> Result<CreateStreamResult> {
-        self.create_fork_with_options(
-            name,
-            source_name,
-            fork_offset,
-            config,
-            super::ForkOptions::default(),
-        )
-    }
-
     fn create_fork_with_options(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
-        mut config: StreamConfig,
+        config: crate::storage::StreamOptions,
         options: super::ForkOptions,
     ) -> Result<CreateStreamResult> {
+        let mut config = config.resolve(Utc::now())?;
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
         let source_arc = streams
@@ -931,27 +757,15 @@ impl Storage for InMemoryStorage {
         let (fork_read_seq, fork_byte_offset) =
             resolved_offset.parse_components().unwrap_or((0, 0));
 
-        let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
-        let mut entry = StreamEntry {
-            config: fork_spec.config,
-            messages: Vec::with_capacity(INITIAL_MESSAGES_CAPACITY),
-            closed: config.created_closed,
-            next_read_seq: fork_read_seq,
-            next_byte_offset: fork_byte_offset,
-            total_bytes: 0,
-            created_at: Utc::now(),
-            updated_at: None,
-            producers: HashMap::with_capacity(INITIAL_PRODUCERS_CAPACITY),
-            notify,
-            last_seq: None,
-            fork_info: Some(ForkInfo {
-                sub_offset: options.sub_offset,
-                source_name: fork_spec.source_name,
-                fork_offset: resolved_offset,
-            }),
-            ref_count: 0,
-            state: StreamState::Active,
-        };
+        let mut entry = StreamEntry::new(fork_spec.config);
+        entry.closed = config.created_closed;
+        entry.next_read_seq = fork_read_seq;
+        entry.next_byte_offset = fork_byte_offset;
+        entry.fork_info = Some(ForkInfo::new(
+            fork_spec.source_name,
+            resolved_offset,
+            options.sub_offset,
+        ));
 
         self.commit_messages(&mut entry, initial_messages)?;
         streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
@@ -980,30 +794,86 @@ impl InMemoryStorage {
         let mut source_messages = Vec::new();
         if options.sub_offset > 0 {
             let plan = super::fork::build_read_plan(source_name, |n| {
-                streams
+                Ok(streams
                     .get(n)
-                    .map(|arc| arc.read().expect("stream lock poisoned").fork_info.clone())
-            });
+                    .and_then(|arc| arc.read().expect("stream lock poisoned").fork_info.clone()))
+            })?;
             for segment in plan {
                 let arc = streams
                     .get(&segment.name)
                     .ok_or_else(|| Error::NotFound(segment.name.clone()))?;
                 let stream = arc.read().expect("stream lock poisoned");
-                source_messages.extend(
-                    stream
-                        .messages
-                        .iter()
-                        .filter(|m| {
-                            m.offset >= *resolved_offset
-                                && segment
-                                    .read_up_to
-                                    .as_ref()
-                                    .is_none_or(|bound| m.offset < *bound)
-                        })
-                        .map(|m| m.data.clone()),
+                let range = super::fork::message_range(
+                    &stream.messages,
+                    resolved_offset,
+                    segment.read_up_to.as_ref(),
+                    |m| &m.offset,
                 );
+                source_messages.extend(stream.messages[range].iter().map(|m| m.data.clone()));
             }
         }
         super::fork::initial_fork_messages(config, options, source_messages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StreamOptions;
+
+    #[test]
+    fn fork_read_retains_local_snapshot_across_append_and_close() {
+        let storage = InMemoryStorage::new(1024, 1024);
+        storage
+            .create_stream_with_data(
+                "source",
+                StreamOptions::new("text/plain"),
+                vec![Bytes::from_static(b"a")],
+                false,
+            )
+            .unwrap();
+        storage
+            .create_fork("fork", "source", None, StreamOptions::new("text/plain"))
+            .unwrap();
+        storage
+            .append_batch(
+                "fork",
+                vec![Bytes::from_static(b"b"), Bytes::from_static(b"c")],
+                "text/plain",
+                None,
+                false,
+            )
+            .unwrap();
+        let from = Offset::new(2, 2);
+        let stream = storage.get_stream("fork").unwrap();
+        let pending = InMemoryStorage::prepare_read(&stream.read().unwrap(), &from);
+        // Deterministically interleave a writer after the local snapshot is unlocked.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    storage
+                        .append_batch(
+                            "fork",
+                            vec![Bytes::from_static(b"d")],
+                            "text/plain",
+                            None,
+                            true,
+                        )
+                        .unwrap()
+                })
+                .join()
+                .unwrap();
+        });
+        let read = storage.finish_read(&from, pending).unwrap();
+        assert_eq!(read.messages, vec![Bytes::from_static(b"c")]);
+        assert_eq!(read.next_offset, Offset::new(3, 3));
+        assert!(!read.closed);
+        let current = storage.read("fork", &from).unwrap();
+        assert_eq!(
+            current.messages,
+            vec![Bytes::from_static(b"c"), Bytes::from_static(b"d")]
+        );
+        assert_eq!(current.next_offset, Offset::new(4, 4));
+        assert!(current.closed);
     }
 }

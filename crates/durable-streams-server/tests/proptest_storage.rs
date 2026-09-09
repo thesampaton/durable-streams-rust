@@ -1,3 +1,10 @@
+//! Integration coverage for proptest storage.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Property-based tests for storage backends using proptest.
 //!
 //! These exercise random operation sequences against all backends to catch
@@ -19,18 +26,18 @@ use common::{StorageTestBackend, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
-use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
+use durable_streams_server::storage::{CreateStreamResult, Storage, StreamOptions};
 use proptest::prelude::*;
 
 const BACKENDS: [StorageTestBackend; 4] = [
     StorageTestBackend::Memory,
-    StorageTestBackend::FileDurable,
+    StorageTestBackend::File,
     StorageTestBackend::Acid,
     StorageTestBackend::AcidInMemory,
 ];
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +182,10 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
                 }
             }
             Op::Append { data, .. } => {
-                match storage.append(name, Bytes::from(data), "text/plain") {
+                match storage
+                    .append(name, Bytes::from(data), "text/plain")
+                    .map(|result| result.start_offset)
+                {
                     Ok(offset) => {
                         assert!(created[idx], "append succeeded on uncreated stream");
                         assert!(!closed[idx], "append succeeded on closed stream");
@@ -199,7 +209,10 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
             Op::BatchAppend { messages, .. } => {
                 let msgs: Vec<Bytes> = messages.into_iter().map(Bytes::from).collect();
                 let count = msgs.len() as u64;
-                match storage.batch_append(name, msgs, "text/plain", None) {
+                match storage
+                    .append_batch(name, msgs, "text/plain", None, false)
+                    .map(|result| result.next_offset)
+                {
                     Ok(_) => {
                         assert!(created[idx]);
                         assert!(!closed[idx]);
@@ -233,7 +246,7 @@ fn run_random_ops(backend: StorageTestBackend, ops: Vec<Op>) {
                 }
             }
             Op::Subscribe { .. } => {
-                let receiver = storage.subscribe(name);
+                let receiver = storage.subscribe(name).unwrap();
                 if created[idx] {
                     assert!(
                         receiver.is_some(),
@@ -308,7 +321,7 @@ proptest! {
 
     #[test]
     fn random_ops_file(ops in prop::collection::vec(op_strategy(), 1..80)) {
-        run_random_ops(StorageTestBackend::FileDurable, ops);
+        run_random_ops(StorageTestBackend::File, ops);
     }
 
     #[test]
@@ -548,6 +561,7 @@ fn run_producer_state_machine(backend: StorageTestBackend, ops: Vec<ProducerOp>)
                         // Can happen if this is effectively a duplicate
                     }
                     Err(e) => panic!("NextSeq should succeed, got {e:?}"),
+                    Ok(other) => panic!("unexpected producer outcome: {other:?}"),
                 }
             }
             ProducerOp::Duplicate { .. } => {
@@ -624,7 +638,7 @@ proptest! {
     fn producer_state_machine_file(
         ops in prop::collection::vec(producer_op_strategy(), 1..40)
     ) {
-        run_producer_state_machine(StorageTestBackend::FileDurable, ops);
+        run_producer_state_machine(StorageTestBackend::File, ops);
     }
 
     #[test]
@@ -669,7 +683,7 @@ proptest! {
                     .collect();
                 let count = msgs.len() as u64;
 
-                match storage.batch_append("s", msgs, "text/plain", None) {
+                match storage.append_batch("s", msgs, "text/plain", None, false).map(|result| result.next_offset) {
                     Ok(_) => {
                         total_messages += count;
                     }

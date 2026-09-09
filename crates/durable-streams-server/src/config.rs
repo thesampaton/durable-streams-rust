@@ -13,7 +13,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
@@ -76,7 +76,7 @@ string_enum! {
     /// This is the main operator-facing choice when deciding how the server should
     /// persist streams.
     ///
-    /// The `file-*` modes use the simple append-log implementation from
+    /// The `file` mode uses the simple append-log implementation from
     /// [`crate::storage::file::FileStorage`]. The `acid` mode uses
     /// [`crate::storage::acid::AcidStorage`], which stores data in redb databases
     /// instead of per-stream log files.
@@ -85,24 +85,16 @@ string_enum! {
         ///
         /// Best suited to tests, demos, and ephemeral development environments.
         Memory => "memory",
-        /// Filesystem-backed append-log storage without syncing each append.
+        /// Per-stream file logs with synced initial data and journaled append commits.
         ///
-        /// Uses one directory per stream with a `data.log` and `meta.json`, but
-        /// does not call `fsync`/`fdatasync` on every write. Choose this when you
-        /// want simple local persistence and favor throughput over the strongest
-        /// crash-durability guarantees for the most recent appends.
-        FileFast => "file-fast" | "fast",
-        /// Filesystem-backed append-log storage with syncing on each append.
-        ///
-        /// Uses the same on-disk layout as [`Self::FileFast`], but performs
-        /// `fsync`/`fdatasync` after writes. Choose this when you want the simpler
-        /// file-log backend while reducing the risk of losing recently acknowledged
-        /// appends after a crash, and can afford the added write latency.
-        FileDurable => "file-durable" | "file" | "durable",
+        /// Append/replacement transactions sync their journal, data, metadata,
+        /// and directory before returning. See [`crate::storage::file`] for
+        /// creation/deletion recovery limits.
+        File => "file",
         /// Transactional redb-backed storage.
         ///
         /// Choose this when you want stronger transactional durability for
-        /// metadata and message updates than the plain file-log modes provide.
+        /// metadata and message updates than the plain file-log backend provides.
         /// The concrete redb persistence medium is controlled separately by
         /// [`AcidBackend`].
         Acid => "acid" | "redb",
@@ -111,14 +103,10 @@ string_enum! {
 }
 
 impl StorageMode {
+    /// Whether this mode selects the append-log backend, excluding file-backed ACID storage.
     #[must_use]
     pub fn uses_file_backend(self) -> bool {
-        matches!(self, Self::FileFast | Self::FileDurable)
-    }
-
-    #[must_use]
-    pub fn sync_on_append(self) -> bool {
-        matches!(self, Self::FileDurable)
+        matches!(self, Self::File)
     }
 }
 
@@ -126,7 +114,7 @@ string_enum! {
     /// Redb persistence medium used by [`StorageMode::Acid`].
     ///
     /// This only applies when `storage.mode = "acid"`. It does not affect the
-    /// separate `file-fast` / `file-durable` storage family.
+    /// separate `file` storage backend.
     pub enum AcidBackend {
         /// File-backed redb (default).
         ///
@@ -158,6 +146,7 @@ string_enum! {
 }
 
 impl TransportMode {
+    /// Whether the listener requires a TLS context, including mutual TLS.
     #[must_use]
     pub fn uses_tls(self) -> bool {
         matches!(self, Self::Tls | Self::Mtls)
@@ -225,15 +214,22 @@ string_enum! {
 /// Typed profile selection for config loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentProfile {
+    /// Minimal HTTP profile with the built-in defaults.
     Default,
+    /// Loopback development profile.
     Dev,
+    /// Production profile for externally terminated TLS.
     Prod,
+    /// Production profile with server-side TLS termination.
     ProdTls,
+    /// Production profile requiring client TLS certificates.
     ProdMtls,
+    /// Custom profile name selecting an additional TOML file.
     Named(String),
 }
 
 impl DeploymentProfile {
+    /// Profile name used to select the corresponding TOML file.
     #[must_use]
     pub fn as_str(&self) -> &str {
         match self {
@@ -268,6 +264,7 @@ impl From<String> for DeploymentProfile {
 
 /// Server configuration resolved after all layering and defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct Config {
     /// Listener settings.
     pub server: ServerConfig,
@@ -289,6 +286,7 @@ pub struct Config {
 
 /// Listener settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ServerConfig {
     /// Socket address to bind, e.g. `0.0.0.0:4437`.
     pub bind_address: String,
@@ -296,19 +294,25 @@ pub struct ServerConfig {
 
 /// Limits enforced by the server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct LimitsConfig {
     /// Maximum total in-process payload bytes across all streams.
     pub max_memory_bytes: u64,
     /// Maximum payload bytes retained for any single stream.
     pub max_stream_bytes: u64,
+    /// Maximum bytes buffered from one HTTP request body, including JSON framing.
+    pub max_request_body_bytes: usize,
     /// Maximum byte length of a stream name.
     pub max_stream_name_bytes: usize,
     /// Maximum number of `/`-separated segments in a stream name.
     pub max_stream_name_segments: usize,
+    /// Maximum queued plus running server-owned storage jobs, shared by all routes and workers.
+    pub max_storage_jobs: usize,
 }
 
 /// HTTP surface configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct HttpConfig {
     /// CORS allowlist as `"*"` or a comma-separated origin list.
     pub cors_origins: String,
@@ -327,6 +331,7 @@ pub struct HttpConfig {
 /// reverse proxies, or external access-control layers. The server deliberately
 /// does not own authentication or authorization policy for this surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct AdminConfig {
     /// Whether to mount the admin router.
     pub enabled: bool,
@@ -336,6 +341,7 @@ pub struct AdminConfig {
 
 /// Persistence configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct StorageConfig {
     /// Selected persistence backend.
     pub mode: StorageMode,
@@ -349,6 +355,7 @@ pub struct StorageConfig {
 
 /// Transport configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportConfig {
     /// HTTP / TLS / mTLS transport mode.
     pub mode: TransportMode,
@@ -362,6 +369,7 @@ pub struct TransportConfig {
 
 /// HTTP version settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportHttpConfig {
     /// Enabled HTTP protocol versions.
     pub versions: Vec<HttpVersion>,
@@ -369,6 +377,7 @@ pub struct TransportHttpConfig {
 
 /// TLS-related settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportTlsConfig {
     /// Optional server certificate path in PEM format.
     pub cert_path: Option<String>,
@@ -385,6 +394,7 @@ pub struct TransportTlsConfig {
 }
 
 impl TransportTlsConfig {
+    /// Whether both certificate and private-key paths are set; does not check their contents.
     #[must_use]
     pub fn has_server_credentials(&self) -> bool {
         self.cert_path.is_some() && self.key_path.is_some()
@@ -393,6 +403,7 @@ impl TransportTlsConfig {
 
 /// Connection-level settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct TransportConnectionConfig {
     /// Long-poll timeout used by `GET ?live=long-poll`.
     pub long_poll_timeout_secs: u64,
@@ -402,6 +413,7 @@ pub struct TransportConnectionConfig {
 
 /// Reverse-proxy trust model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ProxyConfig {
     /// Whether proxy header trust is enabled.
     pub enabled: bool,
@@ -415,6 +427,7 @@ pub struct ProxyConfig {
 
 /// Proxy-origin identity settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ProxyIdentityConfig {
     /// Identity handoff mode.
     pub mode: ProxyIdentityMode,
@@ -426,12 +439,15 @@ pub struct ProxyIdentityConfig {
 
 /// Logging and tracing defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct ObservabilityConfig {
     /// Default tracing filter used when `RUST_LOG` is not explicitly set.
     pub rust_log: String,
 }
 
+/// Select configuration files and the profile used by [`Config::from_sources`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ConfigLoadOptions {
     /// Directory containing `default.toml`, `<profile>.toml`, and `local.toml`.
     pub config_dir: PathBuf,
@@ -453,108 +469,209 @@ impl Default for ConfigLoadOptions {
 
 /// Errors raised while loading config sources.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ConfigLoadError {
     #[error("config override file not found: '{path}'")]
-    OverrideFileNotFound { path: PathBuf },
+    /// An explicitly requested override file does not exist.
+    OverrideFileNotFound {
+        /// Requested override file path.
+        path: PathBuf,
+    },
     #[error("failed to parse TOML config: {message}")]
-    TomlParse { message: String },
+    /// A configuration source could not be decoded as the expected TOML structure.
+    TomlParse {
+        /// Parser diagnostic from the configuration provider.
+        message: String,
+    },
     #[error("invalid {input_source} value for {key}: '{value}' ({reason})")]
+    /// A source value could not be converted to the expected setting type.
     InvalidValue {
+        /// Source category, such as an environment override.
         input_source: &'static str,
+        /// Configuration key that failed conversion.
         key: &'static str,
+        /// Unconverted input value.
         value: String,
+        /// Explanation of the failed conversion.
         reason: String,
     },
 }
 
 /// Typed validation errors raised before startup.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum ConfigValidationError {
     #[error("server.bind_address is invalid: '{value}' ({reason})")]
-    InvalidBindAddress { value: String, reason: String },
+    /// The listener address is not a valid socket address.
+    InvalidBindAddress {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("http.stream_base_path is invalid: '{value}' ({reason})")]
-    InvalidStreamBasePath { value: String, reason: String },
+    /// The protocol mount path violates route constraints.
+    InvalidStreamBasePath {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("admin.base_path is invalid: '{value}' ({reason})")]
-    InvalidAdminBasePath { value: String, reason: String },
+    /// The admin mount path violates route constraints.
+    InvalidAdminBasePath {
+        /// Configured value that failed validation.
+        value: String,
+        /// Explanation of the validation failure.
+        reason: String,
+    },
     #[error("admin.base_path must not overlap http.stream_base_path")]
+    /// Enabled admin routes overlap the protocol mount path.
     AdminBasePathConflictsWithStreamBasePath,
     #[error("http.cors_origins contains an empty origin entry")]
+    /// The CORS list includes an empty entry.
     EmptyCorsOrigin,
     #[error("http.cors_origins entry is invalid: '{value}'")]
-    InvalidCorsOrigin { value: String },
+    /// A CORS entry is not an accepted origin.
+    InvalidCorsOrigin {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error("limits.max_memory_bytes must be at least 1")]
+    /// The total payload byte limit is zero.
     MaxMemoryBytesTooSmall,
     #[error("limits.max_stream_bytes must be at least 1")]
+    /// The per-stream payload byte limit is zero.
     MaxStreamBytesTooSmall,
     #[error("limits.max_stream_name_bytes must be at least 1")]
+    /// The stream-name byte limit is zero.
     MaxStreamNameBytesTooSmall,
     #[error("limits.max_stream_name_segments must be at least 1")]
+    /// The stream-name segment limit is zero.
     MaxStreamNameSegmentsTooSmall,
+    /// Storage execution capacity is zero or exceeds the semaphore limit.
+    #[error("limits.max_storage_jobs must be between 1 and the Tokio semaphore limit")]
+    InvalidMaxStorageJobs,
     #[error("storage.data_dir must be a non-empty path when storage.mode is '{mode}'")]
-    EmptyStorageDataDir { mode: StorageMode },
+    /// A persistence mode requires a non-empty data directory.
+    EmptyStorageDataDir {
+        /// Configured mode involved in the conflict or requirement.
+        mode: StorageMode,
+    },
     #[error(
         "storage.acid_shard_count must be a power of two in 1..=256 when storage.mode is 'acid'"
     )]
+    /// ACID shard count must be a power of two between 1 and 256.
     InvalidAcidShardCount,
     #[error("transport.connection.long_poll_timeout_secs must be at least 1")]
+    /// The long-poll timeout is zero.
     LongPollTimeoutTooSmall,
     #[error("transport.http.versions must include at least one version")]
+    /// No HTTP protocol version is enabled.
     EmptyHttpVersions,
     #[error("transport.mode='http' does not support transport.http.versions containing http2")]
+    /// HTTP/2 was requested for the plain HTTP listener.
     HttpModeDoesNotSupportHttp2,
     #[error("transport.tls.min_version must be less than or equal to transport.tls.max_version")]
+    /// The minimum TLS version exceeds the maximum.
     InvalidTlsVersionRange,
     #[error("transport.mode='{mode}' requires transport.tls.{field}")]
+    /// The selected TLS mode lacks a required credential path.
     MissingTlsField {
+        /// Configured mode involved in the conflict or requirement.
         mode: TransportMode,
+        /// TLS field requiring correction.
         field: &'static str,
     },
     #[error("transport.mode='http' cannot be combined with transport.tls.{field}")]
-    HttpModeDisallowsTlsField { field: &'static str },
+    /// A TLS credential path was supplied for plain HTTP.
+    HttpModeDisallowsTlsField {
+        /// TLS field requiring correction.
+        field: &'static str,
+    },
     #[error("transport.mode='tls' cannot be combined with transport.tls.client_ca_path")]
+    /// A client CA was supplied for TLS without client authentication.
     ClientCaRequiresMtls,
     #[error("transport.tls.{field} must be a non-empty path when set")]
-    EmptyPath { field: &'static str },
+    /// A configured TLS file path is empty.
+    EmptyPath {
+        /// TLS field requiring correction.
+        field: &'static str,
+    },
     #[error(
         "transport.http.versions includes '{version}', but transport.tls.alpn_protocols is missing '{alpn}'"
     )]
+    /// An enabled HTTP version is absent from TLS ALPN negotiation.
     MissingAlpnProtocol {
+        /// Enabled HTTP version.
         version: HttpVersion,
+        /// ALPN identifier involved in the mismatch.
         alpn: AlpnProtocol,
     },
     #[error(
         "transport.tls.alpn_protocols includes '{alpn}', but transport.http.versions does not enable the matching HTTP version"
     )]
-    UnexpectedAlpnProtocol { alpn: AlpnProtocol },
+    /// TLS ALPN advertises an HTTP version that is not enabled.
+    UnexpectedAlpnProtocol {
+        /// ALPN identifier involved in the mismatch.
+        alpn: AlpnProtocol,
+    },
     #[error(
         "proxy.enabled=true requires proxy.forwarded_headers to be set to 'x-forwarded' or 'forwarded'"
     )]
+    /// Proxy trust is enabled without a forwarded-header family.
     ProxyEnabledRequiresForwardedHeaders,
     #[error("proxy.enabled=true requires at least one entry in proxy.trusted_proxies")]
+    /// Proxy trust is enabled without any trusted peer addresses.
     ProxyEnabledRequiresTrustedProxies,
     #[error("proxy.enabled=false cannot be combined with proxy.trusted_proxies")]
+    /// Trusted peers were configured while proxy trust is disabled.
     ProxyDisabledDisallowsTrustedProxies,
     #[error("proxy.enabled=false cannot be combined with proxy.forwarded_headers='{mode:?}'")]
-    ProxyDisabledDisallowsForwardedHeaders { mode: ForwardedHeadersMode },
+    /// Forwarded headers were enabled while proxy trust is disabled.
+    ProxyDisabledDisallowsForwardedHeaders {
+        /// Configured mode involved in the conflict or requirement.
+        mode: ForwardedHeadersMode,
+    },
     #[error("proxy.enabled=false cannot be combined with proxy.identity.mode='{mode:?}'")]
-    ProxyDisabledDisallowsIdentityMode { mode: ProxyIdentityMode },
+    /// Proxy identity handoff was enabled while proxy trust is disabled.
+    ProxyDisabledDisallowsIdentityMode {
+        /// Configured mode involved in the conflict or requirement.
+        mode: ProxyIdentityMode,
+    },
     #[error("proxy.enabled=false cannot be combined with proxy.identity.header_name")]
+    /// An identity header was set while proxy trust is disabled.
     ProxyDisabledDisallowsIdentityHeader,
     #[error("proxy.trusted_proxies entry is invalid: '{value}'")]
-    InvalidTrustedProxy { value: String },
+    /// A trusted proxy entry is not an accepted IP address or CIDR range.
+    InvalidTrustedProxy {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error("proxy.identity.mode='header' requires proxy.identity.header_name")]
+    /// Header-based identity handoff lacks a header name.
     HeaderIdentityRequiresHeaderName,
     #[error("proxy.identity.mode='header' requires transport.mode='mtls'")]
+    /// Header-based identity handoff requires mutual TLS.
     HeaderIdentityRequiresMtls,
     #[error("proxy.identity.mode='none' cannot be combined with proxy.identity.header_name")]
+    /// An identity header name was set without header-based identity handoff.
     IdentityHeaderRequiresHeaderMode,
     #[error("proxy.identity.header_name is invalid: '{value}'")]
-    InvalidIdentityHeaderName { value: String },
+    /// The identity header name is not a valid HTTP header name.
+    InvalidIdentityHeaderName {
+        /// Configured value that failed validation.
+        value: String,
+    },
     #[error(
         "http.cors_origins='*' is not allowed for the '{profile}' deployment profile; \
          set http.allow_wildcard_cors=true to override, or specify explicit origins"
     )]
-    WildcardCorsOriginsProd { profile: String },
+    /// A production profile uses wildcard CORS without an explicit override.
+    WildcardCorsOriginsProd {
+        /// Deployment profile that requires an explicit CORS policy.
+        profile: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -587,8 +704,10 @@ struct ServerConfigPatch {
 struct LimitsConfigPatch {
     max_memory_bytes: Option<u64>,
     max_stream_bytes: Option<u64>,
+    max_request_body_bytes: Option<usize>,
     max_stream_name_bytes: Option<usize>,
     max_stream_name_segments: Option<usize>,
+    max_storage_jobs: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -685,21 +804,147 @@ struct LegacyLogPatch {
     rust_log: Option<String>,
 }
 
+impl ConfigPatch {
+    fn from_env(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigLoadError> {
+        let bind_address = get("DS_SERVER__BIND_ADDRESS");
+        let port = if bind_address.is_none() {
+            parse_env(get, "DS_SERVER__PORT")?
+        } else {
+            None
+        };
+        let long_poll_timeout_secs =
+            parse_env(get, "DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS")?;
+        let legacy_long_poll = parse_env(get, "DS_SERVER__LONG_POLL_TIMEOUT_SECS")?;
+        let sse_reconnect_interval_secs =
+            parse_env(get, "DS_TRANSPORT__CONNECTION__SSE_RECONNECT_INTERVAL_SECS")?;
+        let legacy_sse = parse_env(get, "DS_SERVER__SSE_RECONNECT_INTERVAL_SECS")?;
+        let server = ServerConfigPatch {
+            bind_address,
+            port,
+            long_poll_timeout_secs: legacy_long_poll,
+            sse_reconnect_interval_secs: legacy_sse,
+        };
+        let limits = LimitsConfigPatch {
+            max_memory_bytes: parse_env(get, "DS_LIMITS__MAX_MEMORY_BYTES")?,
+            max_stream_bytes: parse_env(get, "DS_LIMITS__MAX_STREAM_BYTES")?,
+            max_request_body_bytes: parse_env(get, "DS_LIMITS__MAX_REQUEST_BODY_BYTES")?,
+            max_stream_name_bytes: parse_env(get, "DS_LIMITS__MAX_STREAM_NAME_BYTES")?,
+            max_stream_name_segments: parse_env(get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS")?,
+            max_storage_jobs: parse_env(get, "DS_LIMITS__MAX_STORAGE_JOBS")?,
+        };
+        let http = HttpConfigPatch {
+            cors_origins: get("DS_HTTP__CORS_ORIGINS"),
+            stream_base_path: get("DS_HTTP__STREAM_BASE_PATH"),
+            allow_insecure_webhooks: parse_env(get, "DS_HTTP__ALLOW_INSECURE_WEBHOOKS")?,
+            allow_wildcard_cors: parse_env(get, "DS_HTTP__ALLOW_WILDCARD_CORS")?,
+        };
+        let admin = AdminConfigPatch {
+            enabled: parse_env(get, "DS_ADMIN__ENABLED")?,
+            base_path: get("DS_ADMIN__BASE_PATH"),
+        };
+        let storage = StorageConfigPatch {
+            mode: parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?,
+            data_dir: get("DS_STORAGE__DATA_DIR"),
+            acid_shard_count: parse_env(get, "DS_STORAGE__ACID_SHARD_COUNT")?,
+            acid_backend: parse_env_with(get, "DS_STORAGE__ACID_BACKEND", parse_acid_backend_env)?,
+        };
+        let transport = TransportConfigPatch::from_env(
+            get,
+            TransportConnectionConfigPatch {
+                long_poll_timeout_secs,
+                sse_reconnect_interval_secs,
+            },
+        )?;
+        let tls = LegacyTlsPatch {
+            cert_path: get("DS_TLS__CERT_PATH"),
+            key_path: get("DS_TLS__KEY_PATH"),
+        };
+        let proxy = ProxyConfigPatch::from_env(get)?;
+        Ok(Self {
+            server,
+            limits,
+            http,
+            admin,
+            storage,
+            transport,
+            proxy,
+            tls,
+            observability: ObservabilityConfigPatch {
+                rust_log: get("DS_OBSERVABILITY__RUST_LOG"),
+            },
+            log: LegacyLogPatch {
+                rust_log: get("DS_LOG__RUST_LOG"),
+            },
+        })
+    }
+}
+
+impl TransportConfigPatch {
+    fn from_env(
+        get: &impl Fn(&str) -> Option<String>,
+        connection: TransportConnectionConfigPatch,
+    ) -> Result<Self, ConfigLoadError> {
+        Ok(Self {
+            mode: parse_env_with(get, "DS_TRANSPORT__MODE", parse_transport_mode_env)?,
+            http: TransportHttpConfigPatch {
+                versions: parse_env_list_with(
+                    get,
+                    "DS_TRANSPORT__HTTP__VERSIONS",
+                    parse_http_version_env,
+                )?,
+            },
+            tls: TransportTlsConfigPatch {
+                cert_path: get("DS_TRANSPORT__TLS__CERT_PATH"),
+                key_path: get("DS_TRANSPORT__TLS__KEY_PATH"),
+                client_ca_path: get("DS_TRANSPORT__TLS__CLIENT_CA_PATH"),
+                min_version: parse_env_with(
+                    get,
+                    "DS_TRANSPORT__TLS__MIN_VERSION",
+                    parse_tls_version_env,
+                )?,
+                max_version: parse_env_with(
+                    get,
+                    "DS_TRANSPORT__TLS__MAX_VERSION",
+                    parse_tls_version_env,
+                )?,
+                alpn_protocols: parse_env_list_with(
+                    get,
+                    "DS_TRANSPORT__TLS__ALPN_PROTOCOLS",
+                    parse_alpn_protocol_env,
+                )?,
+            },
+            connection,
+        })
+    }
+}
+
+impl ProxyConfigPatch {
+    fn from_env(get: &impl Fn(&str) -> Option<String>) -> Result<Self, ConfigLoadError> {
+        Ok(Self {
+            enabled: parse_env(get, "DS_PROXY__ENABLED")?,
+            forwarded_headers: parse_env_with(
+                get,
+                "DS_PROXY__FORWARDED_HEADERS",
+                parse_forwarded_headers_mode_env,
+            )?,
+            trusted_proxies: parse_env_csv_strings(get, "DS_PROXY__TRUSTED_PROXIES")?,
+            identity: ProxyIdentityConfigPatch {
+                mode: parse_env_with(
+                    get,
+                    "DS_PROXY__IDENTITY__MODE",
+                    parse_proxy_identity_mode_env,
+                )?,
+                header_name: get("DS_PROXY__IDENTITY__HEADER_NAME"),
+                require_tls: parse_env(get, "DS_PROXY__IDENTITY__REQUIRE_TLS")?,
+            },
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 struct MergeContext {
     explicit_transport_mode: bool,
     legacy_tls_seen: bool,
-}
-
-/// Apply one `parse_env::<T>`-style env override: if the key is set, parse it
-/// and assign the target field. Returns from the enclosing function via `?` if
-/// parsing fails.
-macro_rules! env_parse_into {
-    ($self:expr, $get:expr, $key:literal => $($field:ident).+ : $ty:ty) => {
-        if let Some(__value) = parse_env::<$ty>($get, $key)? {
-            $self . $($field).+ = __value;
-        }
-    };
 }
 
 impl Config {
@@ -811,11 +1056,17 @@ impl Config {
     }
 
     fn apply_limits_patch(&mut self, patch: &LimitsConfigPatch) {
+        if let Some(value) = patch.max_storage_jobs {
+            self.limits.max_storage_jobs = value;
+        }
         if let Some(max_memory_bytes) = patch.max_memory_bytes {
             self.limits.max_memory_bytes = max_memory_bytes;
         }
         if let Some(max_stream_bytes) = patch.max_stream_bytes {
             self.limits.max_stream_bytes = max_stream_bytes;
+        }
+        if let Some(limit) = patch.max_request_body_bytes {
+            self.limits.max_request_body_bytes = limit;
         }
         if let Some(max_stream_name_bytes) = patch.max_stream_name_bytes {
             self.limits.max_stream_name_bytes = max_stream_name_bytes;
@@ -956,186 +1207,7 @@ impl Config {
         get: &impl Fn(&str) -> Option<String>,
         ctx: &mut MergeContext,
     ) -> Result<(), ConfigLoadError> {
-        self.apply_server_env(get)?;
-        self.apply_limits_env(get)?;
-        self.apply_http_env(get)?;
-        self.apply_admin_env(get)?;
-        self.apply_storage_env(get)?;
-        self.apply_transport_env(get, ctx)?;
-        self.apply_proxy_env(get)?;
-
-        if let Some(rust_log) =
-            get("DS_OBSERVABILITY__RUST_LOG").or_else(|| get("DS_LOG__RUST_LOG"))
-        {
-            self.observability.rust_log = rust_log;
-        }
-
-        Ok(())
-    }
-
-    fn apply_server_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(bind_address) = get("DS_SERVER__BIND_ADDRESS") {
-            self.server.bind_address = bind_address;
-        } else if let Some(port) = parse_env::<u16>(get, "DS_SERVER__PORT")? {
-            self.server.bind_address = format!("0.0.0.0:{port}");
-        }
-
-        if let Some(long_poll_timeout_secs) =
-            parse_env::<u64>(get, "DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS")?
-                .or(parse_env::<u64>(get, "DS_SERVER__LONG_POLL_TIMEOUT_SECS")?)
-        {
-            self.transport.connection.long_poll_timeout_secs = long_poll_timeout_secs;
-        }
-
-        if let Some(sse_reconnect_interval_secs) =
-            parse_env::<u64>(get, "DS_TRANSPORT__CONNECTION__SSE_RECONNECT_INTERVAL_SECS")?.or(
-                parse_env::<u64>(get, "DS_SERVER__SSE_RECONNECT_INTERVAL_SECS")?,
-            )
-        {
-            self.transport.connection.sse_reconnect_interval_secs = sse_reconnect_interval_secs;
-        }
-
-        Ok(())
-    }
-
-    fn apply_limits_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_LIMITS__MAX_MEMORY_BYTES" => limits.max_memory_bytes : u64);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_BYTES" => limits.max_stream_bytes : u64);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_BYTES" => limits.max_stream_name_bytes : usize);
-        env_parse_into!(self, get, "DS_LIMITS__MAX_STREAM_NAME_SEGMENTS" => limits.max_stream_name_segments : usize);
-        Ok(())
-    }
-
-    fn apply_http_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(cors_origins) = get("DS_HTTP__CORS_ORIGINS") {
-            self.http.cors_origins = cors_origins;
-        }
-        if let Some(stream_base_path) = get("DS_HTTP__STREAM_BASE_PATH") {
-            self.http.stream_base_path = stream_base_path;
-        }
-        env_parse_into!(self, get, "DS_HTTP__ALLOW_INSECURE_WEBHOOKS" => http.allow_insecure_webhooks : bool);
-        env_parse_into!(self, get, "DS_HTTP__ALLOW_WILDCARD_CORS" => http.allow_wildcard_cors : bool);
-        Ok(())
-    }
-
-    fn apply_admin_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_ADMIN__ENABLED" => admin.enabled : bool);
-        if let Some(base_path) = get("DS_ADMIN__BASE_PATH") {
-            self.admin.base_path = base_path;
-        }
-        Ok(())
-    }
-
-    fn apply_storage_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(storage_mode) = parse_env_with(get, "DS_STORAGE__MODE", parse_storage_mode_env)?
-        {
-            self.storage.mode = storage_mode;
-        }
-        if let Some(data_dir) = get("DS_STORAGE__DATA_DIR") {
-            self.storage.data_dir = data_dir;
-        }
-        env_parse_into!(self, get, "DS_STORAGE__ACID_SHARD_COUNT" => storage.acid_shard_count : usize);
-        if let Some(acid_backend) =
-            parse_env_with(get, "DS_STORAGE__ACID_BACKEND", parse_acid_backend_env)?
-        {
-            self.storage.acid_backend = acid_backend;
-        }
-        Ok(())
-    }
-
-    fn apply_transport_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-        ctx: &mut MergeContext,
-    ) -> Result<(), ConfigLoadError> {
-        if let Some(mode) = parse_env_with(get, "DS_TRANSPORT__MODE", parse_transport_mode_env)? {
-            self.transport.mode = mode;
-            ctx.explicit_transport_mode = true;
-        }
-        if let Some(versions) =
-            parse_env_list_with(get, "DS_TRANSPORT__HTTP__VERSIONS", parse_http_version_env)?
-        {
-            self.transport.http.versions = versions;
-            self.transport.tls.alpn_protocols =
-                default_alpn_protocols(&self.transport.http.versions);
-        }
-
-        let tls_cert_path =
-            get("DS_TRANSPORT__TLS__CERT_PATH").or_else(|| get("DS_TLS__CERT_PATH"));
-        let tls_key_path = get("DS_TRANSPORT__TLS__KEY_PATH").or_else(|| get("DS_TLS__KEY_PATH"));
-        if get("DS_TLS__CERT_PATH").is_some() || get("DS_TLS__KEY_PATH").is_some() {
-            ctx.legacy_tls_seen = true;
-        }
-        if let Some(cert_path) = tls_cert_path {
-            self.transport.tls.cert_path = Some(cert_path);
-        }
-        if let Some(key_path) = tls_key_path {
-            self.transport.tls.key_path = Some(key_path);
-        }
-        if let Some(client_ca_path) = get("DS_TRANSPORT__TLS__CLIENT_CA_PATH") {
-            self.transport.tls.client_ca_path = Some(client_ca_path);
-        }
-        if let Some(min_version) =
-            parse_env_with(get, "DS_TRANSPORT__TLS__MIN_VERSION", parse_tls_version_env)?
-        {
-            self.transport.tls.min_version = min_version;
-        }
-        if let Some(max_version) =
-            parse_env_with(get, "DS_TRANSPORT__TLS__MAX_VERSION", parse_tls_version_env)?
-        {
-            self.transport.tls.max_version = max_version;
-        }
-        if let Some(alpn_protocols) = parse_env_list_with(
-            get,
-            "DS_TRANSPORT__TLS__ALPN_PROTOCOLS",
-            parse_alpn_protocol_env,
-        )? {
-            self.transport.tls.alpn_protocols = alpn_protocols;
-        }
-        Ok(())
-    }
-
-    fn apply_proxy_env(
-        &mut self,
-        get: &impl Fn(&str) -> Option<String>,
-    ) -> Result<(), ConfigLoadError> {
-        env_parse_into!(self, get, "DS_PROXY__ENABLED" => proxy.enabled : bool);
-        if let Some(forwarded_headers) = parse_env_with(
-            get,
-            "DS_PROXY__FORWARDED_HEADERS",
-            parse_forwarded_headers_mode_env,
-        )? {
-            self.proxy.forwarded_headers = forwarded_headers;
-        }
-        if let Some(trusted_proxies) = parse_env_csv_strings(get, "DS_PROXY__TRUSTED_PROXIES")? {
-            self.proxy.trusted_proxies = trusted_proxies;
-        }
-        if let Some(mode) = parse_env_with(
-            get,
-            "DS_PROXY__IDENTITY__MODE",
-            parse_proxy_identity_mode_env,
-        )? {
-            self.proxy.identity.mode = mode;
-        }
-        if let Some(header_name) = get("DS_PROXY__IDENTITY__HEADER_NAME") {
-            self.proxy.identity.header_name = Some(header_name);
-        }
-        env_parse_into!(self, get, "DS_PROXY__IDENTITY__REQUIRE_TLS" => proxy.identity.require_tls : bool);
+        self.apply_patch(ConfigPatch::from_env(get)?, ctx);
         Ok(())
     }
 
@@ -1159,7 +1231,35 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn validate_router(&self) -> Result<(), ConfigValidationError> {
+        self.validate_storage_execution()?;
+        validate_cors_origins(&self.http.cors_origins)?;
+        validate_stream_base_path(&self.http.stream_base_path)?;
+        if self.admin.enabled {
+            validate_admin_base_path(&self.admin.base_path)?;
+            validate_admin_path_separation(&self.http.stream_base_path, &self.admin.base_path)?;
+        }
+        if self.limits.max_stream_name_bytes == 0 {
+            return Err(ConfigValidationError::MaxStreamNameBytesTooSmall);
+        }
+        if self.limits.max_stream_name_segments == 0 {
+            return Err(ConfigValidationError::MaxStreamNameSegmentsTooSmall);
+        }
+        if self.transport.connection.long_poll_timeout_secs == 0 {
+            return Err(ConfigValidationError::LongPollTimeoutTooSmall);
+        }
+        validate_proxy(self)
+    }
+
+    fn validate_storage_execution(&self) -> Result<(), ConfigValidationError> {
+        if !(1..=tokio::sync::Semaphore::MAX_PERMITS).contains(&self.limits.max_storage_jobs) {
+            return Err(ConfigValidationError::InvalidMaxStorageJobs);
+        }
+        Ok(())
+    }
+
     fn validate_limits(&self) -> Result<(), ConfigValidationError> {
+        self.validate_storage_execution()?;
         if self.limits.max_memory_bytes == 0 {
             return Err(ConfigValidationError::MaxMemoryBytesTooSmall);
         }
@@ -1406,8 +1506,10 @@ impl Default for Config {
             limits: LimitsConfig {
                 max_memory_bytes: 100 * 1024 * 1024,
                 max_stream_bytes: 10 * 1024 * 1024,
+                max_request_body_bytes: 10 * 1024 * 1024,
                 max_stream_name_bytes: 1024,
                 max_stream_name_segments: 8,
+                max_storage_jobs: 64,
             },
             http: HttpConfig {
                 cors_origins: "*".to_string(),
@@ -1460,18 +1562,8 @@ impl Default for Config {
     }
 }
 
-/// Typed wrapper for long-poll timeout, injected via axum `Extension`.
-#[derive(Debug, Clone, Copy)]
-pub struct LongPollTimeout(pub Duration);
-
-/// Typed wrapper for SSE reconnect interval in seconds (0 = disabled).
-///
-/// Matches Caddy's `sse_reconnect_interval`. Injected via axum `Extension`.
-#[derive(Debug, Clone, Copy)]
-pub struct SseReconnectInterval(pub u64);
-
 /// Shared defaults applied to every `prod*` profile: stricter limits and
-/// file-durable on-disk storage.
+/// persistent file storage.
 fn prod_base_patch() -> ConfigPatch {
     ConfigPatch {
         limits: LimitsConfigPatch {
@@ -1480,7 +1572,7 @@ fn prod_base_patch() -> ConfigPatch {
             ..LimitsConfigPatch::default()
         },
         storage: StorageConfigPatch {
-            mode: Some(StorageMode::FileDurable),
+            mode: Some(StorageMode::File),
             data_dir: Some("/var/lib/durable-streams".to_string()),
             acid_shard_count: Some(16),
             ..StorageConfigPatch::default()
@@ -1668,60 +1760,45 @@ fn validate_cors_origins(origins: &str) -> Result<(), ConfigValidationError> {
 }
 
 fn validate_stream_base_path(raw: &str) -> Result<(), ConfigValidationError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must be a non-empty absolute path".to_string(),
-        });
-    }
-    if !trimmed.starts_with('/') {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must start with '/'".to_string(),
-        });
-    }
-
-    if trimmed != "/" && trimmed.ends_with('/') {
-        return Err(ConfigValidationError::InvalidStreamBasePath {
-            value: raw.to_string(),
-            reason: "must not end with '/' unless the path is '/'".to_string(),
-        });
-    }
-
-    Ok(())
+    validate_mount_path(raw, true).map_err(|reason| ConfigValidationError::InvalidStreamBasePath {
+        value: raw.to_string(),
+        reason: reason.to_string(),
+    })
 }
 
 fn validate_admin_base_path(raw: &str) -> Result<(), ConfigValidationError> {
-    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*']) {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must be a literal path without whitespace or route parameters".to_string(),
+    validate_mount_path(raw, false).map_err(|reason| ConfigValidationError::InvalidAdminBasePath {
+        value: raw.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+fn validate_mount_path(raw: &str, allow_root: bool) -> Result<(), &'static str> {
+    if raw.chars().any(char::is_whitespace) || raw.contains(['{', '}', ':', '*', '?', '#']) {
+        return Err(if allow_root {
+            "must be a literal URL path without whitespace, parameters, query, or fragment"
+        } else {
+            "must be a literal path without whitespace, parameters, query, or fragment"
         });
     }
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must be a non-empty absolute path".to_string(),
-        });
+    if raw.is_empty() {
+        return Err("must be a non-empty absolute path");
     }
-    if !trimmed.starts_with('/') {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must start with '/'".to_string(),
-        });
+    if !raw.starts_with('/') {
+        return Err("must start with '/'");
     }
-    if trimmed == "/" {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must not be '/'".to_string(),
-        });
+    if raw == "/" {
+        return if allow_root {
+            Ok(())
+        } else {
+            Err("must not be '/'")
+        };
     }
-    if trimmed.ends_with('/') {
-        return Err(ConfigValidationError::InvalidAdminBasePath {
-            value: raw.to_string(),
-            reason: "must not end with '/'".to_string(),
+    if raw.ends_with('/') {
+        return Err(if allow_root {
+            "must not end with '/' unless the path is '/'"
+        } else {
+            "must not end with '/'"
         });
     }
     Ok(())
@@ -1816,24 +1893,7 @@ fn validate_proxy(config: &Config) -> Result<(), ConfigValidationError> {
 }
 
 fn valid_ip_or_cidr(raw: &str) -> bool {
-    if raw.parse::<IpAddr>().is_ok() {
-        return true;
-    }
-
-    let Some((address, prefix)) = raw.split_once('/') else {
-        return false;
-    };
-    let Ok(address) = address.parse::<IpAddr>() else {
-        return false;
-    };
-    let Ok(prefix) = prefix.parse::<u8>() else {
-        return false;
-    };
-
-    match address {
-        IpAddr::V4(_) => prefix <= 32,
-        IpAddr::V6(_) => prefix <= 128,
-    }
+    crate::middleware::proxy_trust::PeerEntry::parse(raw).is_some()
 }
 
 #[cfg(test)]
@@ -1842,6 +1902,87 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn storage_job_limit_layers_and_validates_for_embedding() {
+        let mut config = Config::default();
+        assert_eq!(config.limits.max_storage_jobs, 64);
+        let patch = Figment::new()
+            .merge(Toml::string("[limits]\nmax_storage_jobs = 3"))
+            .extract::<ConfigPatch>()
+            .unwrap();
+        config.apply_limits_patch(&patch.limits);
+        assert_eq!(config.limits.max_storage_jobs, 3);
+        config
+            .apply_env_overrides(
+                &lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "2")]),
+                &mut MergeContext::default(),
+            )
+            .unwrap();
+        assert_eq!(config.limits.max_storage_jobs, 2);
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["limits"]["max_storage_jobs"],
+            2
+        );
+        config.validate_router().unwrap();
+        for value in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            config.limits.max_storage_jobs = value;
+            assert!(matches!(
+                config.validate_router(),
+                Err(ConfigValidationError::InvalidMaxStorageJobs)
+            ));
+            assert!(matches!(
+                config.validate_limits(),
+                Err(ConfigValidationError::InvalidMaxStorageJobs)
+            ));
+        }
+        assert!(
+            config
+                .apply_env_overrides(
+                    &lookup(&[("DS_LIMITS__MAX_STORAGE_JOBS", "invalid")]),
+                    &mut MergeContext::default(),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn environment_patch_preserves_legacy_precedence_and_errors() {
+        let get = lookup(&[
+            ("DS_SERVER__BIND_ADDRESS", "127.0.0.1:1234"),
+            ("DS_SERVER__PORT", "invalid"),
+            ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "7"),
+            ("DS_SERVER__LONG_POLL_TIMEOUT_SECS", "3"),
+            ("DS_TRANSPORT__TLS__CERT_PATH", "modern.pem"),
+            ("DS_TLS__CERT_PATH", "legacy.pem"),
+            ("DS_TLS__KEY_PATH", "key.pem"),
+            ("DS_TRANSPORT__HTTP__VERSIONS", "h2"),
+        ]);
+        let mut config = Config::default();
+        let mut context = MergeContext::default();
+        config.apply_env_overrides(&get, &mut context).unwrap();
+        context.finalize(&mut config);
+        assert_eq!(config.server.bind_address, "127.0.0.1:1234");
+        assert_eq!(config.transport.connection.long_poll_timeout_secs, 7);
+        assert_eq!(
+            config.transport.tls.cert_path.as_deref(),
+            Some("modern.pem")
+        );
+        assert_eq!(config.transport.mode, TransportMode::Tls);
+        assert_eq!(config.transport.tls.alpn_protocols, vec![AlpnProtocol::H2]);
+        let error = ConfigPatch::from_env(&lookup(&[
+            ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "7"),
+            ("DS_SERVER__LONG_POLL_TIMEOUT_SECS", "invalid"),
+        ]))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigLoadError::InvalidValue {
+                key: "DS_SERVER__LONG_POLL_TIMEOUT_SECS",
+                ..
+            }
+        ));
+    }
 
     fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         let map: HashMap<String, String> = pairs
@@ -1858,6 +1999,32 @@ mod tests {
             std::env::temp_dir().join(format!("ds-config-tests-{}-{}", std::process::id(), id));
         fs::create_dir_all(&path).expect("create temp config dir");
         path
+    }
+
+    #[test]
+    fn file_mode_rejects_retired_names_in_toml_and_environment() {
+        let options = ConfigLoadOptions::default();
+        for retired in ["file-fast", "fast", "file-durable", "durable"] {
+            let pairs = [("DS_STORAGE__MODE", retired)];
+            let env = lookup(&pairs);
+            assert!(Config::from_sources_with_lookup(&options, &env).is_err());
+            let toml = format!("[storage]\nmode = {retired:?}");
+            assert!(
+                Figment::new()
+                    .merge(Toml::string(&toml))
+                    .extract::<ConfigPatch>()
+                    .is_err()
+            );
+        }
+        let patch = Figment::new()
+            .merge(Toml::string("[storage]\nmode = \"file\""))
+            .extract::<ConfigPatch>()
+            .unwrap();
+        assert_eq!(patch.storage.mode, Some(StorageMode::File));
+        assert_eq!(
+            serde_json::to_string(&StorageMode::File).unwrap(),
+            "\"file\""
+        );
     }
 
     #[test]
@@ -1902,7 +2069,7 @@ mod tests {
             ("DS_TRANSPORT__CONNECTION__LONG_POLL_TIMEOUT_SECS", "5"),
             ("DS_SERVER__SSE_RECONNECT_INTERVAL_SECS", "120"),
             ("DS_HTTP__STREAM_BASE_PATH", "/streams"),
-            ("DS_STORAGE__MODE", "file-fast"),
+            ("DS_STORAGE__MODE", "file"),
             ("DS_STORAGE__DATA_DIR", "/tmp/ds-store"),
             ("DS_STORAGE__ACID_SHARD_COUNT", "32"),
             ("DS_TRANSPORT__MODE", "tls"),
@@ -1920,7 +2087,7 @@ mod tests {
         assert_eq!(config.transport.connection.long_poll_timeout_secs, 5);
         assert_eq!(config.transport.connection.sse_reconnect_interval_secs, 120);
         assert_eq!(config.http.stream_base_path, "/streams");
-        assert_eq!(config.storage.mode, StorageMode::FileFast);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/tmp/ds-store");
         assert_eq!(config.storage.acid_shard_count, 32);
         assert_eq!(config.transport.mode, TransportMode::Tls);
@@ -1977,7 +2144,7 @@ mod tests {
         )
         .expect("config");
 
-        assert_eq!(config.storage.mode, StorageMode::FileDurable);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/var/lib/durable-streams");
         assert_eq!(config.transport.mode, TransportMode::Tls);
         assert_eq!(
@@ -2023,7 +2190,7 @@ bind_address = "127.0.0.1:7777"
 stream_base_path = "/streams"
 
 [storage]
-mode = "file-fast"
+mode = "file"
 data_dir = "/tmp/dev-store"
 "#,
         )
@@ -2052,7 +2219,7 @@ bind_address = "127.0.0.1:8888"
 
         assert_eq!(config.server.bind_address, "127.0.0.1:9999");
         assert_eq!(config.http.stream_base_path, "/streams");
-        assert_eq!(config.storage.mode, StorageMode::FileFast);
+        assert_eq!(config.storage.mode, StorageMode::File);
         assert_eq!(config.storage.data_dir, "/tmp/dev-store");
         assert_eq!(config.observability.rust_log, "debug");
     }

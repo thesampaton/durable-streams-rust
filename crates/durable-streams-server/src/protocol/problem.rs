@@ -1,3 +1,5 @@
+//! RFC 9457 response payloads, request context, and error telemetry.
+
 use axum::{
     body::Body,
     extract::OriginalUri,
@@ -69,14 +71,23 @@ impl ProblemDetails {
 /// Telemetry metadata copied from the final problem response.
 #[derive(Debug, Clone)]
 pub struct ProblemTelemetry {
+    /// Problem type URI copied from the public response.
     pub problem_type: String,
+    /// Machine-readable problem code.
     pub code: String,
+    /// Public summary of the problem.
     pub title: String,
+    /// Public per-instance detail, when present.
     pub detail: Option<String>,
+    /// Internal storage failure classification, when applicable.
     pub error_class: Option<String>,
+    /// Backend identifier for a storage-originated failure.
     pub storage_backend: Option<String>,
+    /// Storage operation that failed.
     pub storage_operation: Option<String>,
+    /// Diagnostic detail reserved for telemetry rather than the public response.
     pub internal_detail: Option<String>,
+    /// Suggested retry delay in seconds, when available.
     pub retry_after_secs: Option<u32>,
 }
 
@@ -102,6 +113,15 @@ pub struct ProblemResponse {
     problem: Box<ProblemDetails>,
     headers: HeaderMap,
     telemetry: Option<Box<ProblemTelemetry>>,
+}
+
+impl crate::execution::JobError for ProblemResponse {
+    fn from_execution(error: crate::execution::ExecutionError) -> Self {
+        error.into_domain().into()
+    }
+    fn is_server_error(&self) -> bool {
+        self.problem.status >= 500
+    }
 }
 
 /// Response result alias for handlers that emit structured problem details.

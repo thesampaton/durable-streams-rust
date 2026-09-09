@@ -3,6 +3,7 @@ use super::{
     ProducerAppendResult, ProducerState, ReadResult, Result, RwLock, Storage, StreamConfig,
     StreamEntry, StreamMetadata, StreamState,
 };
+use crate::storage::shared::release_bytes;
 use bytes::Bytes;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -11,107 +12,22 @@ use tokio::sync::broadcast;
 use tracing::warn;
 
 impl Storage for FileStorage {
-    fn create_stream(&self, name: &str, config: StreamConfig) -> Result<CreateStreamResult> {
-        let mut streams = self.streams.write().expect("streams lock poisoned");
-
-        if let Some(stream_arc) = streams.get(name) {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            match super::super::fork::evaluate_root_create(
-                name,
-                &stream.config,
-                stream.state,
-                stream.ref_count,
-                &config,
-            ) {
-                super::super::fork::ExistingCreateDisposition::RemoveExpired => {
-                    drop(stream);
-                    self.remove_for_recreate(&mut streams, name)?;
-                }
-                super::super::fork::ExistingCreateDisposition::AlreadyExists => {
-                    return Ok(CreateStreamResult::AlreadyExists);
-                }
-                super::super::fork::ExistingCreateDisposition::Conflict(err) => {
-                    return Err(err);
-                }
-            }
-        }
-
-        let dir = self.stream_dir_for_name(name)?;
-        super::retry_on_eintr(|| fs::create_dir_all(&dir)).map_err(|e| {
-            Error::classify_io_failure(
-                "file",
-                "create stream directory",
-                format!("failed to create stream directory {}: {e}", dir.display()),
-                &e,
-            )
-        })?;
-
-        self.validate_stream_dir(&dir)?;
-        let file = self.open_stream_file(&dir)?;
-        let entry = StreamEntry::new(config, file, dir.clone());
-
-        if let Err(e) = self.write_metadata_for(name, &entry) {
-            if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
-                warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
-            }
-            return Err(e);
-        }
-        streams.insert(name.to_string(), Arc::new(RwLock::new(entry)));
-
-        Ok(CreateStreamResult::Created)
-    }
-
-    fn append(&self, name: &str, data: Bytes, content_type: &str) -> Result<Offset> {
-        let stream_arc = self
-            .get_stream(name)
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
-
-        super::super::precheck_append(
-            &stream.config,
-            stream.state,
-            stream.closed,
-            name,
-            content_type,
-        )?;
-
-        let offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
-        self.append_records(name, &mut stream, &[data])?;
-        let ttl_renewed = {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::super::apply_append_metadata(config, last_seq, updated_at, None, Utc::now())
-        };
-        if ttl_renewed {
-            self.write_metadata_for(name, &stream)?;
-        }
-        Ok(offset)
-    }
-
-    fn batch_append(
+    fn append_batch(
         &self,
         name: &str,
         messages: Vec<Bytes>,
         content_type: &str,
         seq: Option<&str>,
-    ) -> Result<Offset> {
-        if messages.is_empty() {
-            return Err(Error::InvalidHeader {
-                header: "Content-Length".to_string(),
-                reason: "batch cannot be empty".to_string(),
-            });
-        }
+        close: bool,
+    ) -> Result<crate::storage::AppendResult> {
+        super::super::shared::validate_batch_shape(&messages, close)?;
 
         let stream_arc = self
             .get_stream(name)
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
+        stream.ensure_available()?;
 
         let pending_seq = super::super::precheck_batch_append(
             &stream.config,
@@ -119,32 +35,36 @@ impl Storage for FileStorage {
             stream.closed,
             stream.last_seq.as_deref(),
             name,
-            content_type,
+            (!messages.is_empty()).then_some(content_type),
             seq,
         )?;
-        let seq_changed = pending_seq.is_some();
-
-        self.append_records(name, &mut stream, &messages)?;
-        let ttl_renewed = {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::super::apply_append_metadata(
-                config,
-                last_seq,
-                updated_at,
-                pending_seq,
-                Utc::now(),
-            )
-        };
-        if ttl_renewed || seq_changed {
-            self.write_metadata_for(name, &stream)?;
-        }
-
-        Ok(Offset::new(stream.next_read_seq, stream.next_byte_offset))
+        let start_offset = Offset::new(stream.next_read_seq, stream.next_byte_offset);
+        self.append_transaction(&mut stream, false, |stream| {
+            self.append_records(name, stream, &messages)?;
+            {
+                let StreamEntry {
+                    config,
+                    last_seq,
+                    updated_at,
+                    ..
+                } = &mut *stream;
+                super::super::apply_append_metadata(
+                    config,
+                    last_seq,
+                    updated_at,
+                    pending_seq,
+                    Utc::now(),
+                )?;
+            }
+            stream.closed |= close;
+            self.write_metadata_for(name, stream)?;
+            let _ = stream.notify.send(());
+            Ok(crate::storage::AppendResult::new(
+                start_offset,
+                Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                stream.closed,
+            ))
+        })
     }
 
     fn read(&self, name: &str, from_offset: &Offset) -> Result<ReadResult> {
@@ -152,13 +72,15 @@ impl Storage for FileStorage {
             .get_stream(name)
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
         let stream = stream_arc.read().expect("stream lock poisoned");
+        stream.ensure_available()?;
         super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
         let pending = if stream.config.ttl_seconds.is_some() {
             drop(stream);
             let mut stream = stream_arc.write().expect("stream lock poisoned");
+            stream.ensure_available()?;
             super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
             let pending = Self::prepare_read(&stream, from_offset)?;
-            super::super::fork::renew_ttl(&mut stream.config);
+            super::super::fork::renew_ttl(&mut stream.config)?;
             self.write_metadata_for(name, &stream)?;
             pending
         } else {
@@ -179,6 +101,7 @@ impl Storage for FileStorage {
 
         {
             let stream = stream_arc.read().expect("stream lock poisoned");
+            stream.ensure_available()?;
 
             match super::super::fork::evaluate_delete(name, stream.state, stream.ref_count)? {
                 super::super::fork::DeleteDisposition::Tombstone => {
@@ -207,28 +130,11 @@ impl Storage for FileStorage {
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
         let stream = stream_arc.read().expect("stream lock poisoned");
+        stream.ensure_available()?;
 
         super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
 
         Ok(stream.metadata())
-    }
-
-    fn close_stream(&self, name: &str) -> Result<()> {
-        let stream_arc = self
-            .get_stream(name)
-            .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-        let mut stream = stream_arc.write().expect("stream lock poisoned");
-
-        super::super::fork::check_stream_access(&stream.config, stream.state, name)?;
-
-        stream.closed = true;
-        stream.updated_at = Some(Utc::now());
-        super::super::fork::renew_ttl(&mut stream.config);
-        self.write_metadata_for(name, &stream)?;
-
-        let _ = stream.notify.send(());
-        Ok(())
     }
 
     fn append_with_producer(
@@ -245,6 +151,7 @@ impl Storage for FileStorage {
             .ok_or_else(|| Error::NotFound(name.to_string()))?;
 
         let mut stream = stream_arc.write().expect("stream lock poisoned");
+        stream.ensure_available()?;
 
         let pending_seq = {
             let StreamEntry {
@@ -282,53 +189,64 @@ impl Storage for FileStorage {
             }
         };
 
-        let now = Utc::now();
-        self.append_records(name, &mut stream, &messages)?;
+        self.append_transaction(&mut stream, false, |stream| {
+            let now = Utc::now();
+            self.append_records(name, stream, &messages)?;
 
-        if should_close {
-            stream.closed = true;
-        }
+            if should_close {
+                stream.closed = true;
+            }
 
-        {
-            let StreamEntry {
-                config,
-                last_seq,
-                updated_at,
-                ..
-            } = &mut *stream;
-            super::super::apply_append_metadata(config, last_seq, updated_at, pending_seq, now);
-        }
+            {
+                let StreamEntry {
+                    config,
+                    last_seq,
+                    updated_at,
+                    ..
+                } = &mut *stream;
+                super::super::apply_append_metadata(
+                    config,
+                    last_seq,
+                    updated_at,
+                    pending_seq,
+                    now,
+                )?;
+            }
 
-        stream.producers.insert(
-            producer.id.clone(),
-            ProducerState {
+            stream.producers.insert(
+                producer.id.clone(),
+                ProducerState {
+                    epoch: producer.epoch,
+                    last_seq: producer.seq,
+                    updated_at: now,
+                },
+            );
+
+            self.write_metadata_for(name, stream)?;
+
+            Ok(ProducerAppendResult::Accepted {
                 epoch: producer.epoch,
-                last_seq: producer.seq,
-                updated_at: now,
-            },
-        );
-
-        self.write_metadata_for(name, &stream)?;
-
-        Ok(ProducerAppendResult::Accepted {
-            epoch: producer.epoch,
-            seq: producer.seq,
-            next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
-            closed: stream.closed,
+                seq: producer.seq,
+                next_offset: Offset::new(stream.next_read_seq, stream.next_byte_offset),
+                closed: stream.closed,
+            })
         })
     }
 
     fn create_stream_with_data(
         &self,
         name: &str,
-        config: StreamConfig,
+        config: crate::storage::StreamOptions,
         messages: Vec<Bytes>,
         should_close: bool,
     ) -> Result<CreateWithDataResult> {
+        let config = config.resolve(Utc::now())?;
+        let should_close = should_close || config.created_closed;
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
         if let Some(stream_arc) = streams.get(name) {
             let stream = stream_arc.read().expect("stream lock poisoned");
+            stream.ensure_available()?;
             match super::super::fork::evaluate_root_create(
                 name,
                 &stream.config,
@@ -368,7 +286,7 @@ impl Storage for FileStorage {
         let mut entry = StreamEntry::new(config, file, dir.clone());
 
         if !messages.is_empty()
-            && let Err(e) = self.append_records(name, &mut entry, &messages)
+            && let Err(e) = self.append_initial_records(name, &mut entry, &messages)
         {
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
@@ -383,6 +301,7 @@ impl Storage for FileStorage {
         let closed = entry.closed;
 
         if let Err(e) = self.write_metadata_for(name, &entry) {
+            release_bytes(&self.total_bytes, entry.total_bytes);
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned stream directory");
             }
@@ -397,25 +316,64 @@ impl Storage for FileStorage {
         })
     }
 
-    fn exists(&self, name: &str) -> bool {
-        let streams = self.streams.read().expect("streams lock poisoned");
-        if let Some(stream_arc) = streams.get(name) {
-            let stream = stream_arc.read().expect("stream lock poisoned");
-            super::super::is_stream_visible(&stream.config, stream.state)
-        } else {
-            false
+    fn replace_stream(
+        &self,
+        name: &str,
+        config: crate::storage::StreamOptions,
+        messages: Vec<Bytes>,
+        closed: bool,
+    ) -> Result<crate::storage::AppendResult> {
+        let config = config.resolve(Utc::now())?;
+        let closed = closed || config.created_closed;
+        let streams = self.streams.write().expect("streams lock poisoned");
+        let current = streams
+            .get(name)
+            .ok_or_else(|| Error::NotFound(name.into()))?;
+        let mut current = current.write().expect("stream lock poisoned");
+        current.ensure_available()?;
+        super::super::fork::check_replace(current.ref_count, current.fork_info.as_ref())?;
+        let old_bytes = current.total_bytes;
+        let result = self.append_transaction(&mut current, true, |entry| {
+            entry.file_len = 0;
+            entry.index.clear();
+            entry.next_read_seq = 0;
+            entry.next_byte_offset = 0;
+            entry.total_bytes = 0;
+            entry
+                .file
+                .set_len(0)
+                .map_err(|e| Error::Storage(e.to_string()))?;
+            entry.config = config;
+            entry.closed = closed;
+            entry.producers.clear();
+            entry.last_seq = None;
+            entry.updated_at = None;
+            self.append_records(name, entry, &messages)?;
+            self.write_metadata_for(name, entry)?;
+            Ok(crate::storage::AppendResult::new(
+                Offset::new(0, 0),
+                Offset::new(entry.next_read_seq, entry.next_byte_offset),
+                closed,
+            ))
+        });
+        if result.is_ok() {
+            release_bytes(&self.total_bytes, old_bytes);
         }
+        result
     }
 
-    fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<()>> {
-        let stream_arc = self.get_stream(name)?;
+    fn subscribe(&self, name: &str) -> Result<Option<broadcast::Receiver<()>>> {
+        let Some(stream_arc) = self.get_stream(name) else {
+            return Ok(None);
+        };
         let stream = stream_arc.read().expect("stream lock poisoned");
+        stream.ensure_available()?;
 
         if !super::super::is_stream_visible(&stream.config, stream.state) {
-            return None;
+            return Ok(None);
         }
 
-        Some(stream.notify.subscribe())
+        Ok(Some(stream.notify.subscribe()))
     }
 
     fn cleanup_expired_streams(&self) -> usize {
@@ -424,6 +382,9 @@ impl Storage for FileStorage {
 
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
+            if stream.unavailable {
+                continue;
+            }
             if super::super::is_stream_expired(&stream.config) {
                 expired.push((
                     name.clone(),
@@ -463,6 +424,7 @@ impl Storage for FileStorage {
         let mut result = Vec::new();
         for (name, stream_arc) in streams.iter() {
             let stream = stream_arc.read().expect("stream lock poisoned");
+            stream.ensure_available()?;
             if !super::super::is_stream_visible(&stream.config, stream.state) {
                 continue;
             }
@@ -518,30 +480,15 @@ impl Storage for FileStorage {
         })
     }
 
-    fn create_fork(
-        &self,
-        name: &str,
-        source_name: &str,
-        fork_offset: Option<&Offset>,
-        config: StreamConfig,
-    ) -> Result<CreateStreamResult> {
-        self.create_fork_with_options(
-            name,
-            source_name,
-            fork_offset,
-            config,
-            super::super::ForkOptions::default(),
-        )
-    }
-
     fn create_fork_with_options(
         &self,
         name: &str,
         source_name: &str,
         fork_offset: Option<&Offset>,
-        mut config: StreamConfig,
+        config: crate::storage::StreamOptions,
         options: super::super::ForkOptions,
     ) -> Result<CreateStreamResult> {
+        let mut config = config.resolve(Utc::now())?;
         let mut streams = self.streams.write().expect("streams lock poisoned");
 
         let source_arc = streams
@@ -551,6 +498,7 @@ impl Storage for FileStorage {
 
         let (mut fork_spec, resolved_offset) = {
             let source = source_arc.read().expect("stream lock poisoned");
+            source.ensure_available()?;
             if options.inherit_content_type {
                 config.content_type.clone_from(&source.config.content_type);
             }
@@ -576,6 +524,7 @@ impl Storage for FileStorage {
 
         if let Some(existing_arc) = streams.get(name) {
             let existing = existing_arc.read().expect("stream lock poisoned");
+            existing.ensure_available()?;
             match super::super::fork::evaluate_fork_create(
                 name,
                 &existing.config,
@@ -622,14 +571,14 @@ impl Storage for FileStorage {
             fork_offset: resolved_offset,
         });
 
-        if let Err(e) = self.append_records(name, &mut entry, &initial_messages) {
+        if let Err(e) = self.append_initial_records(name, &mut entry, &initial_messages) {
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
             }
             return Err(e);
         }
         if let Err(e) = self.write_metadata_for(name, &entry) {
-            self.rollback_total_bytes(entry.total_bytes);
+            release_bytes(&self.total_bytes, entry.total_bytes);
             if let Err(cleanup_err) = self.remove_stream_dir(&dir) {
                 warn!(%cleanup_err, stream = name, "failed to clean up orphaned fork directory");
             }
@@ -640,6 +589,7 @@ impl Storage for FileStorage {
 
         if let Some(source_arc) = streams.get(source_name) {
             let mut source = source_arc.write().expect("stream lock poisoned");
+            source.ensure_available()?;
             source.ref_count += 1;
             if let Err(e) = self.write_metadata_for(source_name, &source) {
                 warn!(%e, stream = source_name, "failed to persist source ref_count after fork creation");
@@ -661,30 +611,23 @@ impl FileStorage {
         let mut source_messages = Vec::new();
         if options.sub_offset > 0 {
             let plan = super::super::fork::build_read_plan(source_name, |n| {
-                streams
+                Ok(streams
                     .get(n)
-                    .map(|arc| arc.read().expect("stream lock poisoned").fork_info.clone())
-            });
+                    .and_then(|arc| arc.read().expect("stream lock poisoned").fork_info.clone()))
+            })?;
             for segment in plan {
                 let arc = streams
                     .get(&segment.name)
                     .ok_or_else(|| Error::NotFound(segment.name.clone()))?;
                 let stream = arc.read().expect("stream lock poisoned");
-                let start = stream
-                    .index
-                    .partition_point(|m| m.offset < *resolved_offset);
-                let end = segment
-                    .read_up_to
-                    .as_ref()
-                    .map_or(stream.index.len(), |bound| {
-                        stream.index.partition_point(|m| m.offset < *bound)
-                    });
-                if start < end {
-                    source_messages.extend(Self::read_messages(
-                        &stream.file,
-                        &stream.index[start..end],
-                    )?);
-                }
+                stream.ensure_available()?;
+                let range = super::super::fork::message_range(
+                    &stream.index,
+                    resolved_offset,
+                    segment.read_up_to.as_ref(),
+                    |m| &m.offset,
+                );
+                source_messages.extend(Self::read_messages(&stream.file, &stream.index[range])?);
             }
         }
         super::super::fork::initial_fork_messages(config, options, source_messages)

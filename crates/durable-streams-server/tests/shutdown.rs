@@ -1,3 +1,10 @@
+//! Integration coverage for shutdown.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Graceful shutdown tests.
 //!
 //! Verify that in-flight long-poll and SSE connections complete cleanly
@@ -111,11 +118,11 @@ async fn sse_stream_ends_cleanly_on_shutdown() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Catch-up reads are unaffected by shutdown
+// 3. Shutdown closes admission for new catch-up reads (execution design)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn catch_up_read_works_during_shutdown() {
+async fn new_catch_up_read_is_rejected_after_shutdown_starts() {
     let (base_url, _port, shutdown) = spawn_test_server_with_shutdown().await;
     let client = test_client();
 
@@ -133,15 +140,15 @@ async fn catch_up_read_works_during_shutdown() {
     // Signal shutdown
     shutdown.cancel();
 
-    // Catch-up reads should still work (they don't wait)
+    // Even a catch-up read needs a new storage job; shutdown has closed admission.
     let resp = client
         .get(format!("{base_url}/v1/stream/s"))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.bytes().await.unwrap();
-    assert_eq!(body.as_ref(), b"hello");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers()["retry-after"], "1");
+    assert_eq!(common::read_problem(resp).await.code, "UNAVAILABLE");
 }
 
 // ---------------------------------------------------------------------------

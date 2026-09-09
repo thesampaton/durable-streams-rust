@@ -1,7 +1,7 @@
 use durable_streams_client::{
     AppendRequest, Client, ClientConfig, CreateStreamRequest, RequestOptions,
 };
-use durable_streams_server::{Config, InMemoryStorage, build_router};
+use durable_streams_server::{Config, InMemoryStorage, Server, StreamService};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -11,11 +11,15 @@ pub async fn spawn_test_server() -> String {
         .await
         .expect("bind test server");
     let addr = listener.local_addr().expect("local addr");
-    let app = build_router(
-        storage,
+    let server = Server::new(
+        StreamService::new(storage),
         &Config::default(),
         durable_streams_server::RouterOptions::default(),
-    );
+    )
+    .expect("server initialization")
+    .start()
+    .expect("server startup");
+    let app = server.router();
 
     tokio::spawn(async move {
         axum::serve(listener, app)

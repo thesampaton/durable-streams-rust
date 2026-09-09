@@ -1,3 +1,5 @@
+//! Integration coverage for cli list.
+
 mod common;
 
 use bytes::Bytes;
@@ -5,7 +7,7 @@ use common::{spawn_test_server_with_config, test_client};
 use durable_streams_server::{
     Config, Storage,
     config::AcidBackend,
-    storage::{StreamConfig, acid::AcidStorage, file::FileStorage},
+    storage::{StreamOptions, acid::AcidStorage, file::FileStorage},
 };
 use serde_json::{Value, json};
 use std::process::{Command, Output};
@@ -35,11 +37,11 @@ fn test_cli_list_file_storage_local_by_default() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().join("streams");
     let storage =
-        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024, false).expect("create file storage");
+        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024).expect("create file storage");
     storage
         .create_stream(
             "local-file-stream",
-            StreamConfig::new("text/plain".to_string()),
+            StreamOptions::new("text/plain".to_string()),
         )
         .expect("create stream");
     storage
@@ -48,10 +50,11 @@ fn test_cli_list_file_storage_local_by_default() {
             Bytes::from_static(b"hello"),
             "text/plain",
         )
+        .map(|result| result.start_offset)
         .expect("append data");
     drop(storage);
     let storage =
-        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024, false).expect("reopen file storage");
+        FileStorage::new(&data_dir, 1024 * 1024, 1024 * 1024).expect("reopen file storage");
     let metadata = storage
         .head("local-file-stream")
         .expect("read persisted metadata");
@@ -62,7 +65,7 @@ fn test_cli_list_file_storage_local_by_default() {
         &format!(
             r#"
 [storage]
-mode = "file-fast"
+mode = "file"
 data_dir = "{}"
 "#,
             data_dir.display()
@@ -104,7 +107,7 @@ fn test_cli_list_acid_storage_local_by_default() {
     storage
         .create_stream(
             "local-acid-stream",
-            StreamConfig::new("text/plain".to_string()),
+            StreamOptions::new("text/plain".to_string()),
         )
         .expect("create stream");
     storage
@@ -113,6 +116,7 @@ fn test_cli_list_acid_storage_local_by_default() {
             Bytes::from_static(b"hello"),
             "text/plain",
         )
+        .map(|result| result.start_offset)
         .expect("append data");
     storage
         .close_stream("local-acid-stream")

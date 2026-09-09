@@ -1,12 +1,12 @@
 use axum::{
-    http::{Request, Response},
+    http::{HeaderValue, Request, Response},
     middleware::Next,
 };
 
 /// Security headers middleware
 ///
 /// Adds standard headers to all responses:
-/// - `Cache-Control: no-store` (or `no-cache` for SSE responses)
+/// - `Cache-Control: no-store` (`no-cache` for SSE; a five-minute public cache for JWKS)
 /// - `X-Content-Type-Options: nosniff` - Prevents MIME type sniffing
 /// - `Cross-Origin-Resource-Policy: cross-origin` - Allows cross-origin access
 ///
@@ -21,7 +21,6 @@ pub async fn add_security_headers(
 
     let headers = response.headers_mut();
 
-    // SSE responses use no-cache (streaming); all others use no-store
     let is_sse = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -37,11 +36,14 @@ pub async fn add_security_headers(
     } else {
         "no-store"
     };
-    headers.insert("cache-control", cache_control.parse().unwrap());
-    headers.insert("X-Content-Type-Options", "nosniff".parse().unwrap());
+    headers.insert("cache-control", HeaderValue::from_static(cache_control));
+    headers.insert(
+        "X-Content-Type-Options",
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert(
         "Cross-Origin-Resource-Policy",
-        "cross-origin".parse().unwrap(),
+        HeaderValue::from_static("cross-origin"),
     );
 
     response

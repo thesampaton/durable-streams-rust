@@ -9,6 +9,7 @@ use crate::protocol::producer::ProducerHeaders;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{StreamConfig, StreamMetadata, StreamState, fork};
 
@@ -147,7 +148,8 @@ pub(crate) fn precheck_append(
 
 /// Shared pre-persistence validation for `batch_append`.
 ///
-/// Extends [`precheck_append`] with the sequence-ordering check and returns the
+/// A missing content type denotes close-only, which permits an already-closed
+/// stream. Extends access validation with the sequence-ordering check and returns the
 /// pending `Stream-Seq` value to commit on success.
 pub(crate) fn precheck_batch_append(
     config: &StreamConfig,
@@ -155,10 +157,14 @@ pub(crate) fn precheck_batch_append(
     closed: bool,
     last_seq: Option<&str>,
     name: &str,
-    content_type: &str,
+    content_type: Option<&str>,
     new_seq: Option<&str>,
 ) -> Result<Option<String>> {
-    precheck_append(config, state, closed, name, content_type)?;
+    if let Some(content_type) = content_type {
+        precheck_append(config, state, closed, name, content_type)?;
+    } else {
+        fork::check_stream_access(config, state, name)?;
+    }
     validate_seq(last_seq, new_seq)
 }
 
@@ -217,7 +223,7 @@ pub(crate) fn apply_append_metadata(
     updated_at: &mut Option<DateTime<Utc>>,
     pending_seq: Option<String>,
     now: DateTime<Utc>,
-) -> bool {
+) -> Result<bool> {
     *updated_at = Some(now);
     if let Some(new_seq) = pending_seq {
         *last_seq_field = Some(new_seq);
@@ -292,4 +298,62 @@ pub(crate) enum PendingRead {
         info: super::ForkInfo,
         local: super::ReadResult,
     },
+}
+
+impl PendingRead {
+    /// Assemble an inherited prefix after the caller releases the local lock.
+    pub(crate) fn finish(
+        self,
+        from: &Offset,
+        read_source: impl FnOnce(&str, &Offset, &Offset) -> Result<Vec<Bytes>>,
+    ) -> Result<super::ReadResult> {
+        match self {
+            Self::Complete(result) => Ok(result),
+            Self::Fork { info, mut local } => {
+                if from.is_start() || *from < info.fork_offset {
+                    let mut messages = read_source(&info.source_name, from, &info.fork_offset)?;
+                    messages.append(&mut local.messages);
+                    local.messages = messages;
+                }
+                Ok(local)
+            }
+        }
+    }
+}
+
+/// Check batch shape before any backend lookup or capacity reservation.
+pub(crate) fn validate_batch_shape(messages: &[Bytes], close: bool) -> Result<()> {
+    if messages.is_empty() && !close {
+        return Err(Error::InvalidHeader {
+            header: "Content-Length".to_string(),
+            reason: "batch cannot be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Reserve payload capacity. Callers retain ownership of commit and recovery;
+/// a failed durability acknowledgement must not trigger automatic rollback here.
+pub(crate) fn reserve_bytes(total: &AtomicU64, limit: u64, bytes: u64) -> Result<()> {
+    total
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(bytes).filter(|next| *next <= limit)
+        })
+        .map(|_| ())
+        .map_err(|_| Error::MemoryLimitExceeded)
+}
+
+/// Release a reservation or committed payload after backend-owned recovery/deletion.
+pub(crate) fn release_bytes(total: &AtomicU64, bytes: u64) {
+    let _ = total.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_sub(bytes))
+    });
+}
+
+/// Count payload bytes independently of record count (empty records still advance offsets).
+pub(crate) fn payload_bytes(messages: &[Bytes]) -> u64 {
+    messages
+        .iter()
+        .map(|message| u64::try_from(message.len()).unwrap_or(u64::MAX))
+        .sum()
 }

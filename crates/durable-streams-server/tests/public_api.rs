@@ -1,19 +1,21 @@
+//! Integration coverage for public api.
+
 use public_api::Builder as PublicApiBuilder;
 use rustdoc_json::Builder as RustdocJsonBuilder;
 use std::error::Error;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
+const TOOLCHAIN: &str = include_str!("public-api-toolchain.txt");
 const SNAPSHOT_PATH: &str = "tests/snapshots/public-api.txt";
 
 #[test]
-#[ignore = "requires nightly rustdoc JSON; run before release"]
+#[ignore = "requires nightly rustdoc JSON; run via scripts/check-server-public-api.sh"]
 fn server_public_api_matches_snapshot() -> Result<(), Box<dyn Error>> {
-    assert_running_on_nightly()?;
-
     let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let target_dir = tempfile::tempdir()?;
+    // Rustdoc type paths can change between compiler versions without API changes.
     let rustdoc_json = RustdocJsonBuilder::default()
+        .toolchain(TOOLCHAIN.trim())
         .manifest_path(&manifest_path)
         .target_dir(target_dir.path())
         .build()?;
@@ -27,20 +29,6 @@ fn server_public_api_matches_snapshot() -> Result<(), Box<dyn Error>> {
     public_api.assert_eq_or_update(snapshot_path());
 
     Ok(())
-}
-
-fn assert_running_on_nightly() -> Result<(), Box<dyn Error>> {
-    let output = Command::new("rustc").arg("--version").output()?;
-    let version = String::from_utf8(output.stdout)?;
-    if version.contains("nightly") {
-        return Ok(());
-    }
-
-    Err(
-        "public API snapshot test requires a nightly toolchain; run `cargo +nightly test -p durable-streams-server --test public_api -- --ignored`"
-            .to_string()
-            .into(),
-    )
 }
 
 fn snapshot_path() -> PathBuf {

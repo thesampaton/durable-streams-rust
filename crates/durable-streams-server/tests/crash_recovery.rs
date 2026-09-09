@@ -1,3 +1,10 @@
+//! Integration coverage for crash recovery.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! White-box crash-recovery tests for [`FileStorage`].
 //!
 //! These simulate mid-write crashes by directly manipulating the on-disk
@@ -10,7 +17,7 @@ use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::file::FileStorage;
-use durable_streams_server::storage::{ProducerAppendResult, Storage, StreamConfig};
+use durable_streams_server::storage::{ProducerAppendResult, Storage, StreamOptions};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,7 +31,7 @@ fn unique_dir(prefix: &str) -> PathBuf {
 }
 
 fn new_storage(root: &Path) -> FileStorage {
-    FileStorage::new(root, 1024 * 1024, 100 * 1024, true).expect("storage init should succeed")
+    FileStorage::new(root, 1024 * 1024, 100 * 1024).expect("storage init should succeed")
 }
 
 fn stream_dir(root: &Path, name: &str) -> PathBuf {
@@ -40,8 +47,8 @@ fn meta_json_path(root: &Path, name: &str) -> PathBuf {
     stream_dir(root, name).join("meta.json")
 }
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
@@ -62,7 +69,9 @@ fn partial_header_truncation_1_byte() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("good"), "text/plain").unwrap();
+        s.append("s", Bytes::from("good"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Append 1 byte of a record header (less than the 4-byte header)
@@ -83,7 +92,9 @@ fn partial_header_truncation_2_bytes() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("good"), "text/plain").unwrap();
+        s.append("s", Bytes::from("good"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let log = data_log_path(&root, "s");
@@ -103,7 +114,9 @@ fn partial_header_truncation_3_bytes() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("good"), "text/plain").unwrap();
+        s.append("s", Bytes::from("good"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let log = data_log_path(&root, "s");
@@ -127,8 +140,12 @@ fn partial_payload_truncation() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("first"), "text/plain").unwrap();
-        s.append("s", Bytes::from("second"), "text/plain").unwrap();
+        s.append("s", Bytes::from("first"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("second"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Append a valid 4-byte header claiming 100 bytes, then only 50 bytes of payload
@@ -153,7 +170,9 @@ fn partial_payload_truncation_zero_extra_bytes() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("ok"), "text/plain").unwrap();
+        s.append("s", Bytes::from("ok"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let log = data_log_path(&root, "s");
@@ -179,8 +198,12 @@ fn meta_json_claims_closed_but_log_has_more_data() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("a"), "text/plain").unwrap();
-        s.append("s", Bytes::from("b"), "text/plain").unwrap();
+        s.append("s", Bytes::from("a"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("b"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Manually set closed=true in meta.json
@@ -288,7 +311,9 @@ fn zero_length_data_log_after_truncation() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Truncate the data.log to zero bytes (simulate total data loss)
@@ -314,7 +339,9 @@ fn corrupted_meta_json_invalid_json() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Write garbage to meta.json
@@ -322,7 +349,7 @@ fn corrupted_meta_json_invalid_json() {
     fs::write(&meta_path, "not valid json {{{").unwrap();
 
     // Opening storage should fail because meta.json cannot be parsed
-    let result = FileStorage::new(&root, 1024 * 1024, 100 * 1024, true);
+    let result = FileStorage::new(&root, 1024 * 1024, 100 * 1024);
     assert!(
         result.is_err(),
         "corrupted meta.json should cause storage init error"
@@ -341,7 +368,9 @@ fn missing_meta_json_skips_directory() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Delete meta.json but leave data.log
@@ -351,7 +380,7 @@ fn missing_meta_json_skips_directory() {
     let restored = new_storage(&root);
     // Stream should not exist (no meta.json to load from)
     assert!(
-        !restored.exists("s"),
+        !restored.exists("s").unwrap(),
         "stream without meta.json should not be loaded"
     );
 }
@@ -366,9 +395,15 @@ fn idempotent_recovery_multiple_restarts() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("event-1"), "text/plain").unwrap();
-        s.append("s", Bytes::from("event-2"), "text/plain").unwrap();
-        s.append("s", Bytes::from("event-3"), "text/plain").unwrap();
+        s.append("s", Bytes::from("event-1"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("event-2"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("event-3"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Restart 5 times and verify data is identical each time
@@ -397,8 +432,13 @@ fn recovery_preserves_offsets_and_allows_new_appends() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("a"), "text/plain").unwrap();
-        offset_before = s.append("s", Bytes::from("b"), "text/plain").unwrap();
+        s.append("s", Bytes::from("a"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        offset_before = s
+            .append("s", Bytes::from("b"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let restored = new_storage(&root);
@@ -406,6 +446,7 @@ fn recovery_preserves_offsets_and_allows_new_appends() {
     // Offset after recovery should allow continued appends
     let new_offset = restored
         .append("s", Bytes::from("c"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     assert!(
         new_offset > offset_before,
@@ -430,6 +471,7 @@ fn recovery_with_many_streams() {
             let name = format!("stream-{i}");
             s.create_stream(&name, plain_config()).unwrap();
             s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
         }
     }
@@ -464,9 +506,13 @@ fn total_bytes_restored_accurately() {
     {
         let s = new_storage(&root);
         s.create_stream("s1", plain_config()).unwrap();
-        s.append("s1", Bytes::from("hello"), "text/plain").unwrap(); // 5 bytes
+        s.append("s1", Bytes::from("hello"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap(); // 5 bytes
         s.create_stream("s2", plain_config()).unwrap();
-        s.append("s2", Bytes::from("world!"), "text/plain").unwrap(); // 6 bytes
+        s.append("s2", Bytes::from("world!"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap(); // 6 bytes
         expected_total = s.total_bytes();
         assert_eq!(expected_total, 11);
     }
@@ -489,9 +535,15 @@ fn partial_record_mid_batch_recovery() {
     {
         let s = new_storage(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("one"), "text/plain").unwrap();
-        s.append("s", Bytes::from("two"), "text/plain").unwrap();
-        s.append("s", Bytes::from("three"), "text/plain").unwrap();
+        s.append("s", Bytes::from("one"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("two"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("three"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     // Append a partial record after the three valid ones
@@ -516,6 +568,7 @@ fn partial_record_mid_batch_recovery() {
     // Can still append after recovery
     restored
         .append("s", Bytes::from("four"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     let read2 = restored.read("s", &Offset::start()).unwrap();
     assert_eq!(read2.messages.len(), 4);

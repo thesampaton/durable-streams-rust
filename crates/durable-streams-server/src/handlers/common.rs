@@ -5,7 +5,6 @@
 //! rather than re-implementing the same HTTP plumbing.
 
 use crate::protocol::headers::{self, names};
-use crate::protocol::json_mode;
 use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemDetails, ProblemResponse, ProblemResult, request_instance};
 use axum::body::{Body, Bytes};
@@ -18,8 +17,22 @@ use std::future::Future;
 ///
 /// Body I/O failures surface as a dedicated invalid-body problem response
 /// without widening the public [`crate::protocol::error::Error`] enum.
-pub async fn read_body(body: Body) -> ProblemResult<Bytes> {
-    axum::body::to_bytes(body, usize::MAX).await.map_err(|e| {
+pub(crate) async fn read_body(body: Body, limit: usize) -> ProblemResult<Bytes> {
+    axum::body::to_bytes(body, limit).await.map_err(|e| {
+        use std::error::Error as _;
+        if e.source()
+            .is_some_and(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
+        {
+            return ProblemResponse::new(
+                ProblemDetails::new(
+                    "/errors/request-body-too-large",
+                    "Request Body Too Large",
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "REQUEST_BODY_TOO_LARGE",
+                )
+                .with_detail(format!("request body exceeds the {limit}-byte limit")),
+            );
+        }
         ProblemResponse::new(
             ProblemDetails::new(
                 "/errors/invalid-body",
@@ -50,13 +63,7 @@ pub fn parse_stream_closed(headers: &HeaderMap) -> bool {
 /// Empty JSON arrays return `Ok(vec![])`; callers enforce their own
 /// policy (PUT accepts them; POST rejects unless closing).
 pub fn extract_messages(body: Bytes, normalized_ct: &str) -> ProblemResult<Vec<Bytes>> {
-    if body.is_empty() {
-        Ok(vec![])
-    } else if json_mode::is_json_content_type(normalized_ct) {
-        Ok(json_mode::process_append(&body)?)
-    } else {
-        Ok(vec![body])
-    }
+    crate::protocol::extract_messages(body, normalized_ct).map_err(Into::into)
 }
 
 /// Attach the request instance to any problem-response produced inside `f`.

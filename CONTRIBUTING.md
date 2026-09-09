@@ -9,16 +9,20 @@
 ## Expected Local Checks
 
 ```bash
-cargo fmt --all
+cargo fmt --all -- --check
 cargo check --workspace --all-targets
-cargo clippy --workspace --all-targets
+cargo clippy -p durable-streams-server --all-targets -- -D warnings
+cargo clippy -p durable-streams-client --all-targets
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
 If you touch conformance harness plumbing, also verify the shell entrypoints:
 
 ```bash
-bash -n scripts/conformance/*.sh
+for script in scripts/conformance/*.sh tests/conformance/client/*.sh tests/conformance/server/*.sh; do
+  bash -n "$script" || exit
+done
 ```
 
 ## Optional: local pre-commit formatter
@@ -46,14 +50,32 @@ together:
 3. `package.json` conformance package pins
 4. Any related CI or harness scripts
 
-## Server Migration Posture
+## Library and Release Policy
 
-The current server crate in this workspace is a deliberate lift-and-shift of
-published `durable-streams-server` `0.1.3`.
+The server is a published library and executable. Preserve its documented
+protocol, persistence, and public API contracts; make intentional breaking
+changes explicit in the changelog and provide migration examples. The client
+remains unpublished and is excluded from release automation.
 
-When touching `crates/durable-streams-server`, preserve behaviour first and do
-not mix routine migration continuity work with opportunistic redesign unless the
-change is explicitly intended.
+Both crates inherit workspace lints. Server Clippy is enforced with warnings
+denied; client Clippy remains advisory, with existing crate-level documentation
+and dead-code allowances. Server tests allow `unwrap` locally because a failed
+setup or assertion should fail the test; production code retains the lint.
+
+For public API changes, inspect the rustdoc and run
+`./scripts/check-server-public-api.sh`. Install its pinned compiler first:
+
+```bash
+rustup toolchain install "$(cat crates/durable-streams-server/tests/public-api-toolchain.txt)" --profile minimal
+```
+
+The script, extraction test, PR workflow, and release workflow use that same pin.
+Compiler updates can change rustdoc's standard-library paths without changing
+our API, so update the pin and reviewed snapshot together.
+The snapshot also runs in the required PR checks. Review snapshot changes as
+compatibility changes, rather than accepting a new snapshot solely to make the
+test pass. For protocol changes, also run the
+applicable conformance suite through `scripts/conformance`.
 
 ## Releasing
 
@@ -64,23 +86,20 @@ by [`release-plz`](https://release-plz.ieni.dev/). The workflow in
 1. A PR titled `chore: release` is kept open against `trunk`.
 2. It reflects the current `[Unreleased]` section of each managed
    crate's `CHANGELOG.md`, plus a proposed version bump derived from
-   Conventional Commit prefixes since the last release tag
-   (`feat:` → minor, `fix:` → patch, a `BREAKING CHANGE:` footer or
-   `!` marker → major). Prefixes like `ci:`, `docs:`, `chore:`,
-   `style:`, and `refactor:` do not trigger a bump.
-3. Every trunk merge rewrites that PR to reflect the latest state.
-   You don't re-run anything — it's always up to date.
+   Conventional Commit prefixes and compatibility analysis. Review the proposed
+   bump against the crate's current version and actual public API changes,
+   particularly while versions are below 1.0.
+3. Successful workflow runs update that PR to reflect the latest trunk state.
 
 The workflow only runs the `release-pr` subcommand. It never publishes
-to crates.io and never creates tags or GitHub releases (belt-and-suspenders
+to crates.io and never creates tags or GitHub releases (also
 enforced in `release-plz.toml`: `publish = false`, `git_tag_enable = false`,
 `git_release_enable = false`).
 
 ### Cutting a release
 
-1. Wait until the standing release PR reflects the scope you want
-   to ship. If there's no PR open, there are no release-worthy
-   commits since the last tag.
+1. Check that the release-PR workflow succeeded and its standing PR reflects
+   the intended scope. An absent PR can also indicate a workflow failure.
 2. Review the rewritten `CHANGELOG.md` and version bump. Edit the
    PR contents directly if the generated notes need polish.
 3. Merge the PR. This lands the version bump and finalised changelog
@@ -93,7 +112,7 @@ enforced in `release-plz.toml`: `publish = false`, `git_tag_enable = false`,
    git push origin durable-streams-server-v0.3.1
    ```
 
-5. `.github/workflows/pre-release.yml` runs on tag push for nightly
+5. Wait for `.github/workflows/pre-release.yml` to pass on the tag for nightly
    public-API validation, all-backend conformance, and client
    conformance against the tagged commit.
 6. Publish to crates.io manually for now:
@@ -113,9 +132,9 @@ enforced in `release-plz.toml`: `publish = false`, `git_tag_enable = false`,
   trigger workflow runs, which would permanently block the `CI pass`
   merge gate — the App token authenticates as a distinct actor so CI
   runs normally on release PRs.
-- `crates/durable-streams-client` is currently `publish = false` in
-  `release-plz.toml` and is not part of the release flow. Flip
-  `release = true` when the client is ready to publish.
+- `crates/durable-streams-client/Cargo.toml` sets `publish = false` and
+  `release-plz.toml` sets `release = false` for that crate. Client publication
+  requires updating both settings and adding a changelog and release metadata.
 - Branch protection requires the aggregate `CI pass` check and
   up-to-date-with-`trunk` status before merge, which applies to the
   release PR too.

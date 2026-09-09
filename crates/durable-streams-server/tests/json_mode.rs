@@ -1,3 +1,10 @@
+//! Integration coverage for json mode.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use common::{spawn_test_server, spawn_test_server_with_limits, test_client, unique_stream_name};

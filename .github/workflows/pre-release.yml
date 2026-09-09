@@ -1,8 +1,7 @@
 name: Pre-release
 
-# Heavier gates that are not part of the PR path because they either
-# require a nightly toolchain, take longer than the main CI loop, or
-# exercise the matrix of backends needed before a release.
+# Release-candidate validation, including the disk-backend matrix and client suite.
+# The public API snapshot also runs in the PR gate.
 #
 # Runs manually via "Run workflow" in the Actions tab, or automatically
 # when a per-crate release tag is pushed (for example
@@ -28,7 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Read API snapshot toolchain
+        id: api-toolchain
+        run: echo "toolchain=$(cat crates/durable-streams-server/tests/public-api-toolchain.txt)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.api-toolchain.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-server-public-api.sh
 
@@ -41,12 +45,9 @@ jobs:
         backend:
           - name: memory
             env: {}
-          - name: file-fast
+          - name: file
             env:
-              DS_STORAGE__MODE: file-fast
-          - name: file-durable
-            env:
-              DS_STORAGE__MODE: file-durable
+              DS_STORAGE__MODE: file
           - name: acid-file
             env:
               DS_STORAGE__MODE: acid

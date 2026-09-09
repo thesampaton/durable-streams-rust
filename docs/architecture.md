@@ -1,46 +1,55 @@
-# Architecture Note
+# Architecture
 
-## Current Shape
+## Workspace boundaries
 
-This repository is a Rust workspace that is now the long-term home for Durable
-Streams Rust components without prematurely committing to internal shared
-abstractions.
+- `crates/durable-streams-server` is the published server library and executable.
+  It includes protocol handlers, subscriptions, memory/file/ACID storage,
+  transport configuration, and operator transfer commands.
+- `crates/durable-streams-client` is the unpublished client implementation,
+  including HTTP operations, read subscriptions, producer sequencing, and
+  journal/replication helpers.
+- `tests/conformance` contains process entrypoints for the external suites;
+  `scripts/conformance` invokes them using the pins in `package.json`.
+- Release PR automation is configured in `release-plz.toml` and
+  `.github/workflows/release-plz.yml`. Publishing and tagging are manual; see
+  [CONTRIBUTING.md](../CONTRIBUTING.md#releasing).
 
-- `durable-streams-client` is the actively developed client crate.
-- `durable-streams-server` now contains the migrated server crate. The current
-  workspace copy is a deliberate lift-and-shift of the published
-  `durable-streams-server` `0.1.3` codebase so behaviour is preserved before any
-  later cleanup or redesign.
-- Workspace-level `tests/conformance` and `scripts/conformance` exist because
-  the upstream conformance suites exercise process-level behavior and external
-  standards alignment, not just crate-local Rust APIs.
+## Server boundaries
 
-## Deliberate Non-Decisions
+`storage` owns synchronous atomic persistence operations and backend mechanics.
+`StreamService` consolidates creation, append, read, delete, fork, notification,
+and metadata/listing access. Protocol and admin handlers use that service;
+backend implementations retain their lock and transaction boundaries.
 
-The workspace intentionally avoids adding a shared `core`, `protocol`, or
-`common` crate at this stage. Those splits should only appear once concrete code
-demands them.
+`Server` validates HTTP settings and loads subscription control state before
+Tokio is required. Subscription construction produces a `Mutex<Database>` only
+after loading and persistence succeed. State changes clone the committed database
+and save before replacing it; pull-wake processing retains both save boundaries
+around publication. `start` creates one worker; `RunningServer` exposes cloneable
+route groups and cancellation with awaited completion. A storage instance has
+one independent server owner. Route clones retain that owner and share state.
 
-Likewise, the repository does not yet define shared-core extraction, release
-automation, or packaging policy beyond the minimum needed to make the workspace
-compile, test, and evolve cleanly.
+The private `execution` module owns admission, the captured Tokio runtime,
+completion tracking and detached error reporting. Its async stream adapter serves
+all HTTP storage paths; subscription control and the private `subscriptions/worker`
+scheduler share the same job budget. Subscription transactions acquire their
+synchronous database lock inside admitted jobs, keeping persistence and cached
+state together. Network delivery and live waits remain async. Server shutdown
+closes admission and drains jobs even after caller disconnect or worker failure.
+See the [execution contract](design/blocking-execution-boundary.md).
 
-One concrete seam now exists: RFC 9457-style problem details and related error
-code mapping currently live in `durable-streams-server::protocol::problem`.
-That remains server-local for now because the client does not yet parse the
-same wire type directly, but it is the most likely candidate for future
-workspace extraction if shared problem serialization/deserialization becomes
-real code instead of anticipation.
+`protocol/error.rs` defines the exhaustive domain-error response mapping.
+`protocol/problem.rs` owns the RFC 9457 payload and response helpers. Handlers
+attach request context and operation-specific headers. Subscription control
+uses its own error envelope and private state; see
+[subscriptions](subscriptions.md).
 
-## Planned Evolution
-
-1. Continue evolving the Rust client inside `crates/durable-streams-client`.
-2. Keep the migrated server building and conforming inside
-   `crates/durable-streams-server` without mixing preservation work and
-   redesign work.
-3. Introduce additional crates only when real code boundaries justify them.
-4. Revisit release automation and packaging policy once the workspace shape has
-   stabilised.
+Keep semantic helpers shared where backends must agree. Separate persisted
+formats and runtime resources where their invariants differ. Environment and TOML
+inputs both produce private configuration patches and use one merge path. Peer parsing, mount-path checks, and structural stream-name
+predicates are shared while each boundary retains its limits and error envelope.
+Introduce a shared crate only when multiple real consumers need a common
+implementation.
 
 ## Storage read boundaries
 
@@ -48,8 +57,19 @@ The storage implementations share access/expiry rules, fork bounds, append
 validation, and metadata construction. Memory and file reads capture an owned
 `PendingRead` under the stream lock. Root and `offset=now` reads are complete
 at that point; fork reads defer ancestor traversal until the stream lock is
-released. This keeps the stream-map/entry lock ordering explicit and handles
+released. The captured local suffix, tail, and closed state stay together even
+if a writer appends before ancestor assembly. Shared `PendingRead::finish` combines
+that suffix with the bounded inherited prefix without rereading the leaf.
+This keeps the stream-map/entry lock ordering explicit and handles
 root, fork, and tail reads once per backend instead of once per TTL branch.
+
+The fallible fork plan builder reads ACID lineage from the caller's transaction;
+ordinary reads and fork-prefix creation share its backend-local range reader.
+Memory/file indexes share inclusive-start, exclusive-end range selection.
+
+Global capacity reservation and saturating release share atomic arithmetic.
+Backend operations retain their reservation, commit, and recovery points,
+including replacement staging capacity and uncertain-commit handling.
 
 TTL persistence remains backend-local. Memory renews after successful read
 assembly, file storage persists renewal after reading the local payload, and
@@ -58,10 +78,10 @@ The memory/file renewal ordering is retained to preserve existing failure
 semantics. ACID fork lineages share a shard, so transaction snapshots cover
 all ancestors.
 
-`HEAD` and listing use the same backend-local metadata projection. `exists`,
-`subscribe`, and `list_streams` intentionally retain their thin backend loops:
-they already share the visibility rule, while locking, notifier ownership,
-fallible database access, and deterministic listing are storage concerns.
+`HEAD` and listing use the same backend-local metadata projection. `exists`
+derives its fallible presence check from `HEAD`. Subscription lookup and listing
+retain backend loops for locking, notifier ownership, database access, and
+deterministic ordering.
 
 The entry/meta structs also remain separate. Memory entries own message
 buffers and notifiers; file entries own open files and rebuildable indexes,

@@ -1,60 +1,10 @@
 # durable-streams-client
 
-Rust client library for Durable Streams.
+Async Rust client for Durable Streams, built on `reqwest` and `tokio`.
+The crate is currently unpublished. It supports stream operations, idempotent
+producers, JSON/JSONL ingest, and local journal replication.
 
-This crate provides:
-
-- stream-first ergonomic APIs for common operations
-- explicit raw request and response models when you need protocol control
-- first-class typed configuration
-- layered TOML config loading
-- environment-variable overrides
-- explicit auth configuration
-- async HTTP client built on `reqwest` and `tokio`
-- idempotent producer support
-- JSON and JSONL ingest helpers
-- file-backed JSONL journaling for local persistence
-- read-side replication that resumes from the persisted server offset
-
-## Main Types
-
-The main entry points are:
-
-- `Client` for top-level operations
-- `StreamHandle` for stream-scoped usage
-- `ClientBuilder` for fluent construction
-- `ClientConfig` and `ClientConfigLoader` for config-first construction
-- `raw` for protocol-shaped request/response types
-- `IdempotentProducer` for producer fencing and sequence-aware writes
-- `JsonJournal` and `JournalStreamIdentity` for local JSONL persistence
-- `ReadReplica` for journal-backed read replication and restart recovery
-- `load_json_input` for shared JSON and JSONL ingest
-
-## Example
-
-```no_run
-use durable_streams_client::Client;
-
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::builder()
-    .base_url("http://127.0.0.1:4437/v1/stream/")
-    .default_content_type("application/json")
-    .build()?;
-let stream = client.stream("/example");
-
-stream.create().send().await?;
-stream.append_json(&serde_json::json!({ "type": "created" })).await?;
-
-let page = stream.read().send().await?;
-println!("next offset: {}", page.next_offset);
-# Ok(())
-# }
-```
-
-## Common Tasks
-
-### Create A Stream And Append JSON
+## Quick start
 
 ```no_run
 use durable_streams_client::Client;
@@ -68,219 +18,77 @@ let client = Client::builder()
 let orders = client.stream("/orders");
 
 orders.create().send().await?;
-
-orders
-    .append_json(&serde_json::json!({
-        "type": "order.created",
-        "id": "ord_123"
-    }))
-    .await?;
-# Ok(())
-# }
-```
-
-### Read From The Beginning
-
-```no_run
-use durable_streams_client::{Client, ClientConfig};
-
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
-let orders = client.stream("/orders");
+orders.append_json(&serde_json::json!({ "id": "ord_123" })).await?;
 
 let page = orders.read().send().await?;
-
-for chunk in page.chunks {
-    println!(
-        "chunk resumes at {}: {} bytes",
-        chunk.resume_offset,
-        chunk.data.len()
-    );
+for chunk in &page.chunks {
+    println!("{} bytes; resumes at {}", chunk.data.len(), chunk.resume_offset);
 }
+
+// Persist and reuse offsets returned by the server; treat them as opaque.
+let next_page = orders.read().offset(page.next_offset).send().await?;
+println!("next offset: {}", next_page.next_offset);
 # Ok(())
 # }
 ```
 
-### Resume From A Saved Offset
+## API map
 
-```no_run
-use durable_streams_client::{Client, ClientConfig, Offset};
+| Type or module | Purpose |
+| --- | --- |
+| `Client`, `StreamHandle` | Server access and operations on one stream |
+| `ClientBuilder` | Configure a client in Rust |
+| `ClientConfig`, `ClientConfigLoader` | Typed configuration and TOML/environment loading |
+| `IdempotentProducer` | Producer fencing and sequence-aware writes |
+| `raw` | Protocol request/response types and per-request options |
+| `load_json_input` | Read JSON or JSONL input |
+| `JsonJournal`, `JournalStreamIdentity` | Local JSONL persistence |
+| `ReadReplica` | Replicate reads and resume from a persisted server offset |
 
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
-let orders = client.stream("/orders");
-let saved_offset = "42-0";
-
-let page = orders
-    .read()
-    .offset(Offset::at(saved_offset))
-    .send()
-    .await?;
-
-println!("resume from next offset {}", page.next_offset);
-# Ok(())
-# }
-```
-
-### Inspect Stream Metadata
-
-```no_run
-use durable_streams_client::{Client, ClientConfig};
-
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
-let orders = client.stream("/orders");
-
-let info = orders.head().await?;
-println!("content type: {:?}", info.content_type);
-println!("closed: {}", info.closed);
-# Ok(())
-# }
-```
-
-### Drop Down To The Raw API
-
-```no_run
-use durable_streams_client::{raw, Client, ClientConfig};
-use bytes::Bytes;
-
-# #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(), durable_streams_client::Error> {
-let client = Client::new(ClientConfig::default())?;
-let orders = client.stream("/orders");
-
-let response = orders
-    .append_raw(&raw::AppendRequest {
-        body: Bytes::from_static(b"raw-bytes"),
-        content_type: Some("application/octet-stream".to_string()),
-        stream_seq: None,
-        producer: None,
-        options: raw::RequestOptions::default(),
-    })
-    .await?;
-
-println!("raw next offset: {:?}", response.next_offset);
-# Ok(())
-# }
-```
+Generate the API reference with `cargo doc -p durable-streams-client --no-deps --open`.
 
 ## Configuration
 
-Example `config/default.toml`:
+For file-based configuration, `ClientConfigLoader` merges built-in defaults,
+`config/default.toml`, `config/<profile>.toml`, `config/local.toml`, an optional
+`config_override`, then environment variables. The config directory is relative
+to the working directory unless changed on the loader. These are client config
+files, separate from the server's deployment profiles.
+
+A minimal client TOML file:
 
 ```toml
 [client]
-base_url = "http://127.0.0.1:8080"
-
-[auth]
-type = "bearer"
-bearer_token = "replace-me"
-
-[transport]
-connect_timeout_ms = 5000
-request_timeout_ms = 30000
-user_agent = "my-service/1.0"
-
-[retry]
-max_retries = 3
-initial_backoff_ms = 100
-max_backoff_ms = 2000
-backoff_multiplier = 2.0
-
-[defaults]
-default_content_type = "application/json"
-
-[defaults.headers]
-x-service-name = "orders-api"
+base_url = "http://127.0.0.1:4437/v1/stream/"
 ```
-
-Load it with:
 
 ```rust
 use durable_streams_client::{Client, ClientConfigLoader};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let config = ClientConfigLoader::default().load()?;
-let _client = Client::new(config)?;
+let client = Client::new(config)?;
+# let _ = client;
 # Ok(())
 # }
 ```
 
-Or build a client fluently:
+Environment names follow the file path with the `DURABLE_STREAMS_CLIENT__`
+prefix, for example `DURABLE_STREAMS_CLIENT__CLIENT__BASE_URL` or
+`DURABLE_STREAMS_CLIENT__TRANSPORT__REQUEST_TIMEOUT_MS`.
+`DEFAULTS__HEADERS_JSON` and `DEFAULTS__QUERY_JSON` under that prefix take JSON
+objects. See the `config` module for transport, retry, and request defaults.
 
-```rust
-use durable_streams_client::Client;
-use std::time::Duration;
+Authentication supports `none`, `bearer`, `basic`, and a custom `header` mode
+for gateways. Configure it through `ClientConfig::auth`, the builder's auth
+methods, or `[auth]` in TOML. For bearer auth, set `type = "bearer"` and
+`bearer_token`, or use `DURABLE_STREAMS_CLIENT__AUTH__TYPE` and
+`DURABLE_STREAMS_CLIENT__AUTH__BEARER_TOKEN`.
 
-# fn main() -> Result<(), durable_streams_client::Error> {
-let _client = Client::builder()
-    .base_url("http://127.0.0.1:4437/v1/stream/")
-    .bearer_auth("replace-me")
-    .default_content_type("application/json")
-    .request_timeout(Duration::from_secs(30))
-    .build()?;
-# Ok(())
-# }
-```
+## JSON CLI
 
-Environment overrides use the `DURABLE_STREAMS_CLIENT__` prefix.
-
-Common variables:
-
-- `DURABLE_STREAMS_CLIENT__CLIENT__BASE_URL`
-- `DURABLE_STREAMS_CLIENT__AUTH__TYPE`
-- `DURABLE_STREAMS_CLIENT__AUTH__BEARER_TOKEN`
-- `DURABLE_STREAMS_CLIENT__AUTH__USERNAME`
-- `DURABLE_STREAMS_CLIENT__AUTH__PASSWORD`
-- `DURABLE_STREAMS_CLIENT__AUTH__HEADER_NAME`
-- `DURABLE_STREAMS_CLIENT__AUTH__HEADER_VALUE`
-- `DURABLE_STREAMS_CLIENT__TRANSPORT__CONNECT_TIMEOUT_MS`
-- `DURABLE_STREAMS_CLIENT__TRANSPORT__REQUEST_TIMEOUT_MS`
-- `DURABLE_STREAMS_CLIENT__TRANSPORT__USER_AGENT`
-- `DURABLE_STREAMS_CLIENT__TRANSPORT__PROXY_URL`
-- `DURABLE_STREAMS_CLIENT__RETRY__MAX_RETRIES`
-- `DURABLE_STREAMS_CLIENT__RETRY__INITIAL_BACKOFF_MS`
-- `DURABLE_STREAMS_CLIENT__RETRY__MAX_BACKOFF_MS`
-- `DURABLE_STREAMS_CLIENT__RETRY__BACKOFF_MULTIPLIER`
-- `DURABLE_STREAMS_CLIENT__DEFAULTS__DEFAULT_CONTENT_TYPE`
-- `DURABLE_STREAMS_CLIENT__DEFAULTS__HEADERS_JSON`
-- `DURABLE_STREAMS_CLIENT__DEFAULTS__QUERY_JSON`
-
-`DEFAULTS__HEADERS_JSON` and `DEFAULTS__QUERY_JSON` expect JSON objects.
-
-## Authentication
-
-Supported auth modes:
-
-- `none`
-- `bearer`
-- `basic`
-- `header`
-
-The `header` mode is intended for gatekeepers, API gateways, or custom auth
-proxies where a static request header is operationally simpler than standard
-HTTP auth schemes.
-
-## Verification
-
-This crate is wired to the upstream client conformance suite through:
-
-- `src/bin/client-conformance-adapter.rs`
-- `../../tests/conformance/client/run-adapter.sh`
-
-Local verification:
-
-```bash
-cargo test -p durable-streams-client
-./scripts/conformance/run-client-suite.sh --fail-fast
-```
-
-## CLI
-
-The crate also ships a thin binary for file-based JSON workflows:
+The `durable-streams-json` binary supports `persist` (write a local journal),
+`replicate` (resume reads into a journal), and `send` (append through a producer).
 
 ```bash
 cargo run -p durable-streams-client --bin durable-streams-json -- persist \
@@ -290,8 +98,6 @@ cargo run -p durable-streams-client --bin durable-streams-json -- persist \
   --input ./orders-input.jsonl
 ```
 
-Available commands:
-
-- `persist` to normalize JSON or JSONL input and append it to a local journal
-- `replicate` to resume from the journal's last persisted server offset
-- `send` to normalize JSON input and append it through the producer path
+Use `--help` for command options. For development checks and upstream suites,
+see [Contributing](../../CONTRIBUTING.md) and the
+[conformance guide](../../tests/conformance/README.md).

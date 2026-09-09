@@ -1,3 +1,5 @@
+//! Integration coverage for admin routes.
+
 mod common;
 
 use common::{spawn_test_server_with_config, test_client};

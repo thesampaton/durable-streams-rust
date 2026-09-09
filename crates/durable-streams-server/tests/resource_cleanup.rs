@@ -1,3 +1,10 @@
+//! Integration coverage for resource cleanup.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Resource management and cleanup tests.
 //!
 //! These validate that expired streams are reclaimed, producer state TTL works,
@@ -12,10 +19,10 @@ use common::{create_test_storage, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
-use durable_streams_server::storage::{Storage, StreamConfig};
+use durable_streams_server::storage::{Storage, StreamOptions};
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
@@ -40,7 +47,7 @@ storage_backend_tests! {
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
-            .append("s", Bytes::from("data"), "text/plain")
+            .append("s", Bytes::from("data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -60,7 +67,7 @@ storage_backend_tests! {
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
-            .append("s", Bytes::from("data"), "text/plain")
+            .append("s", Bytes::from("data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -80,7 +87,7 @@ storage_backend_tests! {
         std::thread::sleep(std::time::Duration::from_millis(2500));
 
         assert!(matches!(
-            storage.append("s", Bytes::from("late"), "text/plain"),
+            storage.append("s", Bytes::from("late"), "text/plain").map(|result| result.start_offset),
             Err(Error::StreamExpired)
         ));
     }
@@ -98,7 +105,7 @@ storage_backend_tests! {
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("s", config).unwrap();
         storage
-            .append("s", Bytes::from("old-data"), "text/plain")
+            .append("s", Bytes::from("old-data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -127,17 +134,17 @@ storage_backend_tests! {
 
         storage.create_stream("exp-1", config.clone()).unwrap();
         storage
-            .append("exp-1", Bytes::from("data1"), "text/plain")
+            .append("exp-1", Bytes::from("data1"), "text/plain").map(|result| result.start_offset)
             .unwrap();
         storage.create_stream("exp-2", config).unwrap();
         storage
-            .append("exp-2", Bytes::from("data2"), "text/plain")
+            .append("exp-2", Bytes::from("data2"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         // Also create a non-expiring stream
         storage.create_stream("keep", plain_config()).unwrap();
         storage
-            .append("keep", Bytes::from("keep-data"), "text/plain")
+            .append("keep", Bytes::from("keep-data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -146,11 +153,11 @@ storage_backend_tests! {
         assert_eq!(removed, 2);
 
         // Expired streams should be gone
-        assert!(!storage.exists("exp-1"));
-        assert!(!storage.exists("exp-2"));
+        assert!(!storage.exists("exp-1").unwrap());
+        assert!(!storage.exists("exp-2").unwrap());
 
         // Non-expiring stream should still be there
-        assert!(storage.exists("keep"));
+        assert!(storage.exists("keep").unwrap());
         let read = storage.read("keep", &Offset::start()).unwrap();
         assert_eq!(read.messages.len(), 1);
     }
@@ -162,14 +169,14 @@ storage_backend_tests! {
 
         storage.create_stream("s", plain_config()).unwrap();
         storage
-            .append("s", Bytes::from("data"), "text/plain")
+            .append("s", Bytes::from("data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         let removed = storage.cleanup_expired_streams();
         assert_eq!(removed, 0);
 
         // Stream should still exist
-        assert!(storage.exists("s"));
+        assert!(storage.exists("s").unwrap());
     }
 
     #[test]
@@ -182,7 +189,7 @@ storage_backend_tests! {
 
         storage.create_stream("exp", config).unwrap();
         storage
-            .append("exp", Bytes::from("x".repeat(100)), "text/plain")
+            .append("exp", Bytes::from("x".repeat(100)), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         let before = handle.storage.total_bytes();
@@ -207,14 +214,14 @@ storage_backend_tests! {
 
         storage.create_stream("s", plain_config()).unwrap();
         storage
-            .append("s", Bytes::from(vec![0u8; 40]), "text/plain")
+            .append("s", Bytes::from(vec![0u8; 40]), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         let before = handle.storage.total_bytes();
         assert_eq!(before, 40);
 
         // This should fail (40 + 20 > 50 per-stream limit)
-        let result = storage.append("s", Bytes::from(vec![0u8; 20]), "text/plain");
+        let result = storage.append("s", Bytes::from(vec![0u8; 20]), "text/plain").map(|result| result.start_offset);
         assert!(result.is_err());
 
         // total_bytes should be unchanged
@@ -230,11 +237,11 @@ storage_backend_tests! {
         storage.create_stream("a", plain_config()).unwrap();
         storage.create_stream("b", plain_config()).unwrap();
         storage
-            .append("a", Bytes::from(vec![0u8; 60]), "text/plain")
+            .append("a", Bytes::from(vec![0u8; 60]), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         // This should fail (60 + 50 > 100 global limit)
-        let result = storage.append("b", Bytes::from(vec![0u8; 50]), "text/plain");
+        let result = storage.append("b", Bytes::from(vec![0u8; 50]), "text/plain").map(|result| result.start_offset);
         assert!(result.is_err());
 
         // total_bytes should still be 60
@@ -253,7 +260,7 @@ storage_backend_tests! {
 
         storage.create_stream("s", plain_config()).unwrap();
         storage
-            .append("s", Bytes::from("hello"), "text/plain")
+            .append("s", Bytes::from("hello"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         assert_eq!(handle.storage.total_bytes(), 5);
@@ -270,19 +277,19 @@ storage_backend_tests! {
 
         storage.create_stream("s", plain_config()).unwrap();
         storage
-            .append("s", Bytes::from(vec![0u8; 80]), "text/plain")
+            .append("s", Bytes::from(vec![0u8; 80]), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         // Global is at 80, can't add more
         storage.create_stream("s2", plain_config()).unwrap();
-        let result = storage.append("s2", Bytes::from(vec![0u8; 30]), "text/plain");
+        let result = storage.append("s2", Bytes::from(vec![0u8; 30]), "text/plain").map(|result| result.start_offset);
         assert!(result.is_err());
 
         // Delete first stream, freeing capacity
         storage.delete("s").unwrap();
 
         // Now should succeed
-        let result = storage.append("s2", Bytes::from(vec![0u8; 30]), "text/plain");
+        let result = storage.append("s2", Bytes::from(vec![0u8; 30]), "text/plain").map(|result| result.start_offset);
         assert!(result.is_ok(), "expected append to succeed, got {result:?}");
     }
 
@@ -331,7 +338,7 @@ storage_backend_tests! {
         let config = plain_config().with_expires_at(expires);
         storage.create_stream("exp", config).unwrap();
         storage
-            .append("exp", Bytes::from("data"), "text/plain")
+            .append("exp", Bytes::from("data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(2500));

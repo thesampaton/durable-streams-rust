@@ -1,3 +1,10 @@
+//! Integration coverage for storage backend contract.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use bytes::Bytes;
@@ -7,7 +14,7 @@ use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::protocol::producer::ProducerHeaders;
 use durable_streams_server::storage::{
-    CreateStreamResult, ProducerAppendResult, Storage, StreamConfig,
+    CreateStreamResult, ProducerAppendResult, Storage, StreamOptions,
 };
 use std::sync::Arc;
 use std::thread;
@@ -20,13 +27,35 @@ fn producer(id: &str, epoch: u64, seq: u64) -> ProducerHeaders {
     }
 }
 
-fn plain_text_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_text_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 storage_backend_tests! {
     mod core {
         use super::*;
+
+        // Direct Rust writes distinguish an empty batch from empty records.
+        #[test]
+        fn zero_byte_records_survive_create_append_producer_and_replace() {
+            let handle = create_test_storage(BACKEND);
+            let storage = &handle.storage;
+            storage.create_stream_with_data("empty-records", plain_text_config(), vec![Bytes::new()], false).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new()]);
+            assert_eq!(read.next_offset, Offset::new(1, 0));
+            storage.append_batch("empty-records", vec![Bytes::new()], "text/plain", None, false).unwrap();
+            storage.append_with_producer("empty-records", vec![Bytes::new()], "text/plain", &producer("p", 0, 0), false, None).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new(); 3]);
+            assert_eq!(read.next_offset, Offset::new(3, 0));
+            storage.replace_stream("empty-records", plain_text_config(), vec![Bytes::new(); 2], true).unwrap();
+            let read = storage.read("empty-records", &Offset::start()).unwrap();
+            assert_eq!(read.messages, vec![Bytes::new(); 2]);
+            assert_eq!(read.next_offset, Offset::new(2, 0));
+            assert!(read.closed);
+            assert_eq!(storage.total_bytes(), 0);
+        }
 
         #[test]
         fn create_idempotent_and_config_mismatch() {
@@ -41,7 +70,7 @@ storage_backend_tests! {
             assert_eq!(idempotent, CreateStreamResult::AlreadyExists);
 
             assert!(matches!(
-                storage.create_stream("s", StreamConfig::new("application/json".to_string())),
+                storage.create_stream("s", StreamOptions::new("application/json".to_string())),
                 Err(Error::ConfigMismatch)
             ));
         }
@@ -52,8 +81,14 @@ storage_backend_tests! {
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
 
-            let o1 = storage.append("s", Bytes::from("a"), "text/plain").unwrap();
-            let o2 = storage.append("s", Bytes::from("b"), "text/plain").unwrap();
+            let o1 = storage
+                .append("s", Bytes::from("a"), "text/plain")
+                .map(|result| result.start_offset)
+                .unwrap();
+            let o2 = storage
+                .append("s", Bytes::from("b"), "text/plain")
+                .map(|result| result.start_offset)
+                .unwrap();
             assert!(o1 < o2);
 
             let read = storage.read("s", &Offset::start()).unwrap();
@@ -69,12 +104,15 @@ storage_backend_tests! {
 
             let o1 = storage
                 .append("s", Bytes::from("m1"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             let o2 = storage
                 .append("s", Bytes::from("m2"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             let _ = storage
                 .append("s", Bytes::from("m3"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
 
             let from_o2 = storage.read("s", &o2).unwrap();
@@ -95,17 +133,22 @@ storage_backend_tests! {
             storage.create_stream("s", plain_text_config()).unwrap();
 
             assert!(matches!(
-                storage.append("s", Bytes::from("x"), "application/json"),
+                storage
+                    .append("s", Bytes::from("x"), "application/json")
+                    .map(|result| result.start_offset),
                 Err(Error::ContentTypeMismatch { .. })
             ));
 
             storage
                 .append("s", Bytes::from("ok"), "TEXT/PLAIN")
+                .map(|result| result.start_offset)
                 .unwrap();
             storage.close_stream("s").unwrap();
 
             assert!(matches!(
-                storage.append("s", Bytes::from("x"), "text/plain"),
+                storage
+                    .append("s", Bytes::from("x"), "text/plain")
+                    .map(|result| result.start_offset),
                 Err(Error::StreamClosed)
             ));
 
@@ -118,11 +161,14 @@ storage_backend_tests! {
             let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
             storage.create_stream("s", plain_text_config()).unwrap();
-            storage.append("s", Bytes::from("x"), "text/plain").unwrap();
+            storage
+                .append("s", Bytes::from("x"), "text/plain")
+                .map(|result| result.start_offset)
+                .unwrap();
 
-            assert!(storage.exists("s"));
+            assert!(storage.exists("s").unwrap());
             storage.delete("s").unwrap();
-            assert!(!storage.exists("s"));
+            assert!(!storage.exists("s").unwrap());
             assert_eq!(storage.total_bytes(), 0);
             assert!(matches!(storage.delete("s"), Err(Error::NotFound(_))));
         }
@@ -141,22 +187,30 @@ storage_backend_tests! {
 
             storage
                 .append("a", Bytes::from(vec![0_u8; 50]), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             assert!(matches!(
-                storage.append("a", Bytes::from(vec![0_u8; 10]), "text/plain"),
+                storage
+                    .append("a", Bytes::from(vec![0_u8; 10]), "text/plain")
+                    .map(|result| result.start_offset),
                 Err(Error::StreamSizeLimitExceeded)
             ));
 
             storage
                 .append("b", Bytes::from(vec![0_u8; 40]), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             assert!(matches!(
-                storage.append("b", Bytes::from(vec![0_u8; 20]), "text/plain"),
+                storage
+                    .append("b", Bytes::from(vec![0_u8; 20]), "text/plain")
+                    .map(|result| result.start_offset),
                 Err(Error::MemoryLimitExceeded)
             ));
 
             assert!(matches!(
-                storage.append("missing", Bytes::from("x"), "text/plain"),
+                storage
+                    .append("missing", Bytes::from("x"), "text/plain")
+                    .map(|result| result.start_offset),
                 Err(Error::NotFound(_))
             ));
             assert!(matches!(
@@ -179,12 +233,12 @@ storage_backend_tests! {
                 .storage
                 .create_stream_with_data("s", cfg.clone(), oversized, false);
             assert!(matches!(err, Err(Error::StreamSizeLimitExceeded)));
-            assert!(!small.storage.exists("s"));
+            assert!(!small.storage.exists("s").unwrap());
 
             let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
-            let closed_cfg = plain_text_config().with_created_closed(true);
+            let closed_cfg = plain_text_config().with_closed(true);
             let created = storage
                 .create_stream_with_data("closed", closed_cfg, vec![], true)
                 .unwrap();
@@ -216,13 +270,20 @@ storage_backend_tests! {
             let oversized = vec![Bytes::from(vec![0_u8; 9])];
             let err = small
                 .storage
-                .batch_append("s", oversized.clone(), "text/plain", Some("s1"));
+                .append_batch("s", oversized.clone(), "text/plain", Some("s1"), false)
+                .map(|result| result.next_offset);
             assert!(matches!(err, Err(Error::StreamSizeLimitExceeded)));
 
-            let retry =
-                small
-                    .storage
-                    .batch_append("s", vec![Bytes::from("ok")], "text/plain", Some("s1"));
+            let retry = small
+                .storage
+                .append_batch(
+                    "s",
+                    vec![Bytes::from("ok")],
+                    "text/plain",
+                    Some("s1"),
+                    false,
+                )
+                .map(|result| result.next_offset);
             assert!(retry.is_ok());
 
             let err = small.storage.append_with_producer(
@@ -397,12 +458,14 @@ storage_backend_tests! {
                 .unwrap();
             storage
                 .append("source-a", Bytes::from("a1"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             storage
                 .create_stream("source-b", plain_text_config())
                 .unwrap();
             storage
                 .append("source-b", Bytes::from("b1"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
 
             let created = storage
@@ -436,11 +499,13 @@ storage_backend_tests! {
             let handle = create_test_storage(BACKEND);
             let storage = &handle.storage;
 
-            let expires_at = Utc::now() + chrono::Duration::milliseconds(300);
+            // Allow disk-backed setup to finish under concurrent suite load.
+            let expires_at = Utc::now() + chrono::Duration::seconds(2);
             let config = plain_text_config().with_expires_at(expires_at);
             storage.create_stream("source", config).unwrap();
             storage
                 .append("source", Bytes::from("baseline"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
 
             let fork_created = storage
@@ -448,7 +513,8 @@ storage_backend_tests! {
                 .unwrap();
             assert_eq!(fork_created, CreateStreamResult::Created);
 
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let until_expiry = (expires_at - Utc::now()).to_std().unwrap_or_default();
+            std::thread::sleep(until_expiry + std::time::Duration::from_millis(50));
             let removed = storage.cleanup_expired_streams();
             assert_eq!(removed, 1);
 
@@ -474,6 +540,7 @@ storage_backend_tests! {
                 .unwrap();
             storage
                 .append("source", Bytes::from("baseline"), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
             storage
                 .create_fork("fork", "source", None, plain_text_config())
@@ -487,7 +554,7 @@ storage_backend_tests! {
             ));
 
             storage.delete("fork").unwrap();
-            assert!(!storage.exists("fork"));
+            assert!(!storage.exists("fork").unwrap());
 
             let recreated = storage
                 .create_stream("source", plain_text_config())
@@ -520,6 +587,7 @@ storage_backend_tests! {
                                 Bytes::from(format!("worker-{worker}-{i}")),
                                 "text/plain",
                             )
+                            .map(|result| result.start_offset)
                             .unwrap();
                         offsets.push(offset);
                     }
@@ -556,13 +624,28 @@ mod extended_contract {
             fn test_partial_fork_failure_has_no_visible_stream_or_reserved_bytes() {
                 let handle = create_test_storage_with_limits(BACKEND, 1024, 5);
                 let storage = &handle.storage;
-                storage.create_stream_with_data("source", plain_text_config(), vec![Bytes::from("hello")], false).unwrap();
+                storage
+                    .create_stream_with_data(
+                        "source",
+                        plain_text_config(),
+                        vec![Bytes::from("hello")],
+                        false,
+                    )
+                    .unwrap();
                 let before = storage.total_bytes();
-                let result = storage.create_fork_with_options("fork", "source", Some(&Offset::new(0,0)), plain_text_config(), ForkOptions {
-                    sub_offset: 3, initial_body: Bytes::from("XYZ"), ..ForkOptions::default()
-                });
+                let result = storage.create_fork_with_options(
+                    "fork",
+                    "source",
+                    Some(&Offset::new(0, 0)),
+                    plain_text_config(),
+                    ForkOptions {
+                        sub_offset: 3,
+                        initial_body: Bytes::from("XYZ"),
+                        ..ForkOptions::default()
+                    },
+                );
                 assert!(matches!(result, Err(Error::StreamSizeLimitExceeded)));
-                assert!(!storage.exists("fork"));
+                assert!(!storage.exists("fork").unwrap());
                 assert_eq!(storage.total_bytes(), before);
                 storage.delete("source").unwrap();
                 assert_eq!(storage.total_bytes(), 0);
@@ -573,16 +656,40 @@ mod extended_contract {
             fn test_nested_fork_before_parent_boundary_and_resume() {
                 let handle = create_test_storage(BACKEND);
                 let storage = &handle.storage;
-                storage.create_stream("source", plain_text_config()).unwrap();
-                storage.append("source", Bytes::from("a"), "text/plain").unwrap();
+                storage
+                    .create_stream("source", plain_text_config())
+                    .unwrap();
+                storage
+                    .append("source", Bytes::from("a"), "text/plain")
+                    .map(|result| result.start_offset)
+                    .unwrap();
                 let anchor = storage.head("source").unwrap().next_offset;
-                storage.append("source", Bytes::from("b"), "text/plain").unwrap();
-                storage.create_fork("parent", "source", None, plain_text_config()).unwrap();
-                storage.append("parent", Bytes::from("c"), "text/plain").unwrap();
-                storage.create_fork("child", "parent", Some(&anchor), plain_text_config()).unwrap();
-                assert_eq!(storage.read("child", &Offset::start()).unwrap().messages, vec![Bytes::from("a")]);
-                storage.append("child", Bytes::from("d"), "text/plain").unwrap();
-                assert_eq!(storage.read("child", &anchor).unwrap().messages, vec![Bytes::from("d")]);
+                storage
+                    .append("source", Bytes::from("b"), "text/plain")
+                    .map(|result| result.start_offset)
+                    .unwrap();
+                storage
+                    .create_fork("parent", "source", None, plain_text_config())
+                    .unwrap();
+                storage
+                    .append("parent", Bytes::from("c"), "text/plain")
+                    .map(|result| result.start_offset)
+                    .unwrap();
+                storage
+                    .create_fork("child", "parent", Some(&anchor), plain_text_config())
+                    .unwrap();
+                assert_eq!(
+                    storage.read("child", &Offset::start()).unwrap().messages,
+                    vec![Bytes::from("a")]
+                );
+                storage
+                    .append("child", Bytes::from("d"), "text/plain")
+                    .map(|result| result.start_offset)
+                    .unwrap();
+                assert_eq!(
+                    storage.read("child", &anchor).unwrap().messages,
+                    vec![Bytes::from("d")]
+                );
             }
 
             /// Issue #32 / PROTOCOL.md reads: TTL and non-TTL forks use the
@@ -592,12 +699,22 @@ mod extended_contract {
                 for ttl in [false, true] {
                     let handle = create_test_storage(BACKEND);
                     let storage = &handle.storage;
-                    let config = if ttl { plain_text_config().with_ttl(60) } else { plain_text_config() };
+                    let config = if ttl {
+                        plain_text_config().with_ttl(60)
+                    } else {
+                        plain_text_config()
+                    };
                     storage.create_stream("source", config.clone()).unwrap();
-                    storage.append("source", Bytes::from("a"), "text/plain").unwrap();
+                    storage
+                        .append("source", Bytes::from("a"), "text/plain")
+                        .map(|result| result.start_offset)
+                        .unwrap();
                     let anchor = storage.head("source").unwrap().next_offset;
                     storage.create_fork("fork", "source", None, config).unwrap();
-                    storage.append("fork", Bytes::from("b"), "text/plain").unwrap();
+                    storage
+                        .append("fork", Bytes::from("b"), "text/plain")
+                        .map(|result| result.start_offset)
+                        .unwrap();
                     let tail = storage.head("fork").unwrap().next_offset;
                     storage.delete("source").unwrap();
                     storage.close_stream("fork").unwrap();
@@ -611,8 +728,8 @@ mod extended_contract {
                         assert!(read.at_tail && read.closed);
                         assert_eq!(read.next_offset, tail);
                     }
-                    assert!(!storage.exists("source"));
-                    assert!(storage.subscribe("source").is_none());
+                    assert!(!storage.exists("source").unwrap());
+                    assert!(storage.subscribe("source").unwrap().is_none());
                     let listed = storage.list_streams().unwrap();
                     assert_eq!(listed.len(), 1);
                     assert_eq!(listed[0].0, "fork");
@@ -632,8 +749,118 @@ mod extended_contract {
                 assert!(storage.load_subscription_state().unwrap().is_none());
                 storage.save_subscription_state(b"one").unwrap();
                 storage.save_subscription_state(b"two").unwrap();
-                assert_eq!(storage.load_subscription_state().unwrap(), Some(b"two".to_vec()));
+                assert_eq!(
+                    storage.load_subscription_state().unwrap(),
+                    Some(b"two".to_vec())
+                );
                 assert!(storage.list_streams().unwrap().is_empty());
+            }
+        }
+        mod release_regressions {
+            use super::*;
+
+            // PROTOCOL.md §5.2: the final body and closure have one commit boundary.
+            #[test]
+            fn final_append_serializes_with_competing_writer() {
+                let handle = create_test_storage(BACKEND);
+                let storage = Arc::new(handle.storage);
+                storage.create_stream("final", plain_text_config()).unwrap();
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let writer = {
+                    let storage = storage.clone();
+                    let barrier = barrier.clone();
+                    thread::spawn(move || {
+                        barrier.wait();
+                        storage.append_batch(
+                            "final",
+                            vec![Bytes::from_static(b"racer")],
+                            "text/plain",
+                            None,
+                            false,
+                        )
+                    })
+                };
+                barrier.wait();
+                let closed = storage
+                    .append_batch(
+                        "final",
+                        vec![Bytes::from_static(b"final")],
+                        "text/plain",
+                        None,
+                        true,
+                    )
+                    .unwrap();
+                let other = writer.join().unwrap();
+                let read = storage.read("final", &Offset::start()).unwrap();
+                assert_eq!(read.messages.last(), Some(&Bytes::from_static(b"final")));
+                assert_eq!(read.next_offset, closed.next_offset);
+                assert!(read.closed && closed.closed);
+                assert!(other.is_ok() || matches!(other, Err(Error::StreamClosed)));
+                let repeated = storage
+                    .append_batch("final", vec![], "ignored/type", None, true)
+                    .unwrap();
+                assert_eq!(repeated.next_offset, closed.next_offset);
+                assert!(repeated.closed);
+            }
+
+            #[test]
+            fn failed_final_append_preserves_open_stream_and_sequence() {
+                let handle = create_test_storage_with_limits(BACKEND, 1024, 3);
+                let storage = &handle.storage;
+                storage.create_stream("final", plain_text_config()).unwrap();
+                storage
+                    .append_batch(
+                        "final",
+                        vec![Bytes::from_static(b"a")],
+                        "text/plain",
+                        Some("1"),
+                        false,
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    storage.append_batch(
+                        "final",
+                        vec![Bytes::from_static(b"long")],
+                        "text/plain",
+                        Some("2"),
+                        true
+                    ),
+                    Err(Error::StreamSizeLimitExceeded)
+                ));
+                let head = storage.head("final").unwrap();
+                assert!(!head.closed);
+                assert_eq!(head.total_bytes, 1);
+                storage
+                    .append_batch(
+                        "final",
+                        vec![Bytes::from_static(b"b")],
+                        "text/plain",
+                        Some("2"),
+                        true,
+                    )
+                    .unwrap();
+            }
+
+            // Direct Rust creation must resolve the same policy as HTTP PUT.
+            #[test]
+            fn creation_validates_and_resolves_expiry() {
+                let handle = create_test_storage(BACKEND);
+                let storage = &handle.storage;
+                assert!(matches!(
+                    storage.create_stream("bad", plain_text_config().with_ttl(u64::MAX)),
+                    Err(Error::InvalidTtl(_))
+                ));
+                assert!(!storage.exists("bad").unwrap());
+                storage
+                    .create_stream("immediate", plain_text_config().with_ttl(0))
+                    .unwrap();
+                assert!(!storage.exists("immediate").unwrap());
+                storage
+                    .create_stream("normal", StreamOptions::new("TEXT/PLAIN").with_ttl(60))
+                    .unwrap();
+                let head = storage.head("normal").unwrap();
+                assert_eq!(head.config.content_type, "text/plain");
+                assert!(head.config.expires_at.unwrap() > Utc::now());
             }
         }
     }

@@ -1,6 +1,5 @@
 use crate::handlers::common::{StreamResponse, header_value, with_instance};
 use crate::protocol::{headers::names, problem::ProblemResult, stream_name::StreamName};
-use crate::storage::Storage;
 use axum::{
     extract::{OriginalUri, State},
     http::StatusCode,
@@ -16,13 +15,13 @@ use std::sync::Arc;
 /// # Errors
 ///
 /// Returns 404 if stream doesn't exist or has expired.
-pub async fn stream_metadata<S: Storage>(
-    State(storage): State<Arc<S>>,
+pub async fn stream_metadata(
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
 ) -> ProblemResult<Response> {
     with_instance(original_uri, || async move {
-        let metadata = storage.head(&name)?;
+        let metadata = storage.head(&name).await?;
         let mut response = StreamResponse::new(StatusCode::OK)
             .content_type(&metadata.config.content_type)
             .next_offset(&metadata.next_offset)

@@ -3,7 +3,7 @@
 
 use super::TransferError;
 use super::format::{ExportDocument, FORMAT_VERSION};
-use crate::storage::{Storage, StreamConfig};
+use crate::storage::Storage;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
@@ -12,12 +12,12 @@ use std::io::Read;
 /// How to handle streams that already exist during import.
 #[derive(Debug, Clone, Copy)]
 pub enum ConflictPolicy {
-    /// Skip streams that already exist (log a warning, continue).
+    /// Skip streams that already exist and count them in the result.
     Skip,
     /// Fail the entire import if any stream already exists (pre-scans
     /// all names before writing).
     Fail,
-    /// Delete and recreate existing streams from the export data.
+    /// Atomically replace independent root streams; reject streams with fork lineage.
     Replace,
 }
 
@@ -28,6 +28,7 @@ pub struct ImportOptions {
 }
 
 /// Counts returned after a successful import.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ImportStats {
     /// Number of streams created (or replaced) from the input.
     pub streams_imported: usize,
@@ -41,8 +42,10 @@ pub struct ImportStats {
 ///
 /// The reader must contain a valid [`ExportDocument`]
 /// whose `format_version` matches [`FORMAT_VERSION`].
-/// Each stream is created atomically via
-/// [`Storage::create_stream_with_data`].
+/// All payloads and creation options are validated before mutation. Each stream
+/// commits independently; a later storage failure returns completed counts in
+/// [`TransferError::PartialImport`]. Replacement requires staging capacity for
+/// both old and new payloads and rejects streams involved in fork lineage.
 ///
 /// # Errors
 ///
@@ -59,57 +62,70 @@ pub fn import_streams<R: Read>(
         return Err(TransferError::UnsupportedVersion(doc.format_version));
     }
 
-    // For Fail policy, pre-scan all stream names before writing anything.
+    // Decode and validate every entry before the first write, including skipped entries.
+    let mut names = std::collections::HashSet::new();
+    let mut prepared = Vec::with_capacity(doc.streams.len());
+    for stream in doc.streams {
+        if stream.name.is_empty() || !names.insert(stream.name.clone()) {
+            return Err(TransferError::InvalidDocument(
+                "stream names must be non-empty and unique".into(),
+            ));
+        }
+        let config = stream.config.creation_options();
+        config.clone().resolve(chrono::Utc::now())?;
+        let messages = stream
+            .messages
+            .iter()
+            .map(|message| BASE64.decode(&message.data_base64).map(Bytes::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        prepared.push((stream.name, config, messages, stream.closed));
+    }
     if matches!(options.conflict_policy, ConflictPolicy::Fail) {
-        for stream in &doc.streams {
-            if storage.exists(&stream.name) {
-                return Err(TransferError::Conflict(stream.name.clone()));
+        for (name, ..) in &prepared {
+            if storage.exists(name)? {
+                return Err(TransferError::Conflict(name.clone()));
             }
         }
     }
 
-    let mut stats = ImportStats {
-        streams_imported: 0,
-        streams_skipped: 0,
-        messages_imported: 0,
-    };
-
-    for stream in &doc.streams {
-        if storage.exists(&stream.name) {
-            match options.conflict_policy {
-                ConflictPolicy::Skip => {
-                    tracing::warn!(stream = %stream.name, "skipping existing stream");
-                    stats.streams_skipped += 1;
-                    continue;
-                }
-                ConflictPolicy::Fail => {
-                    return Err(TransferError::Conflict(stream.name.clone()));
-                }
-                ConflictPolicy::Replace => {
-                    storage.delete(&stream.name)?;
-                }
-            }
-        }
-
-        let config = StreamConfig {
-            content_type: stream.config.content_type.clone(),
-            ttl_seconds: stream.config.ttl_seconds,
-            expires_at: stream.config.expires_at,
-            created_closed: stream.config.created_closed,
-        };
-
-        let mut messages = Vec::with_capacity(stream.messages.len());
-        for msg in &stream.messages {
-            let data = BASE64.decode(&msg.data_base64)?;
-            messages.push(Bytes::from(data));
-        }
-
+    let mut stats = ImportStats::default();
+    for (name, config, messages, closed) in prepared {
         let msg_count = messages.len();
-        storage.create_stream_with_data(&stream.name, config, messages, stream.closed)?;
-
-        stats.streams_imported += 1;
-        stats.messages_imported += msg_count;
+        let result = (|| -> Result<bool, TransferError> {
+            if storage.exists(&name)? {
+                match options.conflict_policy {
+                    ConflictPolicy::Skip => return Ok(false),
+                    ConflictPolicy::Fail => return Err(TransferError::Conflict(name.clone())),
+                    ConflictPolicy::Replace => {
+                        storage.replace_stream(&name, config, messages, closed)?;
+                        return Ok(true);
+                    }
+                }
+            }
+            let result = storage.create_stream_with_data(&name, config, messages, closed)?;
+            if result.status == crate::storage::CreateStreamResult::AlreadyExists {
+                // Another writer created the stream after the existence check.
+                if matches!(options.conflict_policy, ConflictPolicy::Skip) {
+                    return Ok(false);
+                }
+                return Err(TransferError::Conflict(name.clone()));
+            }
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => {
+                stats.streams_imported += 1;
+                stats.messages_imported += msg_count;
+            }
+            Ok(false) => stats.streams_skipped += 1,
+            Err(source) => {
+                return Err(TransferError::PartialImport {
+                    stream: name,
+                    completed: stats,
+                    source: Box::new(source),
+                });
+            }
+        }
     }
-
     Ok(stats)
 }

@@ -1,8 +1,15 @@
+//! Integration coverage for transfer roundtrip.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 use bytes::Bytes;
 use durable_streams_server::{
     InMemoryStorage, Storage,
     protocol::offset::Offset,
-    storage::StreamConfig,
+    storage::StreamOptions,
     transfer::{
         export::{ExportOptions, export_streams},
         format::ExportDocument,
@@ -14,15 +21,17 @@ use durable_streams_server::{
 fn export_uses_canonical_offsets_for_linear_streams() {
     let storage = InMemoryStorage::new(1024 * 1024, 1024 * 1024);
     storage
-        .create_stream("orders", StreamConfig::new("text/plain".to_string()))
+        .create_stream("orders", StreamOptions::new("text/plain".to_string()))
         .unwrap();
     storage
-        .batch_append(
+        .append_batch(
             "orders",
             vec![Bytes::from("hi"), Bytes::from("there"), Bytes::from("!")],
             "text/plain",
             None,
+            false,
         )
+        .map(|result| result.next_offset)
         .unwrap();
 
     let mut output = Vec::new();
@@ -56,15 +65,17 @@ fn export_uses_canonical_offsets_for_linear_streams() {
 fn export_uses_canonical_offsets_for_forked_streams() {
     let storage = InMemoryStorage::new(1024 * 1024, 1024 * 1024);
     storage
-        .create_stream("source", StreamConfig::new("text/plain".to_string()))
+        .create_stream("source", StreamOptions::new("text/plain".to_string()))
         .unwrap();
     storage
-        .batch_append(
+        .append_batch(
             "source",
             vec![Bytes::from("aa"), Bytes::from("bbb")],
             "text/plain",
             None,
+            false,
         )
+        .map(|result| result.next_offset)
         .unwrap();
     let fork_offset = Offset::new(1, 2);
     storage
@@ -72,11 +83,12 @@ fn export_uses_canonical_offsets_for_forked_streams() {
             "fork",
             "source",
             Some(&fork_offset),
-            StreamConfig::new("text/plain".to_string()),
+            StreamOptions::new("text/plain".to_string()),
         )
         .unwrap();
     storage
         .append("fork", Bytes::from("c"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
     let mut output = Vec::new();
@@ -107,15 +119,17 @@ fn export_uses_canonical_offsets_for_forked_streams() {
 fn export_import_round_trip_restores_messages() {
     let source = InMemoryStorage::new(1024 * 1024, 1024 * 1024);
     source
-        .create_stream("events", StreamConfig::new("text/plain".to_string()))
+        .create_stream("events", StreamOptions::new("text/plain".to_string()))
         .unwrap();
     source
-        .batch_append(
+        .append_batch(
             "events",
             vec![Bytes::from("one"), Bytes::from("two")],
             "text/plain",
             None,
+            false,
         )
+        .map(|result| result.next_offset)
         .unwrap();
     source.close_stream("events").unwrap();
 

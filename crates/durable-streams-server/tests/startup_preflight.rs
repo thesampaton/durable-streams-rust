@@ -1,3 +1,10 @@
+//! Integration coverage for startup preflight.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 use durable_streams_server::config::Config;
 use durable_streams_server::startup::{
     StartupError, StartupErrorKind, StartupPhase, TlsFileStatus, check_tls_file,

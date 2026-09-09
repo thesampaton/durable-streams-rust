@@ -1,22 +1,14 @@
 use super::{FileStorage, MessageIndex, RECORD_HEADER_BYTES, StreamEntry};
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
+use crate::storage::shared::release_bytes;
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use tracing::warn;
 
 impl FileStorage {
-    pub(super) fn rollback_total_bytes(&self, bytes: u64) {
-        self.total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some(current.saturating_sub(bytes))
-            })
-            .ok();
-    }
-
     pub(super) fn get_stream(&self, name: &str) -> Option<Arc<RwLock<StreamEntry>>> {
         let streams = self.streams.read().expect("streams lock poisoned");
         streams.get(name).map(Arc::clone)
@@ -37,7 +29,7 @@ impl FileStorage {
         drop(stream);
 
         self.remove_stream_dir(&dir)?;
-        self.rollback_total_bytes(total_bytes);
+        release_bytes(&self.total_bytes, total_bytes);
         Ok(fork_info)
     }
 
@@ -52,6 +44,30 @@ impl FileStorage {
         Ok(())
     }
 
+    /// Creation has no append journal, so sync its data before publishing metadata.
+    /// The caller must discard the new entry and remove its directory on failure.
+    pub(super) fn append_initial_records(
+        &self,
+        name: &str,
+        stream: &mut StreamEntry,
+        messages: &[Bytes],
+    ) -> Result<()> {
+        self.append_records(name, stream, messages)?;
+        if !messages.is_empty()
+            && let Err(e) = super::retry_on_eintr(|| stream.file.sync_data())
+        {
+            release_bytes(&self.total_bytes, stream.total_bytes);
+            return Err(Error::classify_io_failure(
+                "file",
+                "sync initial stream log",
+                format!("failed to sync initial stream log for {name}: {e}"),
+                &e,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Write records; the caller owns the commit sync and failure recovery.
     pub(super) fn append_records(
         &self,
         name: &str,
@@ -63,7 +79,6 @@ impl FileStorage {
         }
 
         let mut total_batch_bytes = 0u64;
-        let mut payload_bytes = 0u64;
         let mut sizes = Vec::with_capacity(messages.len());
 
         for msg in messages {
@@ -74,31 +89,24 @@ impl FileStorage {
                     reason: "message too large for file record format".to_string(),
                 });
             }
-            payload_bytes += len;
             total_batch_bytes += len;
             sizes.push(len);
         }
 
-        if self
-            .total_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(total_batch_bytes)
-                    .filter(|next| *next <= self.max_total_bytes)
-            })
-            .is_err()
-        {
-            return Err(Error::MemoryLimitExceeded);
-        }
+        crate::storage::shared::reserve_bytes(
+            &self.total_bytes,
+            self.max_total_bytes,
+            total_batch_bytes,
+        )?;
 
         if stream.total_bytes + total_batch_bytes > self.max_stream_bytes {
-            self.rollback_total_bytes(total_batch_bytes);
+            release_bytes(&self.total_bytes, total_batch_bytes);
             return Err(Error::StreamSizeLimitExceeded);
         }
 
         let wire_overhead = RECORD_HEADER_BYTES.saturating_mul(messages.len());
         let mut write_buf =
-            Vec::with_capacity(usize::try_from(payload_bytes).unwrap_or(0) + wire_overhead);
+            Vec::with_capacity(usize::try_from(total_batch_bytes).unwrap_or(0) + wire_overhead);
         for msg in messages {
             let len = u32::try_from(msg.len()).unwrap_or(u32::MAX);
             write_buf.extend_from_slice(&len.to_le_bytes());
@@ -111,25 +119,10 @@ impl FileStorage {
             if let Ok(m) = stream.file.metadata() {
                 stream.file_len = m.len();
             }
-            self.rollback_total_bytes(total_batch_bytes);
+            release_bytes(&self.total_bytes, total_batch_bytes);
             return Err(Error::Storage(format!(
                 "failed to append stream log for {name}: {e}"
             )));
-        }
-
-        if self.sync_on_append
-            && let Err(e) = super::retry_on_eintr(|| stream.file.sync_data())
-        {
-            if let Ok(m) = stream.file.metadata() {
-                stream.file_len = m.len();
-            }
-            self.rollback_total_bytes(total_batch_bytes);
-            return Err(Error::classify_io_failure(
-                "file",
-                "sync stream log",
-                format!("failed to sync stream log for {name}: {e}"),
-                &e,
-            ));
         }
 
         let mut cursor = before_len;
@@ -176,7 +169,7 @@ impl FileStorage {
                 if let Err(e) = self.remove_stream_dir(&dir) {
                     warn!(%e, stream = current_parent.as_str(), "failed to remove tombstoned ancestor directory during cascade delete");
                 } else {
-                    self.rollback_total_bytes(total);
+                    release_bytes(&self.total_bytes, total);
                 }
 
                 match next_parent {

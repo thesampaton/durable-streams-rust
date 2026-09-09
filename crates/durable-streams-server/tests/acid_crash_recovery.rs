@@ -1,3 +1,10 @@
+//! Integration coverage for acid crash recovery.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! White-box crash-recovery tests for [`AcidStorage`].
 //!
 //! These test reopen-after-shutdown behavior, shard configuration validation,
@@ -8,7 +15,7 @@ use durable_streams_server::config::AcidBackend;
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
 use durable_streams_server::storage::acid::AcidStorage;
-use durable_streams_server::storage::{Storage, StreamConfig};
+use durable_streams_server::storage::{Storage, StreamOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,8 +32,8 @@ fn new_acid(root: &Path) -> AcidStorage {
         .expect("acid storage init should succeed")
 }
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -39,11 +46,17 @@ fn reopen_after_clean_shutdown_preserves_data() {
     {
         let s = new_acid(&root);
         s.create_stream("s1", plain_config()).unwrap();
-        s.append("s1", Bytes::from("msg-a"), "text/plain").unwrap();
-        s.append("s1", Bytes::from("msg-b"), "text/plain").unwrap();
+        s.append("s1", Bytes::from("msg-a"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s1", Bytes::from("msg-b"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
 
         s.create_stream("s2", plain_config()).unwrap();
-        s.append("s2", Bytes::from("msg-c"), "text/plain").unwrap();
+        s.append("s2", Bytes::from("msg-c"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let restored = new_acid(&root);
@@ -64,7 +77,9 @@ fn reopen_preserves_closed_state() {
     {
         let s = new_acid(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("data"), "text/plain").unwrap();
+        s.append("s", Bytes::from("data"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
         s.close_stream("s").unwrap();
     }
 
@@ -74,7 +89,9 @@ fn reopen_preserves_closed_state() {
     assert_eq!(meta.message_count, 1);
 
     assert!(matches!(
-        restored.append("s", Bytes::from("more"), "text/plain"),
+        restored
+            .append("s", Bytes::from("more"), "text/plain")
+            .map(|result| result.start_offset),
         Err(Error::StreamClosed)
     ));
 }
@@ -86,9 +103,13 @@ fn reopen_preserves_total_bytes() {
     {
         let s = new_acid(&root);
         s.create_stream("s1", plain_config()).unwrap();
-        s.append("s1", Bytes::from("hello"), "text/plain").unwrap(); // 5
+        s.append("s1", Bytes::from("hello"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap(); // 5
         s.create_stream("s2", plain_config()).unwrap();
-        s.append("s2", Bytes::from("world!"), "text/plain").unwrap(); // 6
+        s.append("s2", Bytes::from("world!"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap(); // 6
         expected = s.total_bytes();
         assert_eq!(expected, 11);
     }
@@ -111,8 +132,12 @@ fn idempotent_recovery_acid() {
     {
         let s = new_acid(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("one"), "text/plain").unwrap();
-        s.append("s", Bytes::from("two"), "text/plain").unwrap();
+        s.append("s", Bytes::from("one"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        s.append("s", Bytes::from("two"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     for i in 0..5 {
@@ -203,6 +228,7 @@ fn recovery_with_many_streams_across_shards() {
             let name = format!("stream-{i}");
             s.create_stream(&name, plain_config()).unwrap();
             s.append(&name, Bytes::from(format!("data-{i}")), "text/plain")
+                .map(|result| result.start_offset)
                 .unwrap();
         }
     }
@@ -231,13 +257,19 @@ fn appends_after_recovery_maintain_offset_monotonicity() {
     {
         let s = new_acid(&root);
         s.create_stream("s", plain_config()).unwrap();
-        s.append("s", Bytes::from("a"), "text/plain").unwrap();
-        offset_before = s.append("s", Bytes::from("b"), "text/plain").unwrap();
+        s.append("s", Bytes::from("a"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
+        offset_before = s
+            .append("s", Bytes::from("b"), "text/plain")
+            .map(|result| result.start_offset)
+            .unwrap();
     }
 
     let restored = new_acid(&root);
     let new_offset = restored
         .append("s", Bytes::from("c"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
     assert!(

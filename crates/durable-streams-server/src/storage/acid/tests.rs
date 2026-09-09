@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::error::Error;
 use crate::protocol::offset::Offset;
-use crate::storage::{CreateStreamResult, ForkInfo, Storage, StreamConfig, StreamState};
+use crate::storage::{CreateStreamResult, ForkInfo, Storage, StreamState};
 use bytes::Bytes;
 use chrono::Duration;
 use std::collections::HashMap;
@@ -73,17 +73,19 @@ fn test_startup_purges_expired_streams() {
         let storage =
             AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
         let expires = Utc::now() + Duration::milliseconds(200);
-        let cfg = StreamConfig::new("text/plain".to_string()).with_expires_at(expires);
+        let cfg =
+            crate::storage::StreamOptions::new("text/plain".to_string()).with_expires_at(expires);
         storage.create_stream("expiring", cfg).unwrap();
         storage
             .append("expiring", Bytes::from("x"), "text/plain")
+            .map(|result| result.start_offset)
             .unwrap();
     }
 
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     let restored = AcidStorage::new(root, 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
-    assert!(!restored.exists("expiring"));
+    assert!(!restored.exists("expiring").unwrap());
     assert!(matches!(
         restored.read("expiring", &Offset::start()),
         Err(Error::NotFound(_) | Error::StreamExpired)
@@ -107,7 +109,7 @@ fn test_global_cap_strict_under_concurrency() {
         storage
             .create_stream(
                 &format!("s-{i}"),
-                StreamConfig::new("text/plain".to_string()),
+                crate::storage::StreamOptions::new("text/plain".to_string()),
             )
             .unwrap();
     }
@@ -116,7 +118,9 @@ fn test_global_cap_strict_under_concurrency() {
     for i in 0..8 {
         let storage = Arc::clone(&storage);
         handles.push(thread::spawn(move || {
-            storage.append(&format!("s-{i}"), Bytes::from(vec![0_u8; 40]), "text/plain")
+            storage
+                .append(&format!("s-{i}"), Bytes::from(vec![0_u8; 40]), "text/plain")
+                .map(|result| result.start_offset)
         }));
     }
 
@@ -143,10 +147,14 @@ fn test_create_fork_routes_to_source_shard_when_names_hash_apart() {
     let (source, source_idx, fork, fork_hash_idx) = names_on_different_shards(&storage);
 
     storage
-        .create_stream(&source, StreamConfig::new("text/plain".to_string()))
+        .create_stream(
+            &source,
+            crate::storage::StreamOptions::new("text/plain".to_string()),
+        )
         .unwrap();
     storage
         .append(&source, Bytes::from("root"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     assert_eq!(
         storage.find_stream_shard_index(&source).unwrap(),
@@ -162,7 +170,7 @@ fn test_create_fork_routes_to_source_shard_when_names_hash_apart() {
             &fork,
             &source,
             None,
-            StreamConfig::new("text/plain".to_string()),
+            crate::storage::StreamOptions::new("text/plain".to_string()),
         )
         .unwrap();
     assert_eq!(created, CreateStreamResult::Created);
@@ -184,11 +192,16 @@ fn test_reopen_rejects_legacy_cross_shard_fork_lineage() {
     assert_ne!(source_idx, fork_idx);
 
     storage
-        .create_stream(&source, StreamConfig::new("text/plain".to_string()))
+        .create_stream(
+            &source,
+            crate::storage::StreamOptions::new("text/plain".to_string()),
+        )
         .unwrap();
 
     let fork_meta = StoredStreamMeta {
-        config: StreamConfig::new("text/plain".to_string()),
+        config: crate::storage::StreamOptions::new("text/plain")
+            .resolve(Utc::now())
+            .unwrap(),
         closed: false,
         next_read_seq: 0,
         next_byte_offset: 0,
@@ -256,10 +269,14 @@ fn test_corrupted_stream_metadata_fails_fast_on_startup() {
     let storage =
         AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
     storage
-        .create_stream("s", StreamConfig::new("text/plain".to_string()))
+        .create_stream(
+            "s",
+            crate::storage::StreamOptions::new("text/plain".to_string()),
+        )
         .unwrap();
     storage
         .append("s", Bytes::from("payload"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
     let shard_idx = storage.shard_index("s");
@@ -281,10 +298,14 @@ fn test_tampered_shard_file_fails_fast_on_startup() {
     let storage =
         AcidStorage::new(root.clone(), 16, 1024 * 1024, 100 * 1024, AcidBackend::File).unwrap();
     storage
-        .create_stream("s", StreamConfig::new("text/plain".to_string()))
+        .create_stream(
+            "s",
+            crate::storage::StreamOptions::new("text/plain".to_string()),
+        )
         .unwrap();
     storage
         .append("s", Bytes::from("payload"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     let shard_idx = storage.shard_index("s");
     drop(storage);
@@ -309,13 +330,15 @@ fn test_in_memory_backend_create_append_read() {
     )
     .expect("in-memory acid storage should initialize");
 
-    let cfg = StreamConfig::new("text/plain".to_string());
+    let cfg = crate::storage::StreamOptions::new("text/plain".to_string());
     storage.create_stream("s", cfg).unwrap();
     storage
         .append("s", Bytes::from("hello"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
     storage
         .append("s", Bytes::from("world"), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
     let read = storage.read("s", &Offset::start()).unwrap();
@@ -333,13 +356,16 @@ fn test_in_memory_backend_global_cap() {
     let storage = AcidStorage::new(test_storage_dir(), 4, 50, 50, AcidBackend::InMemory)
         .expect("in-memory acid storage should initialize");
 
-    let cfg = StreamConfig::new("text/plain".to_string());
+    let cfg = crate::storage::StreamOptions::new("text/plain".to_string());
     storage.create_stream("s", cfg).unwrap();
     storage
         .append("s", Bytes::from(vec![0_u8; 40]), "text/plain")
+        .map(|result| result.start_offset)
         .unwrap();
 
-    let result = storage.append("s", Bytes::from(vec![0_u8; 20]), "text/plain");
+    let result = storage
+        .append("s", Bytes::from(vec![0_u8; 20]), "text/plain")
+        .map(|result| result.start_offset);
     assert!(result.is_err());
     assert_eq!(storage.total_bytes(), 40);
 }
@@ -364,14 +390,15 @@ fn test_concurrent_reads_keep_messages_and_tail_in_one_snapshot() {
                 .unwrap(),
             );
             let config = if ttl {
-                StreamConfig::new("text/plain".into()).with_ttl(60)
+                crate::storage::StreamOptions::new("text/plain").with_ttl(60)
             } else {
-                StreamConfig::new("text/plain".into())
+                crate::storage::StreamOptions::new("text/plain")
             };
             if forked {
                 storage.create_stream("source", config.clone()).unwrap();
                 storage
                     .append("source", Bytes::from_static(b"s"), "text/plain")
+                    .map(|result| result.start_offset)
                     .unwrap();
                 storage
                     .create_fork("stream", "source", None, config)
@@ -379,6 +406,7 @@ fn test_concurrent_reads_keep_messages_and_tail_in_one_snapshot() {
                 // The source can keep growing, but its later data is not inherited.
                 storage
                     .append("source", Bytes::from_static(b"hidden"), "text/plain")
+                    .map(|result| result.start_offset)
                     .unwrap();
                 storage.delete("source").unwrap();
             } else {
@@ -392,6 +420,7 @@ fn test_concurrent_reads_keep_messages_and_tail_in_one_snapshot() {
                 for _ in 0..400 {
                     writer_storage
                         .append("stream", Bytes::from_static(b"x"), "text/plain")
+                        .map(|result| result.start_offset)
                         .unwrap();
                 }
                 writer_storage.close_stream("stream").unwrap();

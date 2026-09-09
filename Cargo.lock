@@ -529,6 +529,7 @@ dependencies = [
  "clap",
  "figment",
  "futures-util",
+ "http-body-util",
  "proptest",
  "public-api",
  "redb",
@@ -2204,6 +2205,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

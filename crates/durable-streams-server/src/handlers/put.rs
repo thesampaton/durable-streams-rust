@@ -8,17 +8,13 @@ use crate::protocol::offset::Offset;
 use crate::protocol::problem::{ProblemResponse, ProblemResult};
 use crate::protocol::stream_name::StreamName;
 use crate::router::StreamBasePath;
-use crate::storage::{
-    CreateStreamResult, CreateWithDataResult, ForkOptions, Storage, StreamConfig,
-};
+use crate::storage::{CreateStreamResult, CreateWithDataResult, ForkOptions, StreamOptions};
 use axum::{
     Extension,
-    body::Body,
     extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -33,85 +29,92 @@ use std::sync::Arc;
 /// Returns error if Content-Type is explicitly provided but empty,
 /// both TTL and Expires-At are provided, TTL format is invalid, or stream
 /// exists with different configuration.
-pub async fn create_stream<S: Storage>(
-    State(storage): State<Arc<S>>,
+pub async fn create_stream(
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Extension(StreamBasePath(stream_base_path)): Extension<StreamBasePath>,
     Extension(request_origin): Extension<ProxyTrustResult>,
-    headers: HeaderMap,
-    body: Body,
+    axum::Extension(crate::router::RequestBodyLimit(body_limit)): axum::Extension<
+        crate::router::RequestBodyLimit,
+    >,
+    request: axum::extract::Request,
 ) -> ProblemResult<Response> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     with_instance(original_uri, || async move {
-        let body_bytes = read_body(body).await?;
-        let normalized_ct = parse_content_type(&headers)?;
-        let created_closed = parse_stream_closed(&headers);
-        let config = build_config(&headers, normalized_ct.clone(), created_closed)?;
+        let body_bytes = read_body(body, body_limit).await?;
+        storage
+            .run("create", move |storage| {
+                let normalized_ct = parse_content_type(&headers)?;
+                let created_closed = parse_stream_closed(&headers);
+                let config = build_config(&headers, normalized_ct.clone(), created_closed)?;
 
-        let sub_offset = headers
-            .get(names::STREAM_FORK_SUB_OFFSET)
-            .map(|value| {
-                let raw = value.to_str().map_err(|_| Error::InvalidHeader {
-                    header: "Stream-Fork-Sub-Offset".into(),
-                    reason: "expected a non-negative integer".into(),
-                })?;
-                if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                let sub_offset = headers
+                    .get(names::STREAM_FORK_SUB_OFFSET)
+                    .map(|value| {
+                        let raw = value.to_str().map_err(|_| Error::InvalidHeader {
+                            header: "Stream-Fork-Sub-Offset".into(),
+                            reason: "expected a non-negative integer".into(),
+                        })?;
+                        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+                            return Err(Error::InvalidHeader {
+                                header: "Stream-Fork-Sub-Offset".into(),
+                                reason: "expected a non-negative integer".into(),
+                            });
+                        }
+                        raw.parse::<u64>().map_err(|_| Error::InvalidHeader {
+                            header: "Stream-Fork-Sub-Offset".into(),
+                            reason: "integer out of range".into(),
+                        })
+                    })
+                    .transpose()?;
+                if !headers.contains_key(names::STREAM_FORKED_FROM)
+                    && (sub_offset.is_some() || headers.contains_key(names::STREAM_FORK_OFFSET))
+                {
                     return Err(Error::InvalidHeader {
-                        header: "Stream-Fork-Sub-Offset".into(),
-                        reason: "expected a non-negative integer".into(),
-                    });
+                        header: "Stream-Forked-From".into(),
+                        reason: "required with fork offsets".into(),
+                    }
+                    .into());
                 }
-                raw.parse::<u64>().map_err(|_| Error::InvalidHeader {
-                    header: "Stream-Fork-Sub-Offset".into(),
-                    reason: "integer out of range".into(),
-                })
-            })
-            .transpose()?;
-        if !headers.contains_key(names::STREAM_FORKED_FROM)
-            && (sub_offset.is_some() || headers.contains_key(names::STREAM_FORK_OFFSET))
-        {
-            return Err(Error::InvalidHeader {
-                header: "Stream-Forked-From".into(),
-                reason: "required with fork offsets".into(),
-            }
-            .into());
-        }
-        let options = ForkOptions {
-            sub_offset: sub_offset.unwrap_or(0),
-            inherit_content_type: !headers.contains_key("content-type"),
-            initial_body: body_bytes.clone(),
-        };
-        let location = build_location_url(&request_origin, &stream_base_path, &name);
+                let options = ForkOptions {
+                    sub_offset: sub_offset.unwrap_or(0),
+                    inherit_content_type: !headers.contains_key("content-type"),
+                    initial_body: body_bytes.clone(),
+                };
+                let location = build_location_url(&request_origin, &stream_base_path, &name);
 
-        if let Some(forked_from) = headers
-            .get(names::STREAM_FORKED_FROM)
-            .and_then(|v| v.to_str().ok())
-        {
-            create_fork_stream(
-                &storage,
-                &name,
-                (
-                    forked_from,
-                    headers
-                        .get(names::STREAM_FORK_OFFSET)
-                        .and_then(|v| v.to_str().ok()),
-                ),
-                &stream_base_path,
-                config,
-                &location,
-                options,
-            )
-        } else {
-            create_standard_stream(
-                &storage,
-                &name,
-                body_bytes,
-                &normalized_ct,
-                config,
-                created_closed,
-                &location,
-            )
-        }
+                if let Some(forked_from) = headers
+                    .get(names::STREAM_FORKED_FROM)
+                    .and_then(|v| v.to_str().ok())
+                {
+                    create_fork_stream(
+                        storage,
+                        &name,
+                        (
+                            forked_from,
+                            headers
+                                .get(names::STREAM_FORK_OFFSET)
+                                .and_then(|v| v.to_str().ok()),
+                        ),
+                        &stream_base_path,
+                        config,
+                        &location,
+                        options,
+                    )
+                } else {
+                    create_standard_stream(
+                        storage,
+                        &name,
+                        body_bytes,
+                        &normalized_ct,
+                        config,
+                        &location,
+                    )
+                }
+            })
+            .await
     })
     .await
 }
@@ -140,7 +143,7 @@ fn build_config(
     headers: &HeaderMap,
     content_type: String,
     created_closed: bool,
-) -> ProblemResult<StreamConfig> {
+) -> ProblemResult<StreamOptions> {
     let ttl_seconds = match headers.get(names::STREAM_TTL).and_then(|v| v.to_str().ok()) {
         Some(value) => Some(headers::parse_ttl(value)?),
         None => None,
@@ -156,34 +159,32 @@ fn build_config(
         return Err(ProblemResponse::from(Error::ConflictingExpiration));
     }
 
-    let mut config = StreamConfig::new(content_type);
+    let mut config = crate::storage::StreamOptions::new(content_type);
     if let Some(ttl) = ttl_seconds {
-        let computed_expires =
-            Utc::now() + chrono::Duration::seconds(i64::try_from(ttl).unwrap_or(i64::MAX));
-        config = config.with_expires_at(computed_expires).with_ttl(ttl);
+        config = config.with_ttl(ttl);
     } else if let Some(expires) = expires_at {
         config = config.with_expires_at(expires);
     }
 
     if created_closed {
-        config = config.with_created_closed(true);
+        config = config.with_closed(true);
     }
 
     Ok(config)
 }
 
 /// Handle a fork-create request (Stream-Forked-From present).
-fn create_fork_stream<S: Storage>(
-    storage: &Arc<S>,
+fn create_fork_stream(
+    storage: &crate::streams::StreamService,
     name: &str,
     (forked_from, fork_offset_raw): (&str, Option<&str>),
     stream_base_path: &str,
-    config: StreamConfig,
+    config: StreamOptions,
     location: &str,
     options: ForkOptions,
 ) -> ProblemResult<Response> {
     let source_name = strip_stream_base_path(forked_from, stream_base_path);
-    if source_name.split('/').next() == Some("__ds") {
+    if crate::protocol::stream_name::is_reserved(&source_name) {
         return Err(Error::InvalidStreamName("reserved control namespace".into()).into());
     }
     let fork_offset = match fork_offset_raw {
@@ -205,13 +206,12 @@ fn create_fork_stream<S: Storage>(
 }
 
 /// Handle a standard (non-fork) create request.
-fn create_standard_stream<S: Storage>(
-    storage: &Arc<S>,
+fn create_standard_stream(
+    storage: &crate::streams::StreamService,
     name: &str,
     body: bytes::Bytes,
     normalized_ct: &str,
-    config: StreamConfig,
-    created_closed: bool,
+    config: StreamOptions,
     location: &str,
 ) -> ProblemResult<Response> {
     // Parse body into messages BEFORE creating the stream so that failures
@@ -223,7 +223,7 @@ fn create_standard_stream<S: Storage>(
         next_offset,
         closed,
     } = storage
-        .create_stream_with_data(name, config, messages, created_closed)
+        .create(name, config, messages)
         .map_err(ProblemResponse::from)?;
 
     Ok(StreamResponse::new(created_status(create_status))

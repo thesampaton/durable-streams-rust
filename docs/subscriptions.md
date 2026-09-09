@@ -103,8 +103,8 @@ metadata reports `status: failed` while a retry is scheduled.
 
 ## Persistence and operation
 
-The memory backend keeps control state in memory. File backends atomically
-replace and fsync `subscriptions.json` alongside their stream directories; on
+The memory backend keeps control state in memory. The file backend atomically
+replaces and fsyncs `subscriptions.json` alongside their stream directories; on
 Unix it is created with mode 0600. ACID backends use a separate redb table in
 shard zero with immediate durability. ACID in-memory mode is ephemeral. Stored
 state includes signing keys, normalized configuration hashes, membership,
@@ -116,15 +116,17 @@ control state or signing keys.
 
 A background worker reconciles stream tails every 100 ms, without renewing stream
 TTLs, and runs up to 16 webhook deliveries concurrently. It resumes persisted
-subscriptions on startup and stops on the router's shutdown token. Wake delivery
+subscriptions on startup and stops when the server is cancelled. Wake delivery
 is at least once: a crash after a wake-stream append but before recording delivery
 may repeat that generation. Claims and generation fencing prevent duplicate
 workers from holding its lease. Callbacks should tolerate repeated delivery.
 
-Use one router/service per storage instance. Embedded custom `Storage` backends
-must implement the new subscription snapshot methods and their durability
-contract. Applications using the router should construct it within a Tokio
-runtime and pass a shutdown token for orderly worker shutdown.
+Use one `Server` owner per storage instance; cloned running handles and routers
+share its worker and state. Construct the server before or inside Tokio, then
+call `start` inside the runtime and await `RunningServer::shutdown` when stopping.
+Custom `Storage` backends must implement subscription snapshot persistence. See
+the [embedding guide](../crates/durable-streams-server/README.md#embedding) for
+listener ownership and shutdown.
 
 As with this server's stream and admin surfaces, subscription management and
 claim authentication belong to the embedding application or trusted reverse

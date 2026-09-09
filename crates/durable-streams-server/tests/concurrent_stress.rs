@@ -1,3 +1,10 @@
+//! Integration coverage for concurrent stress.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 //! Concurrent-access stress tests that exercise race conditions across
 //! all storage backends.
 //!
@@ -11,13 +18,13 @@ use bytes::Bytes;
 use common::{create_test_storage, create_test_storage_with_limits};
 use durable_streams_server::protocol::error::Error;
 use durable_streams_server::protocol::offset::Offset;
-use durable_streams_server::storage::{CreateStreamResult, Storage, StreamConfig};
+use durable_streams_server::storage::{CreateStreamResult, Storage, StreamOptions};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-fn plain_config() -> StreamConfig {
-    StreamConfig::new("text/plain".to_string())
+fn plain_config() -> StreamOptions {
+    StreamOptions::new("text/plain".to_string())
 }
 
 storage_backend_tests! {
@@ -44,7 +51,7 @@ storage_backend_tests! {
                 b.wait();
                 for i in 0..100u32 {
                     let data = format!("w{writer_id}-m{i}");
-                    s.append("s", Bytes::from(data), "text/plain").unwrap();
+                    s.append("s", Bytes::from(data), "text/plain").map(|result| result.start_offset).unwrap();
                 }
             }));
         }
@@ -111,7 +118,7 @@ storage_backend_tests! {
         for i in 0..50 {
             let data = format!("msg-{i}");
             storage
-                .append("s", Bytes::from(data.clone()), "text/plain")
+                .append("s", Bytes::from(data.clone()), "text/plain").map(|result| result.start_offset)
                 .unwrap();
 
             // Immediately read back -- the just-appended message must be visible
@@ -192,7 +199,7 @@ storage_backend_tests! {
         storage.create_stream("s", plain_config()).unwrap();
         for i in 0..100 {
             storage
-                .append("s", Bytes::from(format!("msg-{i}")), "text/plain")
+                .append("s", Bytes::from(format!("msg-{i}")), "text/plain").map(|result| result.start_offset)
                 .unwrap();
         }
 
@@ -244,7 +251,7 @@ storage_backend_tests! {
         }
 
         // Stream should be gone
-        assert!(!storage.exists("s"));
+        assert!(!storage.exists("s").unwrap());
     }
 
     // ---------------------------------------------------------------------------
@@ -258,10 +265,10 @@ storage_backend_tests! {
 
         storage.create_stream("s", plain_config()).unwrap();
         storage
-            .append("s", Bytes::from("data"), "text/plain")
+            .append("s", Bytes::from("data"), "text/plain").map(|result| result.start_offset)
             .unwrap();
 
-        let rx = storage.subscribe("s");
+        let rx = storage.subscribe("s").unwrap();
         assert!(rx.is_some());
         let mut rx = rx.unwrap();
 
@@ -286,7 +293,7 @@ storage_backend_tests! {
         storage.create_stream("s", plain_config()).unwrap();
 
         // Subscribe but never read from the receiver
-        let rx = storage.subscribe("s");
+        let rx = storage.subscribe("s").unwrap();
         assert!(rx.is_some());
         let mut rx = rx.unwrap();
 
@@ -294,7 +301,7 @@ storage_backend_tests! {
         // This should NOT deadlock or panic
         for i in 0..30 {
             storage
-                .append("s", Bytes::from(format!("msg-{i}")), "text/plain")
+                .append("s", Bytes::from(format!("msg-{i}")), "text/plain").map(|result| result.start_offset)
                 .unwrap();
         }
 
@@ -338,7 +345,7 @@ storage_backend_tests! {
                 let mut offsets = Vec::new();
                 for i in 0..50 {
                     let data = format!("t{thread_id}-{i}");
-                    let offset = s.append("s", Bytes::from(data), "text/plain").unwrap();
+                    let offset = s.append("s", Bytes::from(data), "text/plain").map(|result| result.start_offset).unwrap();
                     offsets.push(offset);
                 }
                 offsets
@@ -381,7 +388,7 @@ storage_backend_tests! {
             threads.push(thread::spawn(move || {
                 b.wait();
                 for _ in 0..50 {
-                    s.append("s", m.clone(), "text/plain").unwrap();
+                    s.append("s", m.clone(), "text/plain").map(|result| result.start_offset).unwrap();
                 }
             }));
         }
@@ -417,7 +424,7 @@ storage_backend_tests! {
                 for i in 0..50 {
                     let name = format!("s-{creator_id}-{i}");
                     let _ = s.create_stream(&name, plain_config());
-                    let _ = s.append(&name, Bytes::from("data"), "text/plain");
+                    let _ = s.append(&name, Bytes::from("data"), "text/plain").map(|result| result.start_offset);
                 }
             }));
         }
@@ -454,7 +461,7 @@ storage_backend_tests! {
         storage.create_stream("s", plain_config()).unwrap();
         for i in 0..100 {
             storage
-                .append("s", Bytes::from(format!("msg-{i}")), "text/plain")
+                .append("s", Bytes::from(format!("msg-{i}")), "text/plain").map(|result| result.start_offset)
                 .unwrap();
         }
 

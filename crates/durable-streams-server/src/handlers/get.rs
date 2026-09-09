@@ -7,7 +7,7 @@ use crate::protocol::problem::ProblemResult;
 use crate::protocol::sse::{self, ControlPayload};
 use crate::protocol::stream_name::StreamName;
 use crate::router::ReadStreamConfig;
-use crate::storage::{ReadResult, Storage};
+use crate::storage::ReadResult;
 use axum::{
     Extension,
     body::Body,
@@ -48,8 +48,8 @@ pub struct ReadQuery {
 ///
 /// Returns error if stream doesn't exist, offset is invalid,
 /// or storage operation fails.
-pub async fn read_stream<S: Storage + 'static>(
-    State(storage): State<Arc<S>>,
+pub async fn read_stream(
+    State(storage): State<Arc<crate::execution::AsyncStreams>>,
     StreamName(name): StreamName,
     original_uri: OriginalUri,
     Query(query): Query<ReadQuery>,
@@ -64,20 +64,23 @@ pub async fn read_stream<S: Storage + 'static>(
     with_instance(original_uri, || async move {
         let raw_offset = resolve_offset(&query)?;
         let offset = Offset::from_str(&raw_offset)?;
-        let metadata = storage.head(&name)?;
+        let metadata = storage.head(&name).await?;
         let content_type = metadata.config.content_type.clone();
 
         let if_none_match = headers.get("if-none-match").and_then(|v| v.to_str().ok());
 
         match query.live.as_deref() {
-            None => read_catch_up(
-                &storage,
-                &name,
-                &offset,
-                &raw_offset,
-                if_none_match,
-                &content_type,
-            ),
+            None => {
+                read_catch_up(
+                    &storage,
+                    &name,
+                    &offset,
+                    &raw_offset,
+                    if_none_match,
+                    &content_type,
+                )
+                .await
+            }
             Some("long-poll") => {
                 read_long_poll(
                     &storage,
@@ -93,14 +96,17 @@ pub async fn read_stream<S: Storage + 'static>(
                 )
                 .await
             }
-            Some("sse") => read_sse(
-                storage,
-                name,
-                &offset,
-                &content_type,
-                reconnect_interval_secs,
-                shutdown,
-            ),
+            Some("sse") => {
+                read_sse(
+                    storage,
+                    name,
+                    &offset,
+                    &content_type,
+                    reconnect_interval_secs,
+                    shutdown,
+                )
+                .await
+            }
             Some(other) => Err(Error::InvalidHeader {
                 header: "live".to_string(),
                 reason: format!("unsupported live mode: {other}"),
@@ -132,15 +138,15 @@ fn resolve_offset(query: &ReadQuery) -> ProblemResult<String> {
 }
 
 /// Catch-up mode: immediate read of all available data.
-fn read_catch_up<S: Storage>(
-    storage: &Arc<S>,
+async fn read_catch_up(
+    storage: &Arc<crate::execution::AsyncStreams>,
     name: &str,
     offset: &Offset,
     raw_offset: &str,
     if_none_match: Option<&str>,
     content_type: &str,
 ) -> ProblemResult<Response> {
-    let read_result = storage.read(name, offset)?;
+    let read_result = storage.read(name, offset).await?;
     let (etag, not_modified) = compute_etag(&read_result, raw_offset, if_none_match);
     if let Some(response) = not_modified {
         return Ok(response);
@@ -157,8 +163,8 @@ struct ReadContext<'a> {
 }
 
 /// Long-poll mode: wait for new data at tail, return immediately if data exists.
-async fn read_long_poll<S: Storage>(
-    storage: &Arc<S>,
+async fn read_long_poll(
+    storage: &Arc<crate::execution::AsyncStreams>,
     ctx: &ReadContext<'_>,
     timeout: Duration,
     shutdown: CancellationToken,
@@ -171,11 +177,7 @@ async fn read_long_poll<S: Storage>(
         content_type,
     } = *ctx;
     // Subscribe BEFORE read to avoid missing notifications between read and subscribe
-    let mut receiver = storage
-        .subscribe(name)
-        .ok_or_else(|| Error::NotFound(name.to_string()))?;
-
-    let read_result = storage.read(name, offset)?;
+    let (mut receiver, read_result) = storage.subscribe_and_read(name, offset).await?;
 
     let (etag, not_modified) = compute_etag(&read_result, raw_offset, if_none_match);
     if let Some(response) = not_modified {
@@ -206,17 +208,14 @@ async fn read_long_poll<S: Storage>(
 
     tokio::select! {
         _ = receiver.recv() => {
-            handle_long_poll_wake(storage, name, &tail_offset, &tail_offset_str, content_type)
+            handle_long_poll_wake(storage, name, &tail_offset, &tail_offset_str, content_type).await
         }
         () = tokio::time::sleep(timeout) => {
-            let read_result = storage.read(name, &tail_offset)?;
-            let is_closed = read_result.closed && read_result.at_tail;
-            Ok(build_204_response(&read_result.next_offset, is_closed))
+            handle_long_poll_wake(storage, name, &tail_offset, &tail_offset_str, content_type).await
         }
         () = shutdown.cancelled() => {
-            let read_result = storage.read(name, &tail_offset)?;
-            let is_closed = read_result.closed && read_result.at_tail;
-            Ok(build_204_response(&read_result.next_offset, is_closed))
+            // Keep the last empty snapshot: new data must not be skipped by a 204.
+            Ok(build_204_response(&tail_offset, false))
         }
     }
 }
@@ -225,10 +224,10 @@ async fn read_long_poll<S: Storage>(
 ///
 /// Validates preconditions (stream existence, offset) eagerly before
 /// starting the stream. Uses raw byte streaming for full control over
-/// the SSE wire format. Once streaming begins, errors are silently
-/// dropped (SSE has no error frame).
-fn read_sse<S: Storage + 'static>(
-    storage: Arc<S>,
+/// the SSE wire format. Once streaming begins, a failed reread ends the body
+/// without advancing its offset; the execution boundary records the failure.
+async fn read_sse(
+    storage: Arc<crate::execution::AsyncStreams>,
     name: String,
     offset: &Offset,
     content_type: &str,
@@ -240,11 +239,7 @@ fn read_sse<S: Storage + 'static>(
         is_json: json_mode::is_json_content_type(content_type),
     };
 
-    let receiver = storage
-        .subscribe(&name)
-        .ok_or_else(|| Error::NotFound(name.clone()))?;
-
-    let read_result = storage.read(&name, offset)?;
+    let (receiver, read_result) = storage.subscribe_and_read(&name, offset).await?;
 
     let byte_stream = build_sse_byte_stream(
         storage,
@@ -312,8 +307,8 @@ fn encode_read_as_sse_frames(read_result: &ReadResult, encoding: SseEncoding) ->
 /// Build a byte stream that yields raw SSE frame strings.
 ///
 /// Manages keep-alive, idle timeout, and the subscribe-before-read pattern.
-fn build_sse_byte_stream<S: Storage + 'static>(
-    storage: Arc<S>,
+fn build_sse_byte_stream(
+    storage: Arc<crate::execution::AsyncStreams>,
     name: String,
     initial_read: ReadResult,
     mut receiver: tokio::sync::broadcast::Receiver<()>,
@@ -354,7 +349,7 @@ fn build_sse_byte_stream<S: Storage + 'static>(
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             // Channel closed — final read + emit + end
-                            if let Ok(rr) = storage.read(&name, &tail_offset) {
+                            if let Ok(rr) = storage.read(&name, &tail_offset).await {
                                 for frame in encode_read_as_sse_frames(&rr, encoding) {
                                     yield Ok(frame);
                                 }
@@ -382,7 +377,7 @@ fn build_sse_byte_stream<S: Storage + 'static>(
             }
 
             // Re-read from tail position
-            let Ok(rr) = storage.read(&name, &tail_offset) else {
+            let Ok(rr) = storage.read(&name, &tail_offset).await else {
                 return;
             };
 
@@ -429,14 +424,14 @@ fn build_sse_control(read_result: &ReadResult) -> ControlPayload {
 /// Handle wake-up from broadcast in long-poll mode.
 ///
 /// Re-reads from storage to get the actual data that triggered the notification.
-fn handle_long_poll_wake<S: Storage>(
-    storage: &Arc<S>,
+async fn handle_long_poll_wake(
+    storage: &Arc<crate::execution::AsyncStreams>,
     name: &str,
     offset: &Offset,
     raw_offset: &str,
     content_type: &str,
 ) -> ProblemResult<Response> {
-    let read_result = storage.read(name, offset)?;
+    let read_result = storage.read(name, offset).await?;
 
     if read_result.messages.is_empty() {
         // Woke up but no data (e.g., stream was closed)

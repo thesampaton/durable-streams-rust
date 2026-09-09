@@ -96,6 +96,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
 
+  server-public-api:
+    name: server public API snapshot (nightly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read API snapshot toolchain
+        id: api-toolchain
+        run: echo "toolchain=$(cat crates/durable-streams-server/tests/public-api-toolchain.txt)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.api-toolchain.outputs.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-server-public-api.sh
+
   server-conformance:
     name: server conformance (memory backend)
     runs-on: ubuntu-latest
@@ -115,7 +129,7 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [fmt, clippy, check, test, doc, server-conformance]
+    needs: [fmt, clippy, check, test, doc, server-public-api, server-conformance]
     runs-on: ubuntu-latest
     steps:
       - name: Verify all required jobs succeeded

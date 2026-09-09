@@ -2,9 +2,8 @@ use super::model::{Configuration, Database, DeliveryType, Link, Subscription};
 use super::{
     ApiError, ApiResult, Completion, Service, crypto, delivery, issue_wake, model, pending, refresh,
 };
-use crate::{
-    middleware::proxy_trust::ProxyTrustResult, protocol::offset::Offset, storage::Storage,
-};
+use crate::execution::JobError;
+use crate::{middleware::proxy_trust::ProxyTrustResult, protocol::offset::Offset};
 use axum::{
     Extension, Json,
     body::Bytes,
@@ -105,18 +104,43 @@ fn complete(sub: &mut Subscription, context: CompletionContext<'_>) -> ApiResult
     }
 }
 
-pub(super) async fn control<S: Storage + 'static>(
-    State(service): State<Arc<Service<S>>>,
+pub(super) async fn control(
+    State(service): State<Arc<Service>>,
     Path(control): Path<String>,
     Extension(origin): Extension<ProxyTrustResult>,
     method: Method,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let mut configuration = validated_configuration(&method, &body, service.allow_local).await?;
-    let mut guard = service.database.lock().await;
-    service.load(&mut guard)?;
-    let mut db = guard.as_ref().expect("database loaded").clone();
+    let configuration = validated_configuration(&method, &body, service.allow_local).await?;
+    let execution = service.execution.clone();
+    execution
+        .run("subscription control", move || {
+            control_transaction(
+                &service,
+                &control,
+                &origin,
+                method,
+                &headers,
+                &body,
+                configuration,
+            )
+        })
+        .await
+        .map_err(ApiError::from_execution)?
+}
+
+fn control_transaction(
+    service: &Service,
+    control: &str,
+    origin: &ProxyTrustResult,
+    method: Method,
+    headers: &HeaderMap,
+    body: &Bytes,
+    mut configuration: Option<Configuration>,
+) -> ApiResult<Response> {
+    let mut guard = service.lock_database();
+    let mut db = guard.clone();
     let jwk = crypto::jwk(&db.signing_key)?;
     if control == "jwks.json" && method == Method::GET {
         return Ok((
@@ -148,11 +172,11 @@ pub(super) async fn control<S: Storage + 'static>(
     refresh(&mut db, &tails, now);
     let response = if method == Method::PUT && action.is_empty() {
         create_subscription(
-            &service,
+            service,
             &mut db,
             id,
             configuration.take().expect("PUT configuration parsed"),
-            &origin,
+            origin,
             &tails,
         )?
     } else {
@@ -173,7 +197,7 @@ pub(super) async fn control<S: Storage + 'static>(
                 sub.wake = None;
                 StatusCode::NO_CONTENT.into_response()
             }
-            (Method::POST, "streams") => add_streams(sub, &body, &tails)?,
+            (Method::POST, "streams") => add_streams(sub, body, &tails)?,
             (Method::DELETE, path) if path.starts_with("streams/") => {
                 let path = &path[8..];
                 model::validate_path(path)?;
@@ -187,15 +211,15 @@ pub(super) async fn control<S: Storage + 'static>(
                 StatusCode::NO_CONTENT.into_response()
             }
             (Method::POST, "claim") if sub.config.kind == DeliveryType::PullWake => {
-                claim_subscription(sub, id, &db.signing_key, &body, &tails, now)?
+                claim_subscription(sub, id, &db.signing_key, body, &tails, now)?
             }
             (Method::POST, "callback" | "ack" | "release") => complete(
                 sub,
                 CompletionContext {
                     id,
                     key: &db.signing_key,
-                    headers: &headers,
-                    body: &body,
+                    headers,
+                    body,
                     action,
                     tails: &tails,
                     now,
@@ -292,8 +316,8 @@ fn add_streams(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-fn create_subscription<S: Storage>(
-    service: &Service<S>,
+fn create_subscription(
+    service: &Service,
     db: &mut Database,
     id: &str,
     config: Configuration,

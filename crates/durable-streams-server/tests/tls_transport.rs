@@ -1,10 +1,16 @@
+//! Integration coverage for tls transport.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use axum_server::{Handle, tls_rustls::RustlsConfig};
 use common::{test_client, unique_stream_name};
 use durable_streams_server::{
     config::{AlpnProtocol, Config, ConfigValidationError, HttpVersion, TlsVersion, TransportMode},
-    router,
     startup::build_tls_server_config,
     storage::memory::InMemoryStorage,
 };
@@ -86,11 +92,15 @@ async fn spawn_mtls_server() -> u16 {
 /// Common server spawner that uses `build_tls_server_config` from startup module.
 async fn spawn_server_with_tls_config(config: Config) -> u16 {
     let storage = Arc::new(InMemoryStorage::new(100 * 1024 * 1024, 10 * 1024 * 1024));
-    let app = router::build_router(
-        storage,
+    let app = durable_streams_server::Server::new(
+        durable_streams_server::StreamService::new(storage),
         &config,
         durable_streams_server::RouterOptions::default(),
-    );
+    )
+    .expect("server initialization")
+    .start()
+    .expect("server startup")
+    .router();
 
     let server_config =
         build_tls_server_config(&config).expect("failed to build TLS server config");

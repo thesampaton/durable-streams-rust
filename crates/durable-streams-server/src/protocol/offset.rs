@@ -1,3 +1,5 @@
+//! Server offset representation, ordering, parsing, and serialization.
+
 use crate::protocol::error::{Error, Result};
 use std::cmp::Ordering;
 use std::fmt;
@@ -10,11 +12,17 @@ use std::str::FromStr;
 /// Sentinels: `-1` (stream start), `now` (tail/live).
 #[derive(Debug, Clone)]
 pub enum Offset {
+    /// Beginning-of-stream request sentinel (`-1`).
     Start,
+    /// Current-tail request sentinel (`now`).
     Now,
+    /// Concrete server position; prefer [`Offset::new`] or parsing to keep fields consistent.
     Concrete {
+        /// Monotonic message position.
         read_seq: u64,
+        /// Cumulative byte position.
         byte_offset: u64,
+        /// Canonical ASCII encoding of the two components, separated by an underscore.
         raw: [u8; 33],
     },
 }

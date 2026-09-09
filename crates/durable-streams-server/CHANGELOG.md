@@ -9,12 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
-- Consolidate router construction into `build_router(storage, config, options)`.
-  Pass `RouterOptions::default()` for the former two-argument convenience API.
-  Replace `build_router_with_ready` with `RouterOptions::with_readiness` and
-  `RouterOptions::with_shutdown`. Readiness and shutdown remain independent.
+- Consolidate `file-fast` and `file-durable` into `file` (`StorageMode::File`).
+  Remove their aliases, `StorageMode::sync_on_append()`, and the boolean argument
+  to `FileStorage::new`. Existing data directories need no conversion. Initial
+  data remains synced; appends/replacements sync at the journal commit boundary.
+- Replace router builders with `Server::new(StreamService, config, options)` and
+  explicit `start()`. Construction is fallible, supports `Arc<dyn Storage>`, and
+  validates HTTP settings before mounting. Cloned running handles/route groups
+  share control state and one worker; shutdown can await completion.
+- Move HTTP stream operations through `StreamService`. Add composable protocol,
+  admin, and probe routers for middleware placement.
+- Separate creation inputs (`StreamOptions`, `Expiry`) from resolved
+  `StreamConfig` metadata. TTL/deadline resolution belongs to storage.
+- Replace `batch_append` with atomic `append_batch`, including optional closure.
+  Both `append` and `append_batch` return named starting/resume offsets and
+  closed state. `exists` and `subscribe` now propagate backend errors.
+- Require extended forks, replacement, and subscription persistence in the
+  storage contract. Make extensible configuration, error, and output types
+  non-exhaustive; add output constructors for backend implementations.
+- Remove unused `ShutdownToken`, `LongPollTimeout`, `SseReconnectInterval`, and
+  the compatibility `storage::StreamMetadata` path. See `streams::StreamMetadata`.
+- Import replacement commits atomically per independent root stream, requires
+  staging capacity, and rejects fork lineage. Later failures carry completed
+  counts in `TransferError::PartialImport`.
 
 ### Added
+
+- Bound server-owned synchronous storage work with `limits.max_storage_jobs`
+  (default 64), shared across HTTP routes and subscription persistence. Accepted
+  jobs retain capacity and storage ownership after disconnect; shutdown drains
+  them while the serving runtime remains alive. Saturation returns 503 with
+  `Retry-After: 1`; idle live reads and webhook HTTP remain async.
 
 - Durable subscription APIs with normalized configuration identity, glob and
   explicit membership, signed Ed25519 webhooks and JWKS discovery, pull-wake
@@ -28,6 +53,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ACID creation and replacement retain nonempty batches of zero-byte records,
+  advancing record sequence offsets consistently with append and the other backends.
+- Memory fork reads retain the requested local payload, tail offset, and closed
+  state from one snapshot when another writer appends after the lock is released.
+- Long-poll timeout rereads return newly available data instead of advancing an
+  empty response past it. Shutdown preserves the last empty snapshot's offset.
+- Keep completed webhook results bounded and pending through storage saturation.
+  Drain storage even after subscription-worker or listener failure.
+
+- Ordinary final append and closure share one storage commit and resume snapshot.
+  File operations use an undo journal to recover interrupted log/metadata updates
+  and preserve ordinary append timestamps on reopen. Journal commits sync the
+  log, metadata, and directory.
+- Validate all import payloads before mutation and preserve originals on pre-commit
+  replacement failure. Recovery resolves uncertain final-sync outcomes.
+- Initialize direct-Rust TTL streams and reject unrepresentable TTL/deadline arithmetic.
+- Limit collected request bodies with `limits.max_request_body_bytes` (default
+  10 MiB), including chunked bodies, and return 413 before storage mutation.
+- Reject empty JSON arrays in POST even when a close header is present.
 - SSE pairs every data event with a control event and a corresponding offset.
 - Chained fork reads respect all ancestor bounds and the requested read offset.
 - File recovery restores fork-relative offsets and preserves expired ancestors
@@ -35,6 +79,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Share storage convenience defaults, append validation, byte accounting, fork
+  read planning, and backend-local ACID record insertion. Existing storage
+  implementations can retain `close_stream` and `create_fork` overrides.
+- Load environment settings through the same configuration patch merger as TOML,
+  preserving precedence and legacy aliases. Subscription services now hold
+  initialized state directly; shared private parsers serve validation and use.
 - Track protocol revision `a172acc389351cb3db6deb5cd60e3dec11e7ff39` and server
   conformance `0.3.6`, with subscription coverage enabled.
 - The reserved `__ds` namespace is unavailable for application streams.

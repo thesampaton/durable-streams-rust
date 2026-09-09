@@ -1,3 +1,10 @@
+//! Integration coverage for producer sequencing.
+
+#![allow(
+    clippy::unwrap_used,
+    reason = "test setup and assertions fail the test on error"
+)]
+
 mod common;
 
 use common::{read_problem, spawn_test_server, test_client, unique_stream_name};

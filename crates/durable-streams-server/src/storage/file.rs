@@ -1,8 +1,7 @@
 //! Local-filesystem storage built from one append-only log per stream.
 //!
 //! [`FileStorage`] is the implementation behind the config-level
-//! [`crate::config::StorageMode::FileFast`] and
-//! [`crate::config::StorageMode::FileDurable`] modes. Both use the same simple
+//! [`crate::config::StorageMode::File`] mode. It uses a simple
 //! layout on disk:
 //!
 //! - one directory per stream under the configured storage root
@@ -13,18 +12,12 @@
 //! remain fast while the on-disk format stays straightforward to inspect and
 //! recover.
 //!
-//! # `FileFast` vs `FileDurable`
+//! # Durability
 //!
-//! The two file modes differ only in how aggressively writes are forced to
-//! stable storage:
-//!
-//! - `file-fast` skips `fsync`/`fdatasync` on each append and favors throughput
-//!   and lower tail latency
-//! - `file-durable` performs a sync on each append and favors simpler
-//!   crash-recovery expectations at the cost of write latency
-//!
-//! In both cases the backend is still "plain files plus an in-memory index";
-//! the difference is durability policy, not data model or on-disk shape.
+//! Append/replacement commits sync the undo journal, log, metadata, and
+//! directory. Creation and forks sync their initial log data before writing
+//! metadata. This is not a fully transactional filesystem: creation/deletion
+//! and commit-acknowledgement failures have separate recovery boundaries.
 //!
 //! # When To Use This Backend
 //!
@@ -47,6 +40,7 @@ mod filesys;
 mod reads;
 mod recovery;
 mod storage_impl;
+mod transaction;
 mod writes;
 
 #[cfg(test)]
@@ -54,9 +48,9 @@ mod tests;
 
 use super::{
     CreateStreamResult, CreateWithDataResult, ForkInfo, NOTIFY_CHANNEL_CAPACITY,
-    ProducerAppendResult, ProducerState, ReadResult, Storage, StreamConfig, StreamMetadata,
-    StreamState,
+    ProducerAppendResult, ProducerState, ReadResult, StreamConfig, StreamMetadata, StreamState,
 };
+use crate::Storage;
 use crate::protocol::error::{Error, Result};
 use crate::protocol::offset::Offset;
 use chrono::{DateTime, Utc};
@@ -101,6 +95,7 @@ struct StreamMeta {
 }
 
 struct StreamEntry {
+    unavailable: bool,
     config: StreamConfig,
     index: Vec<MessageIndex>,
     closed: bool,
@@ -121,6 +116,17 @@ struct StreamEntry {
 }
 
 impl StreamEntry {
+    fn ensure_available(&self) -> Result<()> {
+        if self.unavailable {
+            return Err(Error::storage_unavailable(
+                "file",
+                "access stream",
+                "previous commit or rollback failed; reopen storage to recover",
+            ));
+        }
+        Ok(())
+    }
+
     fn metadata(&self) -> super::StreamMetadata {
         super::build_stream_metadata(
             self.config.clone(),
@@ -137,6 +143,7 @@ impl StreamEntry {
         let (notify, _) = broadcast::channel(NOTIFY_CHANNEL_CAPACITY);
         let file_len = file.metadata().map_or(0, |m| m.len());
         Self {
+            unavailable: false,
             config,
             index: Vec::with_capacity(INITIAL_INDEX_CAPACITY),
             closed: false,
@@ -158,7 +165,7 @@ impl StreamEntry {
     }
 }
 
-/// High-throughput file-backed storage.
+/// File-backed storage with per-stream logs and journaled append commits.
 ///
 /// Design:
 /// - One append-only log file per stream (`data.log`)
@@ -166,9 +173,8 @@ impl StreamEntry {
 /// - Stream-level write lock serializes appends and preserves monotonic offsets
 /// - Batched write per append call reduces syscall overhead
 ///
-/// `sync_on_append = false` prioritizes throughput and may lose recently
-/// appended data on crash. `sync_on_append = true` trades latency for stronger
-/// durability semantics.
+/// Initial data and journaled append/replacement commits are synced before
+/// returning; see the module durability notes for recovery limits.
 #[allow(clippy::module_name_repetitions)]
 pub struct FileStorage {
     streams: RwLock<HashMap<String, Arc<RwLock<StreamEntry>>>>,
@@ -177,7 +183,6 @@ pub struct FileStorage {
     max_stream_bytes: u64,
     root_dir: PathBuf,
     root_dir_canonical: PathBuf,
-    sync_on_append: bool,
 }
 
 impl FileStorage {
@@ -194,7 +199,6 @@ impl FileStorage {
         root_dir: impl Into<PathBuf>,
         max_total_bytes: u64,
         max_stream_bytes: u64,
-        sync_on_append: bool,
     ) -> Result<Self> {
         let root_dir = root_dir.into();
         retry_on_eintr(|| fs::create_dir_all(&root_dir)).map_err(|e| {
@@ -223,7 +227,6 @@ impl FileStorage {
             max_stream_bytes,
             root_dir,
             root_dir_canonical,
-            sync_on_append,
         };
         storage.load_existing_streams()?;
         Ok(storage)
